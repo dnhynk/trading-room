@@ -606,7 +606,7 @@ class Strategy:
             if derisk and sellable <= 0:                                                # only the core left: cut part of it near breakeven ...
                 sellable = core * p["derisk_core_frac"]
                 if core - sellable <= unit * (1 - p["derisk_core_frac"]) ** 2 + 1e-9: sellable = core   # ... half, then the rest: a remainder no bigger than what two cuts leave (a quarter unit) goes whole, never a dust tail
-            if self.pull and qty <= self.pull["target"] + 1e-9: self.pull = None            # sold what the pull asked for
+            if self.pull and qty <= self.pull["target"] + qs / 2: self.pull = None          # sold what the pull asked for (within half an exchange step)
             elif self.pull and qty > self.last_qty + 1e-9: ev.append(("PULL_DROP", dict(why="add", dev_lot=round(dev_lot, 2)))); self.pull = None   # a lot bought meanwhile is not the pull's to sell (its target is absolute): the next stall judges the new LIFO lot
             if trim_sig in names and not self.pull and dev_lot < gate and p["gate_relax"] > 0:   # a stall the lot could not use: relax its gate
                 self.fail_n += 1; ev.append(("GATE_RELAX", dict(fails=self.fail_n, gate=round(floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n, 3), dev_lot=round(dev_lot, 2))))
@@ -615,8 +615,10 @@ class Strategy:
             elif s * (mid - self.peak) > 0: self.peak = mid
             retrace_top = (p["trim_retrace_atr"] > 0 and atr and s * (self.peak / ref - 1) * 100 >= g_rel
                            and s * (self.peak - mid) >= p["trim_retrace_atr"] * atr and dev_lot >= gate)
-            if (trim_sig in names or retrace_top) and dev_lot >= gate and not self.pull and sellable > 0:
+            if (trim_sig in names or retrace_top) and dev_lot >= gate and not self.pull and sellable >= qs - 1e-9:
                 sell = sellable if dev >= p["full_exit_pct"] else min(lot_qty, sellable)
+                sell = min(qty, round(round(sell / qs) * qs, 9))                                  # whole exchange steps: a half of 76.1 is 38.0, never 38.05 (live 21:37: the 0.05 remainder was rejected every 5s and the zombie pull blocked every later trim)
+                if sell < qs - 1e-9: sell = 0.0
                 self.pull = dict(t=t, qty=sell, target=qty - sell, gate=gate, ref=ref, px0=touch_out)
                 ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=ref, qty=sell, all=sell >= qty - 1e-9, px=touch_out,
                                              mode="derisk" if derisk else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),

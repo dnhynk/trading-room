@@ -216,6 +216,7 @@ class Book:
             if want is not None and role == "trim" and want[2] == "taker":
                 if w: await self.cancel(role); w = self.work[role]
                 if w or self.market_pending: continue            # the maker order rests until its cancel is confirmed, and a market order with a lost response is settled first
+                if want[1] < self.cy.qstep - 1e-9: continue                               # below one exchange step: nothing the exchange can fill (the Strategy quantises pulls; this is the backstop)
                 if time.time() - self.taker_t >= 5: await self.taker(want[1])
                 continue
             if w and want is not None and abs(want[0] - w["px"]) < self.cy.px_tick / 2 and abs(want[1] - (w["qty"] - w["filled"])) < self.cy.qstep / 2: continue

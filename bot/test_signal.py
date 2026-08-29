@@ -163,6 +163,15 @@ class DeriskQuantity(unittest.TestCase):
         r = st.step(F(t=105, mid=2.98, bid=2.979, ask=2.981), [dict(sig="POP_STALLING")], pos); self.assertEqual(r["trim"][1], 35)   # the remaining half-unit goes whole, not 17.5
 
 class PullScope(unittest.TestCase):
+    def test_pull_quantity_is_whole_exchange_steps_and_completes_within_half_a_step(self):
+        st = Strategy(dict(side="long", unit_qty=76.1, step_add_atr=0, qstep=0.1)); pos = dict(lots=[[76.1, 2.713, "a"]], avg=2.713, last="buy", last_buy_px=2.713)
+        for t in (100, 101): st.step(F(t=t, mid=2.695, bid=2.694, ask=2.696), [], pos)                  # -0.66% under the average: latched
+        r = st.step(F(t=102, mid=2.7065, bid=2.706, ask=2.707), [dict(sig="POP_STALLING")], pos)
+        self.assertEqual(r["trim"][1], 38.0)                                                              # half of 76.1 in whole steps (live 21:37: 38.05 left 0.05 nobody could sell)
+        apply_fill(pos, 1, False, 38.0, 2.706, "t"); st.on_fill("trim", 38.0)
+        r = st.step(F(t=103, mid=2.7065, bid=2.706, ask=2.707), [], pos)
+        self.assertIsNone(st.pull); self.assertIsNone(r["trim"])                                          # the pull is complete, no 0.05 chase
+
     def test_a_pull_does_not_swallow_a_lot_bought_meanwhile(self):
         st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         for t in (100, 101): st.step(F(t=t, mid=2.98, bid=2.979, ask=2.981), [], pos)                     # latched: de-risk on
