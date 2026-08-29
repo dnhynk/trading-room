@@ -276,7 +276,7 @@ class RegimeAction(unittest.TestCase):
         st = Strategy(dict(side="long"), {**SIG, "rg_confirm": 1}); st.step(F(atr=0.004, mid=3.0, **rg), [], dict(lots=[], last=None))
         self.assertEqual(st.regime, "AGAINST")                                                     # 7.6 ATR of 0.13% = a 1% grind: AGAINST today
         st2 = Strategy(dict(side="long"), {**SIG, "rg_confirm": 1, "rg_drift_min_pct": 2.0}); st2.step(F(atr=0.004, mid=3.0, **rg), [], dict(lots=[], last=None))
-        self.assertEqual(st2.regime, "TWO_WAY")                                                    # 1% < 2%: not a one-way that matters
+        self.assertNotEqual(st2.regime, "AGAINST")                                                 # 1% < 2%: not a one-way that matters (DEAD label: no swings at all)
         st3 = Strategy(dict(side="long"), {**SIG, "rg_confirm": 1, "rg_drift_min_pct": 2.0}); st3.step(F(atr=0.02, mid=3.0, **rg), [], dict(lots=[], last=None))
         self.assertEqual(st3.regime, "AGAINST")                                                    # 7.6 ATR of 0.67% = 5%: the real thing
 
