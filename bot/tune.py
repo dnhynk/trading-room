@@ -73,8 +73,11 @@ def main():
     if not valid:
         print("no validation files (need >= 2 days, or >= 2 files): report only, nothing can be accepted"); MIN_ACCEPT = False
     else: MIN_ACCEPT = True
-    from bot.backtest import load_seconds
+    from bot.backtest import load_seconds, seed_history
     for f in train + valid: load_seconds(f, sym)          # build the per-second caches once, before the workers read them
+    for fs in (train, valid):                             # and each set's REST seed once: a burst of worker fetches could be rate-limited and leave some candidates unseeded (incomparable)
+        secs = load_seconds(fs[0], sym) if fs else []
+        if secs: seed_history(sym, secs[0][0])
     jobs = [(train, sym, s, t) for s, t in cands.values()] + [(valid or train, sym, s, t) for s, t in cands.values()]
     with Pool(min(workers, len(jobs))) as pool: res = pool.map(evaluate, jobs)
     n = len(cands); names = list(cands)

@@ -461,7 +461,8 @@ class Strategy:
       FAVOR regime: the first core_units lots are never sold by pulls or the backstop; pop_min is multiplied by favor_pop_mult.
       De-risk (AGAINST regime, or -- with derisk_on_breakdown -- a BREAKDOWN/BREAKOUT that fired against a position the book already
       held; a unit bought at the deceleration after a break is not that break's victim): the gate drops to -derisk_pct so a weak
-      bounce that stalls near breakeven reduces the position; the core lots are left to the stop.
+      bounce that stalls near breakeven reduces the position (half the core, then the rest); a stall at or above the normal gate
+      is a normal trim even in de-risk. Break evidence clears like the latch: a fill (the campaign is cycling) or a full recovery.
     Trim (backstop): while no pull is active, the LIFO unit rests at avg +/- trim_rest_pct (0 disables).
     Stop: structural level frozen when the position opens = last 1m pivot low/high (Features.struct_lo/hi) -/+ stop_buffer_atr x ATR,
     or strat.stop_structural when set; in FAVOR it ratchets with new pivots and never loosens. The loss cap avg -/+ cap_usdt/qty
@@ -594,18 +595,19 @@ class Strategy:
             self.last_lot = lot_id
             floor = 0.0 if is_core else p["gate_floor_unit_pct"]                              # core: breakeven; added unit: fees covered
             g_rel = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n            # the market refusing bounces lowers the bar
-            if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = False      # a fill or a full recovery clears the latch ...
+            if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = self.brk_seen = False   # a fill or a full recovery clears the damage evidence (latch and break alike) ...
             elif dev <= -step: self.derisk_armed = True                                    # ... and it can only re-arm on a later tick
             derisk = p["derisk_pct"] > 0 and (self.regime == "AGAINST" or self.derisk_armed
                                               or (p["derisk_on_breakdown"] and self.brk_seen))
             gate = -p["derisk_pct"] if (derisk and is_core) else g_rel      # an added unit is only ever sold above its own buy price; the loss is taken on the core vs the average
             self.gate_eff = gate
-            core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if (favor or derisk) and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells, FAVOR or not
+            core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if (favor or (derisk and dev_lot < g_rel)) and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells, FAVOR or not; de-risk only shapes the weak bounce
             sellable = max(qty - core, 0.0)
             if derisk and sellable <= 0:                                                # only the core left: cut part of it near breakeven ...
                 sellable = core * p["derisk_core_frac"]
-                if core - sellable < unit * p["derisk_core_frac"] - 1e-9: sellable = core   # ... and the last half-unit goes whole: a dust remainder would keep a dead campaign (its stop, gap, break) alive
+                if core - sellable <= unit * (1 - p["derisk_core_frac"]) ** 2 + 1e-9: sellable = core   # ... half, then the rest: a remainder no bigger than what two cuts leave (a quarter unit) goes whole, never a dust tail
             if self.pull and qty <= self.pull["target"] + 1e-9: self.pull = None            # sold what the pull asked for
+            elif self.pull and qty > self.last_qty + 1e-9: ev.append(("PULL_DROP", dict(why="add", dev_lot=round(dev_lot, 2)))); self.pull = None   # a lot bought meanwhile is not the pull's to sell (its target is absolute): the next stall judges the new LIFO lot
             if trim_sig in names and not self.pull and dev_lot < gate and p["gate_relax"] > 0:   # a stall the lot could not use: relax its gate
                 self.fail_n += 1; ev.append(("GATE_RELAX", dict(fails=self.fail_n, gate=round(floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n, 3), dev_lot=round(dev_lot, 2))))
             # top confirmed by retrace: the best price since the last fill cleared the gate and price has come back >= trim_retrace_atr x ATR

@@ -141,6 +141,19 @@ class Trims(unittest.TestCase):
         st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [], pos); self.assertTrue(st.derisk_armed)    # -2.3% under the new average: re-armed next tick
 
 class DeriskQuantity(unittest.TestCase):
+    def test_a_core_smaller_than_a_unit_is_still_cut_in_half_first(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos = dict(lots=[[60, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        for t in (100, 101): st.step(F(t=t, mid=2.98, bid=2.979, ask=2.981), [], pos)
+        r = st.step(F(t=102, mid=2.985, bid=2.984, ask=2.986), [dict(sig="POP_STALLING")], pos); self.assertEqual(r["trim"][1], 30)   # half, not the whole 60 (2026-08-29 21:11 live)
+
+    def test_derisk_mode_sells_the_normal_quantity_at_a_normal_stall(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(), [], pos); st.regime = "AGAINST"                                                   # a persistent de-risk trigger
+        r = st.step(F(t=101, mid=2.99, bid=2.989, ask=2.991), [dict(sig="POP_STALLING")], pos); self.assertEqual(r["trim"][1], 35)     # weak bounce: half the core
+        st2 = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos2 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st2.step(F(), [], pos2); st2.regime = "AGAINST"
+        r = st2.step(F(t=101, mid=3.015, bid=3.014, ask=3.016), [dict(sig="POP_STALLING")], pos2); self.assertEqual(r["trim"][1], 70)   # +0.5% >= pop_min: the whole lot, as outside de-risk
+
     def test_cut_takes_half_then_the_rest_never_dust(self):
         st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         for t in (100, 101): st.step(F(t=t, mid=2.98, bid=2.979, ask=2.981), [], pos)                   # -0.67% under the average with no add: latched
@@ -148,6 +161,17 @@ class DeriskQuantity(unittest.TestCase):
         apply_fill(pos, 1, False, 35, 2.986, "t1"); st.on_fill("trim", 35)
         for t in (103, 104): st.step(F(t=t, mid=2.975, bid=2.974, ask=2.976), [], pos)
         r = st.step(F(t=105, mid=2.98, bid=2.979, ask=2.981), [dict(sig="POP_STALLING")], pos); self.assertEqual(r["trim"][1], 35)   # the remaining half-unit goes whole, not 17.5
+
+class PullScope(unittest.TestCase):
+    def test_a_pull_does_not_swallow_a_lot_bought_meanwhile(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        for t in (100, 101): st.step(F(t=t, mid=2.98, bid=2.979, ask=2.981), [], pos)                     # latched: de-risk on
+        r = st.step(F(t=102, mid=2.985, bid=2.984, ask=2.986), [dict(sig="POP_STALLING")], pos); self.assertEqual(r["trim"][1], 35)   # weak bounce: half the core, the pull rests
+        apply_fill(pos, 1, True, 70, 2.975, "b"); st.on_fill("buy", 70)                                      # the deceleration's unit fills while the pull rests
+        r = st.step(F(t=103, mid=2.976, bid=2.975, ask=2.977), [], pos)
+        self.assertIsNone(r["trim"]); self.assertIsNone(st.pull)                                             # the pull is dropped, never extended over the new lot (fuzz 2026-08-29)
+        r = st.step(F(t=104, mid=2.977, bid=2.976, ask=2.978), [dict(sig="POP_STALLING")], pos)
+        self.assertIsNone(r["trim"])                                                                         # +0.07% over the new unit's price < 0.15%: nothing sells
 
 class Relax(unittest.TestCase):
     def test_failed_stalls_lower_the_gate_toward_the_floor(self):
@@ -208,6 +232,20 @@ class Breaks(unittest.TestCase):
         st2.step(F(t=102, mid=2.99, bid=2.989, ask=2.991, brk=True), [dict(sig="BREAKDOWN")], pos2)   # a new break hits the position we now hold
         r = st2.step(F(t=103, mid=2.985, bid=2.984, ask=2.986, brk=True), [dict(sig="POP_STALLING")], pos2)
         self.assertTrue(any(e[0] == "PULL_TRIM" and e[1]["mode"] == "derisk" for e in r["events"]))
+
+    def test_a_fill_or_a_recovery_clears_the_break_evidence(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(), [], pos)
+        st.step(F(t=101, mid=2.99, bid=2.989, ask=2.991, brk=True), [dict(sig="BREAKDOWN")], pos); self.assertTrue(st.brk_seen)
+        apply_fill(pos, 1, True, 70, 2.985, "b"); st.on_fill("buy", 70)                            # the deceleration came and we added: the campaign is cycling, not stuck
+        st.step(F(t=102, mid=2.985, bid=2.984, ask=2.986, brk=True), [], pos); self.assertFalse(st.brk_seen)
+        apply_fill(pos, 1, False, 70, 2.99, "t"); st.on_fill("trim", 70)                            # the unit cycles out; the core is alone again (avg 2.9925)
+        st.step(F(t=103, mid=2.99, bid=2.989, ask=2.991, brk=True), [], pos)
+        r = st.step(F(t=104, mid=2.99, bid=2.989, ask=2.991, brk=True), [dict(sig="POP_STALLING")], pos)
+        self.assertFalse(any(e[0] == "PULL_TRIM" for e in r["events"]))                             # -0.08% weak bounce inside the same break window: no de-risk sale (2026-08-29 21:11 live)
+        st2 = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos2 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st2.step(F(), [], pos2); st2.step(F(t=101, mid=2.99, bid=2.989, ask=2.991, brk=True), [dict(sig="BREAKDOWN")], pos2)
+        st2.step(F(t=102, mid=3.013, bid=3.012, ask=3.014, brk=True), [], pos2); self.assertFalse(st2.brk_seen)   # +0.43% >= pop_min: recovered, the break is history
 
 class Regime(unittest.TestCase):
     def test_counter_swings_prevent_one_way_label(self):
