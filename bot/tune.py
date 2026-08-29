@@ -34,6 +34,8 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "rg_drift": ("sig", [4.0, 5.0, 6.0, 8.0, 10.0]),           # circuit breaker: false positives cost cycles, misses cost a cascade; the objective sees both
     "rg_counter_max": ("sig", [0, 1, 2]),
     "rg_window": ("sig", [45, 60, 90, 120, 180]),
+    "rg_drift_min_pct": ("sig", [1.0, 2.0, 3.0, 5.0]),         # a one-way that matters: the window's net move in % (0 would restore the ATR-only reading: not offered)
+    "against_regime_mult": ("strat", [0.25, 0.5, 0.75, 1.0]),  # AGAINST scales the add (0 would restore the veto: not offered, user decision 2026-08-30)
     "brk_atr": ("sig", [0.3, 0.5, 0.8, 1.2, 2.0]),             # how far under the 30-min low (in ATR) a volume push counts as a break -> the de-risk trigger's depth (2026-08-30: 3 of 4 campaigns were halved at -0.3% by breaks 0.25% under the low)
     "derisk_core_frac": ("strat", [0.25, 0.5, 0.75]),
 }

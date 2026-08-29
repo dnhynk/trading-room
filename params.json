@@ -83,7 +83,8 @@
     "gate_floor_unit_pct": 0.05,
     "add_confirm": null,
     "confirm_within_s": 90,
-    "against_daily_mult": 0.5
+    "against_daily_mult": 0.5,
+    "against_regime_mult": 0.5
   },
   "sig": {
     "vol_hl": 300,
@@ -119,7 +120,8 @@
     "stop_lookback": 180,
     "vd_spike": 2.0,
     "vd_decay": 0.5,
-    "vd_gate": 0
+    "vd_gate": 0,
+    "rg_drift_min_pct": 2.0
   },
   "select": {
     "every_h": 4,
