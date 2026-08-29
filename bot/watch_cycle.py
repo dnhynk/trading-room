@@ -4,7 +4,7 @@ import json, os, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 HB = int(sys.argv[1]) if len(sys.argv) > 1 else 3600
-SHOW = {"FILL", "RESUME", "PARAMS", "DAY_CLOSE", "ADOPT", "STOP_HIT", "SIZING", "TAKER", "SWEEP", "DAILY_TREND"}
+SHOW = {"FILL", "RESUME", "PARAMS", "DAY_CLOSE", "ADOPT", "STOP_HIT", "SIZING", "TAKER", "SWEEP", "DAILY_TREND", "SELECT", "RECORD_SET"}
 
 def tail(path, pos):
     try:
