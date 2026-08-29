@@ -111,6 +111,13 @@ class Trims(unittest.TestCase):
         st.step(F(t=100, mid=3.0), [], pos); st.step(F(t=101, mid=3.008, bid=3.007, ask=3.009), [], pos)      # peak only +0.27% < 0.4% gate
         r = st.step(F(t=102, mid=2.99, bid=2.989, ask=2.991), [], pos); self.assertIsNone(r["trim"])
 
+    def test_pull_survives_a_one_tick_wiggle_under_the_gate(self):
+        st = Strategy(dict(side="long", unit_qty=70, tick=0.001)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(), [], pos)
+        r = st.step(F(t=101, mid=3.0125, bid=3.012, ask=3.013), [dict(sig="POP_STALLING")], pos); self.assertIsNotNone(r["trim"])      # +0.42% >= 0.4: pull
+        r = st.step(F(t=102, mid=3.0115, bid=3.011, ask=3.012), [], pos); self.assertIsNotNone(st.pull); self.assertIsNotNone(r["trim"])   # one tick under the gate: the maker keeps its queue
+        r = st.step(F(t=103, mid=3.0095, bid=3.009, ask=3.01), [], pos); self.assertIsNone(st.pull)                                     # three ticks under: dropped
+
     def test_pull_goes_taker_when_the_stall_turns(self):
         st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         r = st.step(F(mid=3.02, bid=3.019, ask=3.021), [dict(sig="POP_STALLING")], pos); self.assertEqual(r["trim"][2], "maker")

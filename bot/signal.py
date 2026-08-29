@@ -637,7 +637,8 @@ class Strategy:
                                              mode="derisk" if derisk else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),
                                              peak=self.peak)))
             if self.pull:
-                if s * (mid / self.pull["ref"] - 1) * 100 < self.pull["gate"]: ev.append(("PULL_DROP", dict(dev_lot=round(dev_lot, 2)))); self.pull = None
+                if s * (mid / self.pull["ref"] - 1) * 100 < self.pull["gate"] - tick / self.pull["ref"] * 100:   # one tick of hysteresis: a wiggle at the gate must not cancel and re-queue the maker (2026-08-30 03:17: six pull/drop flips in 41 s lost the queue)
+                    ev.append(("PULL_DROP", dict(dev_lot=round(dev_lot, 2)))); self.pull = None
                 elif t - self.pull["t"] >= p["trim_taker_after_s"] or s * (self.pull["px0"] - mid) / mid * 100 >= p["trim_taker_slip_pct"]:
                     trim = (round_tick(touch_in, tick), round(qty - self.pull["target"], 9), "taker")   # waited long enough, or the stall is already turning: take it
                 else: trim = (round_tick(touch_out, tick), round(qty - self.pull["target"], 9), "maker")

@@ -6,31 +6,31 @@
       "ticker",
       "candle1m"
     ],
+    "HYPEUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "XRPUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "ZECUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "DOGEUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "XAUUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "SNDKUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
     "SOLUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "ETHUSDT": [
       "trade",
       "books15",
       "ticker",
