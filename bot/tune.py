@@ -29,6 +29,8 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "derisk_pct": ("strat", [0.5, 1.0, 2.0, 3.0, 5.0]),
     "gate_relax": ("strat", [0.25, 0.35, 0.5, 0.7]),          # how much one refused bounce lowers the trim gate (0 would switch the mechanism off: not offered)
     "trim_retrace_atr": ("strat", [0.3, 0.5, 0.8, 1.2]),      # retrace that confirms a top (0 = no wick protection: not offered, user decision)
+    "trim_taker_after_s": ("strat", [5, 10, 20, 60]),          # the trim's maker -> taker clock (2026-08-30 tape: the clock barely matters, the slip trigger carries the value)
+    "trim_taker_slip_pct": ("strat", [0.05, 0.1, 0.2, 0.4]),   # ... and the slip under the pull price that says "the stall has turned"
     "rg_drift": ("sig", [4.0, 5.0, 6.0, 8.0, 10.0]),           # circuit breaker: false positives cost cycles, misses cost a cascade; the objective sees both
     "rg_counter_max": ("sig", [0, 1, 2]),
     "rg_window": ("sig", [45, 60, 90, 120, 180]),
