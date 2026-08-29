@@ -291,6 +291,23 @@ class SecondClose(unittest.TestCase):
         feat.feed(book(110, 7202100))                                     # the first message of 7202 carries a new mid ...
         self.assertEqual(feat.f["t"], 7201); self.assertEqual(feat.f["mid"], 100.0)   # ... which 7201 must not see
 
+class WarmUp(unittest.TestCase):
+    def test_velocity_rule_waits_for_a_mature_normaliser(self):
+        from bot.signal import Features, EMA
+        e = EMA(300); e.add(1.0); e.add(3.0); self.assertAlmostEqual(e.v, 2.0)                        # an expanding mean, not 1 + k x 2
+        feat = Features(dict(vol_hl=300)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
+        book = lambda m, ts: dict(arg=dict(channel="books15"), data=[dict(bids=[[m - 0.01 - i * 0.01, 5] for i in range(5)], asks=[[m + 0.01 + i * 0.01, 5] for i in range(5)], ts=str(ts))], ts=ts)
+        out = []; t = 7200
+        out += feat.feed(book(100, t * 1000 + 500)); t += 1
+        out += feat.feed(book(99.5, t * 1000 + 500)); t += 1                                            # -0.5% first return: v = -1 exactly under the old code
+        for _ in range(40): out += feat.feed(book(99.5, t * 1000 + 500)); t += 1                         # then flat: the old code fired DIP_SLOWING here
+        self.assertFalse(any(x["sig"] == "DIP_SLOWING" for x in out))
+        for _ in range(320): out += feat.feed(book(99.5, t * 1000 + 500)); t += 1                        # a half-life of data: the normaliser is mature
+        out = []
+        out += feat.feed(book(99.0, t * 1000 + 500)); t += 1
+        for _ in range(40): out += feat.feed(book(99.0, t * 1000 + 500)); t += 1
+        self.assertTrue(any(x["sig"] == "DIP_SLOWING" and x["src"] == "v" for x in out))               # the same shape of move now fires
+
 class Zigzag(unittest.TestCase):
     def test_straight_move_has_no_swings(self):
         self.assertEqual(zigzag([1, 1.01, 1.02, 1.03, 1.05], 0.007), [])

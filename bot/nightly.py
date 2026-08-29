@@ -20,6 +20,8 @@ def report(day):
     if files:
         out.append("## signals (replay, forward 15m; split by source / volume decay / CVD divergence / value area / regime)\n")
         out.append(run_cmd(["bot.replay"] + warm + files + ["--quiet", "--day", day, "--by", "sell_decay,buy_decay,cvd_div,cvd_div_bear,vp_va,vp_dens,rg_er,U,D,side_hint_1h,daily_trend,dbl,brk"]))
+        out.append("\n## legs (where the deceleration detectors fire vs the real extremes; speed-model evidence)\n")
+        out.append(run_cmd(["bot.legs"] + warm + files + ["--quiet", "--day", day]))
         out.append("\n## tuner (report only)\n")
         out.append(run_cmd(["bot.tune", "--days", "7", "--workers", "4"], timeout=7200))
     else: out.append("no recordings for this day\n")

@@ -40,10 +40,11 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
 
 
 class EMA:
-    __slots__ = ("k", "v")
-    def __init__(self, hl): self.k, self.v = 1 - 0.5 ** (1.0 / hl), None
+    __slots__ = ("k", "v", "n")
+    def __init__(self, hl): self.k, self.v, self.n = 1 - 0.5 ** (1.0 / hl), None, 0
     def add(self, x):
-        self.v = x if self.v is None else self.v + self.k * (x - self.v)
+        self.n += 1; k = max(self.k, 1.0 / self.n)                    # expanding-window mean until the window is reached: no single-sample start
+        self.v = x if self.v is None else self.v + k * (x - self.v)
         return self.v
 
 def wilder_atr(cl, n=14):
@@ -307,7 +308,7 @@ class Features:
             return []
         out = []
         if sec - self.sec > 120:            # outage: every second-level state is stale; rebuild the windows from candles like at start
-            self.vraw.v = None; self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
+            self.vraw = EMA(p["v_hl"]); self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
             self.mids.clear(); self.flow.clear(); self.dbid.clear(); self.dask.clear(); self.b = self.s = 0.0; self.pending = []
             for c in self.candles[-(self.mids.maxlen // 60):]: self.mids.extend([c["c"]] * 60)
             for c in self.candles[-(self.flow.maxlen // 60):]: self.flow.extend([(c["v"] / 120, c["v"] / 120)] * 60)
@@ -322,6 +323,8 @@ class Features:
         r = math.log(mid / prev) if prev else 0.0
         self.var.add(r * r); sigma = max(math.sqrt(self.var.v), 1e-7)
         self.vraw.add(r); v = self.vraw.v / sigma
+        ve = v if self.var.n >= p["vol_hl"] else 0.0        # the normaliser needs a half-life of data before v means anything: at a restart v was +-1 from its
+                                                            # first sample (vraw and sigma from the same return) and passed the fast-phase test (8 of 11 live v signals on 2026-08-29 came within 3 min of a START)
         self.vh.append(v); a = v - self.vh[0]
         self.mids.append(mid)
         b, s = self.b, self.s; self.b = self.s = 0.0
@@ -332,15 +335,15 @@ class Features:
         H, Lo = max(win), min(win)
         atr = self.atr
         d, u = self.dip, self.pop
-        if mid >= H: d.update(minv=v, lows=[], hold=0, div=False)          # making the swing high: dip tracking restarts
+        if mid >= H: d.update(minv=ve, lows=[], hold=0, div=False)         # making the swing high: dip tracking restarts
         else:
-            d["minv"] = min(d["minv"], v)
+            d["minv"] = min(d["minv"], ve)
             if not d["lows"] or mid < d["lows"][-1][0]:
                 d["div"] = bool(d["lows"]) and self.cvd > d["lows"][-1][1]   # lower price low, higher CVD low
                 d["lows"].append((mid, self.cvd))
-        if mid <= Lo: u.update(maxv=v, highs=[], hold=0, div=False)
+        if mid <= Lo: u.update(maxv=ve, highs=[], hold=0, div=False)
         else:
-            u["maxv"] = max(u["maxv"], v)
+            u["maxv"] = max(u["maxv"], ve)
             if not u["highs"] or mid > u["highs"][-1][0]:
                 u["div"] = bool(u["highs"]) and self.cvd < u["highs"][-1][1]
                 u["highs"].append((mid, self.cvd))
@@ -387,10 +390,10 @@ class Features:
             pop_ok = lambda: vd_pop and (u["last"] is None or sec - u["last"][0] >= p["cooldown"] or mid >= u["last"][1] + p["refire_atr"] * atr)
             cond = D >= p["dip_min_atr"] and d["minv"] <= -p["v_fast"] and v >= -p["v_slow"] and a > 0
             d["hold"] = d["hold"] + 1 if cond else 0
-            if d["hold"] >= p["hold_s"] and dip_ok(): d["last"] = (sec, mid); d["minv"] = v; out.append(dict(sig="DIP_SLOWING", src="v"))
+            if d["hold"] >= p["hold_s"] and dip_ok(): d["last"] = (sec, mid); d["minv"] = ve; out.append(dict(sig="DIP_SLOWING", src="v"))
             cond = U >= p["dip_min_atr"] and u["maxv"] >= p["v_fast"] and v <= p["v_slow"] and a < 0
             u["hold"] = u["hold"] + 1 if cond else 0
-            if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["maxv"] = v; out.append(dict(sig="POP_STALLING", src="v"))
+            if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["maxv"] = ve; out.append(dict(sig="POP_STALLING", src="v"))
             for name in self.pending:   # 1m-candle rule, same cooldown and veto as the velocity rule
                 if name == "DIP_SLOWING" and dip_ok(): d["last"] = (sec, mid); out.append(dict(sig=name, src="1m"))
                 if name == "POP_STALLING" and pop_ok(): u["last"] = (sec, mid); out.append(dict(sig=name, src="1m"))
