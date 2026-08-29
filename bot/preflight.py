@@ -41,7 +41,7 @@ def main():
     rep("FAIL" if foreign else "PASS", f"resting orders on {sym}: {len(pend)} total, {len(foreign)} not ours" + (f" -> cancel them first: {[(o.get('side'), o.get('tradeSide'), o.get('size'), o.get('price')) for o in foreign]}" if foreign else ""))
     plans = b.pending_plan_orders(sym).get("entrustedList") or []
     rep("INFO", f"plan orders on {sym}: {[(o.get('planType'), o.get('posSide'), o.get('triggerPrice')) for o in plans]} (psl of our side is adopted at live start)")
-    for job in ("record", "cycle", "nightly", "sweep"):
+    for job in ("record", "cycle", "nightly", "sweep", "select"):
         try:
             pid = int(open(os.path.join(LOGS, f"{job}.pid")).read().strip())
             alive = str(pid) in subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True).stdout
@@ -51,7 +51,7 @@ def main():
         lines = open(os.path.join(LOGS, "record.log"), encoding="utf-8").read().splitlines()
         last = [l for l in lines if " REC " in l][-1]; rep("INFO", f"recorder last stats: {last[:120]}")
     except Exception: rep("WARN", "recorder has no REC line yet")
-    r = subprocess.run([sys.executable, "-m", "unittest", "bot.test_signal", "bot.test_cycle"], cwd=ROOT, capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-m", "unittest", "bot.test_signal", "bot.test_cycle", "bot.test_select"], cwd=ROOT, capture_output=True, text=True)
     rep("PASS" if r.returncode == 0 else "FAIL", f"unit tests: {(r.stderr or r.stdout).strip().splitlines()[-1]}")
     fails = [m for lv, m in out if lv == "FAIL"]
     print("\nRESULT:", "FAIL" if fails else "PASS", f"({len(fails)} fail, {sum(1 for lv, _ in out if lv == 'WARN')} warn)")

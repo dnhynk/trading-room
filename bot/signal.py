@@ -127,6 +127,30 @@ def structure_side(bars, atr15, k=2.0, min_pct=1.0):
     return None
 
 
+def candle_features(cl):
+    """Shape of the last closed 1m candle: volume vs the previous 20, lower/upper wick fractions, the 3-bar rate and the prior 3-bar rate (%)."""
+    last = cl[-1]; vavg = sum(k["v"] for k in cl[-21:-1]) / len(cl[-21:-1]); rng = last["h"] - last["l"]
+    return dict(vr=last["v"] / vavg if vavg else 0.0,
+                lw=(min(last["o"], last["c"]) - last["l"]) / rng if rng else 0.0,
+                uw=(last["h"] - max(last["o"], last["c"])) / rng if rng else 0.0,
+                roc3=(last["c"] - cl[-4]["c"]) / cl[-4]["c"] * 100, roc3p=(cl[-4]["c"] - cl[-7]["c"]) / cl[-7]["c"] * 100)
+
+def candle_rule(cl, cf, vr_hist, p):
+    """The 1m rule (src="1m"), pure: the signals the last closed candle fires. A dip/pop of >= c1_dev % from the 30-bar extreme with
+    (a) climax fading: a >= c1_vr volume bar within the last 3 with volume now declining from it (17x -> 8.8x -> 1.7x; never the climax
+    bar itself), a wick >= c1_wick on the rejected side and the 3-bar extreme held, or (b) rate decay: the 3-bar rate <= c1_decel x the
+    prior 3-bar rate (prior >= c1_roc). cl = closed candles (>= 31), cf = candle_features(cl), vr_hist = the last 3 candles' vr."""
+    last = cl[-1]
+    decel = abs(cf["roc3p"]) >= p["c1_roc"] and abs(cf["roc3"]) <= p["c1_decel"] * abs(cf["roc3p"])
+    climax = len(vr_hist) == 3 and max(vr_hist[:2]) >= p["c1_vr"] and vr_hist[2] < vr_hist[1]
+    hi30, lo30 = max(c["h"] for c in cl[-30:]), min(c["l"] for c in cl[-30:])
+    held_lo = last["c"] > min(c["l"] for c in cl[-3:]); held_hi = last["c"] < max(c["h"] for c in cl[-3:])
+    out = []
+    if (last["c"] / hi30 - 1) * 100 <= -p["c1_dev"] and ((climax and cf["lw"] >= p["c1_wick"] and held_lo) or (decel and cf["roc3p"] < 0)): out.append("DIP_SLOWING")
+    if (last["c"] / lo30 - 1) * 100 >= p["c1_dev"] and ((climax and cf["uw"] >= p["c1_wick"] and held_hi) or (decel and cf["roc3p"] > 0)): out.append("POP_STALLING")
+    return out
+
+
 class Features:
     """feed(msg) with parsed trade/books15/candle1m/ticker messages; returns the signals emitted (list of dicts, usually empty).
     .f holds the latest per-second feature dict (key "t" = exchange second)."""
@@ -230,23 +254,9 @@ class Features:
         self.htf_lows, self.htf_highs = sorted(set(l15 + l1h)), sorted(set(h15 + h1h))
         self._regime(); self._vp(); self._structure()
         if len(cl) < 31: return
-        last = cl[-1]; vavg = sum(k["v"] for k in cl[-21:-1]) / len(cl[-21:-1]); rng = last["h"] - last["l"]
-        self.cf = cf = dict(vr=last["v"] / vavg if vavg else 0.0,
-                            lw=(min(last["o"], last["c"]) - last["l"]) / rng if rng else 0.0,
-                            uw=(last["h"] - max(last["o"], last["c"])) / rng if rng else 0.0,
-                            roc3=(last["c"] - cl[-4]["c"]) / cl[-4]["c"] * 100, roc3p=(cl[-4]["c"] - cl[-7]["c"]) / cl[-7]["c"] * 100)
-        p = self.p
+        self.cf = cf = candle_features(cl)
         self.vr_hist = (getattr(self, "vr_hist", []) + [cf["vr"]])[-3:]
-        if p["c1_on"]:   # the manual watcher's rule: dip/pop of >= c1_dev % from the 30-bar extreme + climax fading, or rate decay
-            decel = abs(cf["roc3p"]) >= p["c1_roc"] and abs(cf["roc3"]) <= p["c1_decel"] * abs(cf["roc3p"])
-            vh = self.vr_hist   # climax = a >= c1_vr volume bar within the last 3 with volume now declining from it (17x -> 8.8x -> 1.7x), not the climax bar itself
-            climax = len(vh) == 3 and max(vh[:2]) >= p["c1_vr"] and vh[2] < vh[1]
-            hi30, lo30 = max(c["h"] for c in cl[-30:]), min(c["l"] for c in cl[-30:])
-            held_lo = last["c"] > min(c["l"] for c in cl[-3:]); held_hi = last["c"] < max(c["h"] for c in cl[-3:])
-            if (last["c"] / hi30 - 1) * 100 <= -p["c1_dev"] and ((climax and cf["lw"] >= p["c1_wick"] and held_lo) or (decel and cf["roc3p"] < 0)):
-                self.pending.append("DIP_SLOWING")
-            if (last["c"] / lo30 - 1) * 100 >= p["c1_dev"] and ((climax and cf["uw"] >= p["c1_wick"] and held_hi) or (decel and cf["roc3p"] > 0)):
-                self.pending.append("POP_STALLING")
+        if self.p["c1_on"]: self.pending += candle_rule(cl, cf, self.vr_hist, self.p)   # the manual watcher's rule, shared with bot/scan.py's engine proxy
 
     def _structure(self):
         """struct_lo/hi = the structural extreme a stop goes beyond: the lowest low around the last confirmed pivot low, or lower still,

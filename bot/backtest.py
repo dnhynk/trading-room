@@ -116,6 +116,7 @@ class Engine:
         self.books = {sd: Book(self.feat, strat, sd, len(sides), qstep) for sd in sides}
         self.peak = self.max_dd = 0.0; self.in_mkt = self.n = 0; self.last_t = None; self.day = None
         self.events = []
+        self.by_hint, self.last_real = {}, {}                    # realized pnl per book split by the 1H structure hint in force
 
     def seed(self, c1, c15, daily):
         """Live-start history the recording lacks (seed_history); before the first second is fed."""
@@ -218,6 +219,10 @@ class Engine:
                 qty, avg = pos_stats(bk.pos); bk.upl = bk.s * (f["mid"] - avg) * qty if qty and f.get("mid") else 0.0
                 eq += bk.realized + bk.upl; held = held or bool(qty)
             self.peak = max(self.peak, eq); self.max_dd = max(self.max_dd, self.peak - eq)
+            hint = self.feat.side_hint or "none"
+            for sd, bk in self.books.items():
+                dr = bk.realized - self.last_real.get(sd, 0.0)
+                if dr: self.last_real[sd] = bk.realized; self.by_hint[f"{sd}|{hint}"] = self.by_hint.get(f"{sd}|{hint}", 0.0) + dr
             self.n += 1; self.in_mkt += 1 if held else 0
         return self.metrics()
 
@@ -229,7 +234,8 @@ class Engine:
         tot = sum(v["pnl"] for v in per.values()); opn = sum(v["open_pnl"] for v in per.values())
         return dict(pnl=round(tot, 3), open_pnl=round(opn, 3), total=round(tot + opn, 3), cycles=sum(v["cycles"] for v in per.values()),
                     adds=sum(v["adds"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
-                    in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"))
+                    in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"),
+                    by_hint={k: round(v, 3) for k, v in sorted(self.by_hint.items())})
 
 
 def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=0.1, sides=None):

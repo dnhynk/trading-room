@@ -6,6 +6,36 @@
       "ticker",
       "candle1m"
     ],
+    "ZECUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "DOGEUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "XAUUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SNDKUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SOLUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "BTCUSDT": [
       "candle1m"
     ]
@@ -90,5 +120,18 @@
     "vd_spike": 2.0,
     "vd_decay": 0.5,
     "vd_gate": 0
+  },
+  "select": {
+    "every_h": 4,
+    "ratio": 1.5,
+    "confirm": 2,
+    "dwell_h": 24,
+    "max_per_day": 1,
+    "record_top": 5,
+    "min_vol": 50000000,
+    "days": 3,
+    "exclude": [
+      "BTCUSDT"
+    ]
   }
 }

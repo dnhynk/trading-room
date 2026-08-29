@@ -1,10 +1,11 @@
-"""Keeps one job alive.  python -m bot.supervise record|cycle
+"""Keeps one job alive.  python -m bot.supervise record|cycle|nightly|sweep|select
 Runs the job as a child, appends its stdout+stderr to logs/<job>.log, restarts on exit (5s, doubling to 60s; reset after
 a 5-minute healthy run). `cycle` is not (re)started while the STOP file exists. Writes its own pid to logs/<job>.pid."""
 import os, subprocess, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS = {"record": [sys.executable, "-u", "-m", "bot.ws", "record"], "cycle": [sys.executable, "-u", "-m", "bot.cycle"],
-        "nightly": [sys.executable, "-u", "-m", "bot.nightly"], "sweep": [sys.executable, "-u", "-m", "bot.sweep"]}
+        "nightly": [sys.executable, "-u", "-m", "bot.nightly"], "sweep": [sys.executable, "-u", "-m", "bot.sweep"],
+        "select": [sys.executable, "-u", "-m", "bot.select"]}
 
 def main():
     job = sys.argv[1]; cmd = JOBS[job]

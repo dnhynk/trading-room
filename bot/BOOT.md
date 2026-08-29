@@ -8,7 +8,8 @@
 3. Monitor에 `python -u -m bot.watch_cycle 3600`을 persistent로 붙인다(알림·체결·재기동·야간 리포트·60분 HB만 온다).
 4. 사용자에게 한 줄로 상태를 보고하고 대기한다.
 
-## 프로세스 (감시견 4개, 분리 실행; pid는 logs/*.pid)
+## 프로세스 (감시견 5개, 분리 실행; pid는 logs/*.pid)
+- `python -m bot.supervise select` — 종목 선정·자동 전환(`bot/select.py`, RULES 도구 절): 4시간마다 스캔(`logs/scan.json`), 전환 규칙을 전부 만족할 때만 flat에서 `params.json`(symbol·side·record)을 고쳐 엔진을 재기동시킨다. 이벤트 `SELECT`(매 스캔 판정), 알림 `SYMBOL_SWITCH`, 상태 `logs/select-state.json`. 후보 종목 5개도 녹화한다(`RECORD_SET`)
 - `python -m bot.supervise record` — 틱·호가·프라이빗 채널 녹화 (`data/ws/`)
 - `python -m bot.supervise cycle` — 엔진 (dry|live는 `params.json` `strat.mode`)
 - `python -m bot.supervise nightly` — 00:10 UTC 리포트 (`logs/nightly-YYYYMMDD.txt`)
@@ -23,7 +24,7 @@
 - `STOP_FAILED` / `STOP_THROUGH` / `EMERGENCY_CLOSE` → 즉시 상태 확인, 포지션이 남았으면 보고.
 - `WS_DOWN` 60초 이상 → 프로세스·네트워크 확인. 재접속은 자동.
 - `MARGIN_LOCKED` → 사용자 수동 매매가 증거금을 잠금. 보고.
-- `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 포지션 0일 때 `strat.sides` 변경을 사용자에게 제안(자동 전환 없음).
+- `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 기록만(방향은 종목 전환 시 select가 1H 구조로 정한다; 보유 중 자동 플립은 야간 롱/숏/쌍검 표가 갈릴 때 수정 세션이 켠다). `SYMBOL_SWITCH` → select가 종목·방향을 바꾼 것(flat에서, 엔진 재기동). RULES·메모리를 다시 읽고 한 줄 보고. 전환이 이상하면(플래그 종목·하루 2회 등) select 자식을 세우고 보고.
 - `PARAMS_DEFERRED` → live에서 포지션·주문이 있어 symbol/sides/mode 변경을 플랫까지 보류 중. 기다린다(엔진이 플랫이 되면 스스로 재기동). `STATE_DISCARDED` → 모드가 바뀐 재기동이 이전 모드의 장부를 버린 것. 정보.
 - `EMERGENCY_CANCEL_UNCONFIRMED` → 비상 청산 전 취소 확인이 6초 안에 안 온 것. 즉시 `bot/trade.py status`로 포지션·주문 확인.
 - `STOP_LIQ_GUARD` → 원하는 스탑이 청산가 너머라 청산가 바로 위로 올려 둔 것. cap이 유닛 증거금보다 클 때 1~2유닛에서 정상. 기록만.
@@ -37,6 +38,6 @@
 
 ## 절대 규칙
 - 사용자의 수동 포지션·주문은 건드리지 않는다(엔진 주문은 clientOid `cycL-`/`cycS-`).
-- `mode: live` 전환·해제, 종목·방향 변경, 쌍검(`sides: ["long","short"]`) 활성화는 사용자 승인 후 포지션 0에서만.
+- `mode: live` 전환·해제, 쌍검(`sides: ["long","short"]`) 활성화는 사용자 승인 후 포지션 0에서만. 종목·방향은 select 감시견의 규칙이 정한다 — 손으로 바꾸려면 select를 세우고, 사용자 승인 후 포지션 0에서.
 - 스탑은 거래소에 항상 있어야 한다. 스탑을 없애거나 내리는 변경은 하지 않는다.
 - 결과 보고는 근거(명령·출력)와 함께. 실행 안 했으면 "실행 안 함"이라고 쓴다.
