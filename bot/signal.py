@@ -477,7 +477,8 @@ class Strategy:
         self.struct_stop = None  # structural stop of the open position (None while flat)
         self.stop_px = None      # last stop returned; once set for a position it is never moved against the position
         self.peak = None         # best favourable mid since the last fill (retrace-based top detection)
-        self.fail_n = 0          # trim-side stalls that failed to reach the LIFO lot's gate since the last fill (gate relaxation)
+        self.fail_n = 0          # trim-side stalls that failed to reach the LIFO lot's gate (gate relaxation); the lot's own history
+        self.last_lot = None     # LIFO lot id at the last step: a new lot (buy, or the next lot after a sell-out) starts a fresh count
         self.gate_eff = None     # the relaxed gate in force (state/report)
         self.sig_seen = {}       # buy-side signal source -> exchange second (agreement check for confirmed adds)
         self.arm_filled = 0.0    # quantity filled against the current arm (progress is per order, not net position)
@@ -588,7 +589,9 @@ class Strategy:
             # already held (never one that preceded the entry), or the position having been a full add-step under the average with no
             # deceleration (sticky until a fill or a full recovery)
             g_norm = (p["pop_min_pct"] if is_core else p["unit_min_pct"]) * (p["favor_pop_mult"] if favor else 1.0)
-            if qty != self.last_qty: self.fail_n = 0                                          # a fill resets the lot's expectation
+            lot_id = pos["lots"][-1][2]
+            if qty > self.last_qty or lot_id != self.last_lot: self.fail_n = 0               # a new lot gets a fresh expectation; a partial trim of the same lot keeps its refusals
+            self.last_lot = lot_id
             floor = 0.0 if is_core else p["gate_floor_unit_pct"]                              # core: breakeven; added unit: fees covered
             g_rel = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n            # the market refusing bounces lowers the bar
             if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = False      # a fill or a full recovery clears the latch ...

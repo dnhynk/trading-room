@@ -158,6 +158,15 @@ class Relax(unittest.TestCase):
         r = st.step(F(t=170, mid=3.0075, bid=3.0065, ask=3.0085), [dict(sig="POP_STALLING")], pos)   # +0.25% >= relaxed 0.2%: sells
         self.assertEqual(r["trim"][1], 70); self.assertIn("PULL_TRIM", [e[0] for e in r["events"]])
 
+    def test_partial_trim_keeps_the_lot_refusals_a_new_lifo_lot_resets_them(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60)); pos = dict(lots=[[70, 3.05, "a"], [70, 3.0, "b"]], avg=3.025, last="buy", last_buy_px=3.0)
+        st.step(F(), [], pos)                                                                          # position seen
+        st.step(F(t=101, mid=3.002, bid=3.001, ask=3.003), [dict(sig="POP_STALLING")], pos); self.assertEqual(st.fail_n, 1)   # +0.07% over the unit's price < 0.15%: refused once
+        apply_fill(pos, 1, False, 10, 3.003, "t1"); st.on_fill("trim", 10)                            # 10 of the same unit sold
+        st.step(F(t=102, mid=3.002, bid=3.001, ask=3.003), [], pos); self.assertEqual(st.fail_n, 1)   # its refusals stand
+        apply_fill(pos, 1, False, 60, 3.003, "t2"); st.on_fill("trim", 60)                            # the unit is gone: the core is the LIFO lot now
+        st.step(F(t=103, mid=3.002, bid=3.001, ask=3.003), [], pos); self.assertEqual(st.fail_n, 0)   # a fresh expectation
+
 class Confirm(unittest.TestCase):
     def test_dual_add_needs_confirmation(self):
         st = Strategy(dict(side="long", unit_qty=70, add_confirm=1)); pos = dict(lots=[], last=None)
