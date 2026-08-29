@@ -263,6 +263,23 @@ class Breaks(unittest.TestCase):
         st2.step(F(), [], pos2); st2.step(F(t=101, mid=2.99, bid=2.989, ask=2.991, brk=True), [dict(sig="BREAKDOWN")], pos2)
         st2.step(F(t=102, mid=3.013, bid=3.012, ask=3.014, brk=True), [], pos2); self.assertFalse(st2.brk_seen)   # +0.43% >= pop_min: recovered, the break is history
 
+class RegimeAction(unittest.TestCase):
+    def test_against_scales_the_unit_when_the_mult_is_set_and_vetoes_otherwise(self):
+        st = Strategy(dict(side="long", unit_qty=70, against_regime_mult=0.5)); st.regime = "AGAINST"
+        r = st.step(F(), [dict(sig="DIP_SLOWING")], dict(lots=[], last=None)); self.assertEqual(r["buy"][:2], (2.999, 35.0))   # half a unit
+        st2 = Strategy(dict(side="long", unit_qty=70)); st2.regime = "AGAINST"
+        r = st2.step(F(), [dict(sig="DIP_SLOWING")], dict(lots=[], last=None)); self.assertEqual(r["events"][0][1]["why"], "regime")   # the veto (default)
+
+    def test_drift_floor_in_percent_keeps_a_small_grind_two_way(self):
+        from bot.signal import SIG
+        rg = dict(rg_t=1, rg_er=0.2, rg_drift=-7.6, rg_up=0, rg_dn=0, rg_med_up=0.0, rg_med_dn=0.0)
+        st = Strategy(dict(side="long"), {**SIG, "rg_confirm": 1}); st.step(F(atr=0.004, mid=3.0, **rg), [], dict(lots=[], last=None))
+        self.assertEqual(st.regime, "AGAINST")                                                     # 7.6 ATR of 0.13% = a 1% grind: AGAINST today
+        st2 = Strategy(dict(side="long"), {**SIG, "rg_confirm": 1, "rg_drift_min_pct": 2.0}); st2.step(F(atr=0.004, mid=3.0, **rg), [], dict(lots=[], last=None))
+        self.assertEqual(st2.regime, "TWO_WAY")                                                    # 1% < 2%: not a one-way that matters
+        st3 = Strategy(dict(side="long"), {**SIG, "rg_confirm": 1, "rg_drift_min_pct": 2.0}); st3.step(F(atr=0.02, mid=3.0, **rg), [], dict(lots=[], last=None))
+        self.assertEqual(st3.regime, "AGAINST")                                                    # 7.6 ATR of 0.67% = 5%: the real thing
+
 class Regime(unittest.TestCase):
     def test_counter_swings_prevent_one_way_label(self):
         st = Strategy(dict(side="long")); pos = dict(lots=[], last=None)

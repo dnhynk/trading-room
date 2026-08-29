@@ -17,6 +17,7 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            brk_lookback=1800, brk_atr=0.3, brk_vol=2.0, brk_cooldown=300, cooldown=60, refire_atr=1.0, depth_levels=5,
            # regime block (per closed 1m candle, rg_window candles): efficiency ratio, drift in ATR, zigzag swings >= rg_theta %
            rg_window=90, rg_theta=0.7, rg_drift=6.0, rg_counter_max=1, rg_confirm=3, rg_dead_sw=2,
+           rg_drift_min_pct=0.0,   # > 0: AGAINST/FAVOR also need the window's net move to be at least this % of price (a -1% grind in a 0.1%-ATR tape is 7 ATR but no catastrophe)
            # volume profile from the last vp_window 1m candles (volume spread over each bar's range), buckets of vp_bucket_ticks
            vp_window=360, vp_bucket_ticks=5, vp_hvn=1.5,
            # 1m-candle rule = the manual watcher's speed_line (bot/watch.py v13, 2026-08-29); emitted with src="1m"
@@ -34,6 +35,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: breakeven)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
+             against_regime_mult=0.0,                    # > 0: an AGAINST regime scales the unit by this instead of vetoing adds (a size scale, never a veto)
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
              cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_cooldown_s=300, max_stops_day=3,
              buy_ttl_s=90, cancel_v=1.0, tick=0.001, qstep=0.1)
@@ -516,9 +518,10 @@ class Strategy:
         fav_n, adv_n = (f["rg_up"], f["rg_dn"]) if s > 0 else (f["rg_dn"], f["rg_up"])
         fav_m, adv_m = (f["rg_med_up"], f["rg_med_dn"]) if s > 0 else (f["rg_med_dn"], f["rg_med_up"])
         drift = s * f["rg_drift"]; asym = fav_m / adv_m if adv_m else (9.9 if fav_m else 1.0)
+        big = abs(f["rg_drift"]) * (f.get("atr") or 0.0) / f["mid"] * 100 >= g.get("rg_drift_min_pct", 0.0)   # the move is large in price, not only in ATR
         # one-way = strong drift AND (almost) no swings against it; a trend with 1%+ counter-swings every 20 minutes is cycle territory
-        if drift <= -g["rg_drift"] and fav_n <= g["rg_counter_max"]: cand = "AGAINST"
-        elif drift >= g["rg_drift"] and adv_n <= g["rg_counter_max"]: cand = "FAVOR"
+        if drift <= -g["rg_drift"] and fav_n <= g["rg_counter_max"] and big: cand = "AGAINST"
+        elif drift >= g["rg_drift"] and adv_n <= g["rg_counter_max"] and big: cand = "FAVOR"
         elif fav_n + adv_n < g["rg_dead_sw"]: cand = "DEAD"
         else: cand = "TWO_WAY"
         if self.regime == "AGAINST" and cand != "AGAINST" and not (fav_n > g["rg_counter_max"] or drift > -g["rg_drift"] / 2): cand = "AGAINST"
@@ -543,10 +546,11 @@ class Strategy:
         if ("BREAKDOWN" if s > 0 else "BREAKOUT") in names and qty: self.brk_seen = True   # the break hit a campaign that already existed
         if not qty or not (f["brk"] if s > 0 else f["bko"]): self.brk_seen = False         # flat, or the 5-minute flag has expired
         blocked = (pos.get("halt") or ("pause" if pos.get("pause") else None) or ("cooldown" if t < pos.get("cooldown_until", 0) else None)
-                   or ("regime" if self.regime == "AGAINST" else None))
+                   or ("regime" if self.regime == "AGAINST" and not p["against_regime_mult"] else None))
         # entry / add / rebuy: arm on the buy-side signal, rest at the touch until filled, TTL, or the move re-accelerates
         qs = p.get("qstep") or 0.1                                  # the unit is a whole number of exchange quantity steps before it is armed
-        unit = round(max(round(p["unit_qty"] * pos.get("unit_mult", 1.0) / qs) * qs, qs), 9)
+        mult = pos.get("unit_mult", 1.0) * (p["against_regime_mult"] if self.regime == "AGAINST" and p["against_regime_mult"] else 1.0)   # AGAINST: smaller adds, not none
+        unit = round(max(round(p["unit_qty"] * mult / qs) * qs, qs), 9)
         confirm_on = p["add_confirm"] if p["add_confirm"] is not None else 0
         for x in sigs:                                              # remember when each rule last fired the buy-side signal
             if x["sig"] == buy_sig: self.sig_seen[x.get("src", "?")] = t
