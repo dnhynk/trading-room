@@ -19,10 +19,12 @@ def report(day):
     out = [f"# nightly {day}  ({len(files)} recording files, {len(warm)} warm-up)\n"]
     if files:
         out.append("## signals (replay, forward 15m; split by source / volume decay / CVD divergence / value area / regime)\n")
-        out.append(run_cmd(["bot.replay"] + warm + files + ["--quiet", "--day", day, "--by", "sell_decay,buy_decay,cvd_div,cvd_div_bear,vp_va,vp_dens,rg_er,U,D,side_hint_1h,daily_trend,dbl,brk"]))
+        out.append(run_cmd(["bot.replay"] + warm + files + ["--quiet", "--day", day, "--by", "sell_decay,buy_decay,cvd_div,cvd_div_bear,vp_va,vp_dens,rg_er,U,D,side_hint_1h,side_hint_15m,daily_trend,dbl,brk"]))
         out.append("\n## legs (where the deceleration detectors fire vs the real extremes; speed-model evidence)\n")
         out.append(run_cmd(["bot.legs"] + warm + files + ["--quiet", "--day", day]))
-        out.append("\n## sides (the day's tape as long / short / dual; by_hint = realized pnl per book split by the 1H structure hint)\n")
+        out.append("\n## direction capture (live book from events.jsonl x the day's candles; up/dn held = share of minute moves and of legs that happened while holding)\n")
+        out.append(run_cmd(["bot.capture", "--day", day]))
+        out.append("\n## sides (the day's tape as long / short / dual; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
         for sides in ("long", "short", "long,short"):
             out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sides", sides]).strip().split("\n") or [""])[-1])
         out.append("\n## tuner (report only)\n")

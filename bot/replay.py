@@ -2,7 +2,9 @@
   python -m bot.replay FILE... [--sym TRUMPUSDT] [--sig k=v ...] [--all] [--by src,sell_decay,cvd_div,vp_va] [--quiet]
 Prints one line per DIP_SLOWING / POP_STALLING (BREAKDOWN/BREAKOUT with --all) with the features that produced it and the forward
 path: mid change after 1/5/15 min and the max favorable / adverse excursion within 15 min (in % of mid, favorable = the direction
-the signal implies), then a summary per signal type, and with --by a summary split by the given feature values (booleans and
+the signal implies), plus "hold vs sell": the pnl of holding the side the stall would have sold (a long after POP_STALLING) with a
+trailing stop of 0.5 / 1.5 ATR for up to 30 min — positive means holding the core beat selling it at the stall (the average/direction
+concept's question, split by structure with --by side_hint_1h), then a summary per signal type, and with --by a summary split by the given feature values (booleans and
 small integers; floats are split at their median). --quiet prints only the summaries. Thresholds are tuned against this table."""
 import gzip, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,13 +18,26 @@ def lines(path):
             i = line.find("\t")
             if i > 0: yield int(line[:i]), line[i + 1:]
 
+def hold_pnl(m0, path, d, trail):
+    """% pnl of holding direction d from m0 with a trailing stop `trail` (price units) under the running favourable extreme; exit at
+    the trail hit or the end of the path. Against 0 (= sold at the stall) it says whether holding the core beat selling it."""
+    if not path or trail <= 0: return None
+    ext = m0
+    for m in path:
+        if d * (m - ext) > 0: ext = m
+        if d * (ext - m) >= trail: return d * (m - m0) / m0 * 100
+    return d * (path[-1] - m0) / m0 * 100
+
 def summarize(rows, label):
     for name in ("DIP_SLOWING", "POP_STALLING"):
         rs = [fwd for x, fwd in rows if x["sig"] == name and fwd.get("15m") is not None]
         if not rs: continue
         mean = lambda k: sum(r[k] for r in rs) / len(rs)
         win = sum(1 for r in rs if r["mfe"] >= 0.5) / len(rs) * 100
-        print(f"  {label:<28} {name:<12} n={len(rs):3d} 1m={mean('1m'):+.2f}% 5m={mean('5m'):+.2f}% 15m={mean('15m'):+.2f}% mfe={mean('mfe'):+.2f}% mae={mean('mae'):+.2f}% hit={win:.0f}%")
+        hs = [r for r in rs if r.get("hold05") is not None]
+        hold = (f" | hold vs sell: trail.5={sum(r['hold05'] for r in hs) / len(hs):+.2f}%({sum(1 for r in hs if r['hold05'] > 0) / len(hs) * 100:.0f}% won) "
+                f"trail1.5={sum(r['hold15'] for r in hs) / len(hs):+.2f}%({sum(1 for r in hs if r['hold15'] > 0) / len(hs) * 100:.0f}% won)") if hs else ""
+        print(f"  {label:<28} {name:<12} n={len(rs):3d} 1m={mean('1m'):+.2f}% 5m={mean('5m'):+.2f}% 15m={mean('15m'):+.2f}% mfe={mean('mfe'):+.2f}% mae={mean('mae'):+.2f}% hit={win:.0f}%{hold}")
 
 def split_by(rows, key):
     vals = [x.get(key) for x, _ in rows if x.get(key) is not None]
@@ -56,6 +71,8 @@ def run(files, sym, sig, show_all, by=(), quiet=False, day=None):
             path = [m for _, m in mids[i + 1:i + 901]]
             fwd["mfe"] = max((m / m0 - 1) * 100 * sgn for m in path) if path else None
             fwd["mae"] = min((m / m0 - 1) * 100 * sgn for m in path) if path else None
+            path30 = [m for _, m in mids[i + 1:i + 1801]]; atr = x.get("atr") or 0.0      # holding the side the stall would have sold (a long after POP_STALLING) for up to 30 min
+            fwd["hold05"], fwd["hold15"] = hold_pnl(m0, path30, -sgn, 0.5 * atr), hold_pnl(m0, path30, -sgn, 1.5 * atr)
         rows.append((x, fwd))
     g = lambda v, w=6: f"{v:+{w}.2f}" if isinstance(v, (int, float)) and v is not None else " " * (w - 1) + "-"
     for x, fwd in ([] if quiet else rows):
