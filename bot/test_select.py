@@ -38,7 +38,7 @@ class Flags(unittest.TestCase):
         self.assertIn("pump+60%", flags_of(x, [dict(pump=False, bounce=0.9, er=0.2, net=20.0)] * 3, 60.0))          # +60% over the windows: a pump, however two-way
         self.assertIn("pump+62%", flags_of(x, [dict(pump=False, bounce=0.8, er=0.09, net=54.0), dict(pump=False, bounce=0.9, er=0.02, net=6.0)], 62.0))   # PROMUSDT 2026-08-30: +54% in a day
         self.assertEqual(flags_of(x, [dict(pump=False, bounce=0.6, er=0.1, net=-30.0)] * 2, -45.0), [])            # a crash, however deep, is not a pump
-        self.assertTrue(any(f.startswith("ER") for f in flags_of(x, [dict(pump=False, bounce=0.5, er=0.5)], 3.0)))   # one-way right now
+        self.assertTrue(any(f.startswith("ER") for f in flags_of(x, [dict(pump=False, bounce=0.5, er=0.5, net=3.0)], 3.0)))   # one-way right now
 
 class Verdict(unittest.TestCase):
     def rows(self, inc_proxy=1.0, inc_concept=1.0, best_proxy=2.0, best_concept=1.5, best_flags=()):
