@@ -56,7 +56,7 @@
     "adopt": false,
     "unit_qty": 70,
     "unit_frac": 1.5,
-    "cap_frac": 0.3,
+    "cap_frac": 0.15,
     "daily_loss_frac": 0.3,
     "max_units": 4,
     "max_notional": 900,
