@@ -27,7 +27,7 @@
 - `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 기록만(방향은 종목 전환 시 select가 1H 구조로 정한다; 보유 중 자동 플립은 야간 롱/숏/쌍검 표가 갈릴 때 수정 세션이 켠다). `SYMBOL_SWITCH` → select가 종목·방향을 바꾼 것(flat에서, 엔진 재기동). RULES·메모리를 다시 읽고 한 줄 보고. 전환이 이상하면(플래그 종목·하루 2회 등) select 자식을 세우고 보고.
 - `PARAMS_DEFERRED` → live에서 포지션·주문이 있어 symbol/sides/mode 변경을 플랫까지 보류 중. 기다린다(엔진이 플랫이 되면 스스로 재기동). `STATE_DISCARDED` → 모드가 바뀐 재기동이 이전 모드의 장부를 버린 것. 정보.
 - `EMERGENCY_CANCEL_UNCONFIRMED` → 비상 청산 전 취소 확인이 6초 안에 안 온 것. 즉시 `bot/trade.py status`로 포지션·주문 확인.
-- `STOP_LIQ_GUARD` → 원하는 스탑이 청산가 너머라 청산가 바로 위로 올려 둔 것. cap이 유닛 증거금보다 클 때 1~2유닛에서 정상. 기록만.
+- `STOP_LIQ_GUARD` → 원하는 스탑(돈 한도)이 청산가 너머라 청산가 바로 위로 올려 둔 것. B(구조가 소프트, 거래소 스탑 = cap)에서는 1~2유닛의 정상 상태라 events.jsonl에만 남는다. 기록만.
 - `TAKER_UNCONFIRMED` → 시장가 응답 유실. 엔진이 clientOid로 조회해 종결(`TAKER_SETTLED`)할 때까지 새 시장가를 내지 않는다. 30초 넘게 미해결이면 ERROR → `bot/trade.py status`로 확인.
 - `EXTERNAL_FILL` 직전에 events.jsonl에 `CLOSE_FILL_PENDING`이 있었으면 algo 채널이 15초 안에 이름을 못 댄 손절일 수 있다 — 플랜 주문 이력으로 확인 후 `RESUME`.
 - `SWEEP_FAIL` → 페이백 이체 실패(권한·잔고). 10분마다 자동 재시도. 반복되면 보고.

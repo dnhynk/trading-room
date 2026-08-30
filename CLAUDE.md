@@ -14,7 +14,7 @@
 
 ## 계정 규칙 (Bitget 헤지 모드, 사용자가 같은 계정을 가끔 손으로도 쓴다)
 - 엔진은 `params.json`의 (symbol, side)를 배타 소유한다 — 시작은 `TRUMPUSDT` long이었고, **종목·방향은 `bot/select.py`(감시견 `select`)가 RULES의 전환 규칙대로 flat에서 자동으로 바꾼다**(`SYMBOL_SWITCH` 알림). `params.json`의 `strat.symbol/side/sides`·`record`는 select가 쓰고, 나머지 키는 사람(감독 세션)이 쓴다. 엔진 주문은 clientOid `cycL-`/`cycS-`, 엔진 스탑은 그 방향의 pos_loss 플랜. 그 밖의 포지션·주문·플랜은 사용자 것이며 절대 건드리지 않는다.
-- 엔진 쪽 스탑을 없애거나 내리는 변경은 하지 않는다. `bot/trade.py`는 조회(`status`)와 사용자가 시킨 수동 조작에만 쓴다.
+- 거래소 스탑(돈 한도 pos_loss)을 없애는 변경은 하지 않는다. 구조가는 소프트(derisk 근거)다 — B, 사용자 결정 2026-08-30. `bot/trade.py`는 조회(`status`)와 사용자가 시킨 수동 조작에만 쓴다.
 - spot에 들어오는 수수료 페이백은 `sweep` 감시견이 선물 계좌로 옮긴다(복리). spot USDT를 다른 데 쓰지 않는다.
 - `.env`(API 키)는 읽기만. 출력·전송 금지.
 

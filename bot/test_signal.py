@@ -43,11 +43,13 @@ class Entry(unittest.TestCase):
         apply_fill(pos, 1, True, 70, 2.949, "b"); st.on_fill("buy", 70)
         r = st.step(F(t=200, mid=2.9, bid=2.899, ask=2.901), [dict(sig="DIP_SLOWING")], pos); self.assertEqual(r["events"][-1][1]["why"], "max_units")
 
-    def test_caps_budget_blocks_when_loss_at_stop_exceeds_cap(self):
-        st = Strategy(dict(side="long", unit_qty=70, max_units=4, cap_usdt=5)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
-        st.step(F(), [], pos)
-        r = st.step(F(t=101, mid=2.95, bid=2.949, ask=2.951), [dict(sig="DIP_SLOWING")], pos)
-        self.assertEqual(r["events"][0][1]["why"], "cap")
+    def test_an_add_moves_the_money_cap_stop_up_never_down(self):
+        st = Strategy(dict(side="long", unit_qty=70, max_units=4, cap_usdt=5, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        s1 = st.step(F(), [], pos)["stop"]; self.assertAlmostEqual(s1, 3.0 - 5 / 70, 3)
+        r = st.step(F(t=101, mid=2.95, bid=2.949, ask=2.951), [dict(sig="DIP_SLOWING")], pos); self.assertEqual(r["events"][0][0], "ARM")   # no cap budget: the cap is the stop
+        apply_fill(pos, 1, True, 70, 2.949, "b"); st.on_fill("buy", 70)
+        s2 = st.step(F(t=102, mid=2.95, bid=2.949, ask=2.951), [], pos)["stop"]
+        self.assertAlmostEqual(s2, pos_stats(pos)[1] - 5 / 140, 3); self.assertGreater(s2, s1)                # the loss at the stop is the cap again, and the stop only rose
 
     def test_flat_book_takes_the_next_deceleration_wherever_it_comes(self):
         st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None)
@@ -87,13 +89,25 @@ class Stops(unittest.TestCase):
         # step = max(0.5%, 0.7 x ATR15/px) = 1.43%; 1 unit of 4 -> 3 adds -> the level must be >= 4.3% under the last buy
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_trail=1)); pos = dict(lots=[[70, 2.929, "a"]], avg=2.929, last="buy", last_buy_px=2.929)
         r = st.step(F(mid=2.93, htf_lows=[2.905, 2.80, 2.70]), [], pos)
-        self.assertAlmostEqual(r["stop"], 2.80 - 0.3 * 0.06, 3)            # 2.905 (0.8% under) sits inside the ladder: ignored; 2.80 (4.4%) is the premise
+        self.assertAlmostEqual(st.struct_stop, 2.80 - 0.3 * 0.06, 3)       # 2.905 (0.8% under) sits inside the ladder: ignored; 2.80 (4.4%) is the premise (soft level)
+        self.assertAlmostEqual(r["stop"], 2.929 - 20 / 70, 3)               # the exchange stop is the money cap alone (B)
         self.assertEqual([e[1]["level"] for e in r["events"] if e[0] == "STRUCT_STOP"], [2.80])
         apply_fill(pos, 1, True, 70, 2.90, "b"); pos["last_buy_px"] = 2.90    # 2 units in: 2 adds left -> room 2.9% under 2.90 -> level <= 2.816
-        self.assertAlmostEqual(st.step(F(t=101, mid=2.91, htf_lows=[2.81]), [], pos)["stop"], 2.81 - 0.018, 3)    # a higher qualifying low: trail
-        self.assertAlmostEqual(st.step(F(t=102, mid=2.91, htf_lows=[2.85]), [], pos)["stop"], 2.81 - 0.018, 3)    # 2.85 is inside the ladder: no trail
+        st.step(F(t=101, mid=2.91, htf_lows=[2.81]), [], pos); self.assertAlmostEqual(st.struct_stop, 2.81 - 0.018, 3)    # a higher qualifying low: the soft level trails
+        st.step(F(t=102, mid=2.91, htf_lows=[2.85]), [], pos); self.assertAlmostEqual(st.struct_stop, 2.81 - 0.018, 3)    # 2.85 is inside the ladder: no trail
         st2 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20)); pos2 = dict(lots=[[70, 2.929, "a"]], avg=2.929, last="buy", last_buy_px=2.929)
-        self.assertAlmostEqual(st2.step(F(mid=2.93, htf_lows=[2.905, 2.88]), [], pos2)["stop"], 2.929 - 20 / 70, 3)   # nothing below the ladder: money cap only
+        self.assertAlmostEqual(st2.step(F(mid=2.93, htf_lows=[2.905, 2.88]), [], pos2)["stop"], 2.929 - 20 / 70, 3); self.assertIsNone(st2.struct_stop)   # nothing below the ladder: no premise level
+
+    def test_premise_break_is_a_derisk_trigger_not_an_exchange_stop(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, derisk_pct=3.0, derisk_core_frac=0.5, pop_min_pct=0.4)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        r0 = st.step(F(htf_lows=[2.85]), [], pos); self.assertAlmostEqual(st.struct_stop, 2.85 - 0.018, 3); self.assertAlmostEqual(r0["stop"], 3.0 - 20 / 70, 3)
+        r1 = st.step(F(t=101, mid=2.80, bid=2.799, ask=2.801, htf_lows=[2.85]), [], pos)
+        self.assertTrue(st.prem_broken); self.assertAlmostEqual(r1["stop"], 3.0 - 20 / 70, 3); self.assertIsNone(r1["trim"])   # under the premise: no stop hit, the sale waits for a bounce
+        r2 = st.step(F(t=102, mid=2.92, bid=2.919, ask=2.921, htf_lows=[2.85]), [dict(sig="POP_STALLING")], pos)
+        self.assertEqual(r2["trim"][1], 35); self.assertAlmostEqual(r2["stop"], 3.0 - 20 / 70, 3)          # a weak bounce within derisk_pct of the average: half the core goes, the exchange stop never moved
+        apply_fill(pos, 1, False, 35, 2.92, "t", 0.04); st.on_fill("trim", 35)
+        st.step(F(t=103, mid=2.92, bid=2.919, ask=2.921, htf_lows=[2.85]), [], pos)
+        self.assertFalse(st.prem_broken); self.assertGreater(st.gate_eff, 0)                                  # the fill clears the evidence and the price is back above the level: normal gates
 
     def test_no_stop_when_price_beyond_cap(self):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)

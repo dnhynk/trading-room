@@ -27,7 +27,7 @@ import asyncio, json, os, sys, time
 from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
-from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match, structural_level
+from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match
 from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,8 +35,8 @@ LOGS = os.path.join(ROOT, "logs")
 STATE, EVENTS, ALERTS = (os.path.join(LOGS, f) for f in ("state.json", "events.jsonl", "alerts.jsonl"))
 PUB_CH = ("trade", "books15", "candle1m", "ticker")
 ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", "STOP_FAILED", "STOP_MODIFY_FAIL", "MARGIN_LOCKED", "REGIME_CHANGE", "SIDE_HINT", "PARAMS_INVALID",
-         "PARAMS_DEFERRED", "STATE_DISCARDED", "EMERGENCY_CANCEL_UNCONFIRMED", "TAKER_UNCONFIRMED", "STOP_LIQ_GUARD", "ERROR", "EXIT"}
-QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS"}   # events.jsonl only, not stdout
+         "PARAMS_DEFERRED", "STATE_DISCARDED", "EMERGENCY_CANCEL_UNCONFIRMED", "TAKER_UNCONFIRMED", "ERROR", "EXIT"}
+QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS", "STOP_LIQ_GUARD"}   # events.jsonl only, not stdout
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
 SLIP = 0.0005          # dry-mode stop-out slippage
 
@@ -240,13 +240,7 @@ class Book:
             try:
                 sl = None
                 if role == "buy" and not self.pos["lots"]:      # first unit: the order carries the stop so the fill is protected from its first millisecond
-                    f = self.feat.f; cap = px - self.s * self.sp["cap_usdt"] / qty; a = f.get("atr15") or f.get("atr")
-                    if isinstance(self.sp.get("stop_structural"), (int, float)): st = self.sp["stop_structural"]      # the explicit level, as the Strategy uses it
-                    else:
-                        lvl = structural_level(f, self.s, px, self.sp, 1) if self.sp.get("stop_structural_on") else None   # same rule as the Strategy's stop
-                        st = (lvl - self.s * self.sp["stop_buffer_atr"] * a) if lvl and a else None
-                    cand = (max(st, cap) if self.s > 0 else min(st, cap)) if st is not None else cap
-                    sl = self.fpx(self.guard(cand if self.s * (px - cand) > 0 else cap, px))
+                    sl = self.fpx(self.guard(px - self.s * self.sp["cap_usdt"] / qty, px))   # the money cap, as the Strategy's exchange stop (the premise level is soft)
                 r = await self.cy.rest(self.cy.b.limit_order, self.symbol, "buy" if self.s > 0 else "sell", self.fpx(px), self.fq(qty),
                                        trade_side="open" if role == "buy" else "close", post_only=True, client_oid=oid, sl=sl)
                 w["order_id"] = r.get("orderId"); w["preset_sl"] = sl

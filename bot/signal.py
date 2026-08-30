@@ -492,7 +492,8 @@ class Strategy:
         self.p = {**STRAT, **(strat or {})}; self.sig = sig if sig is not None else dict(SIG)
         self.arm = None          # (until_sec, ref_mid) after a buy-side signal
         self.pull = None         # dict(t, qty, target) after a trim-side signal: sell qty until position <= target
-        self.struct_stop = None  # structural stop of the open position (None while flat)
+        self.struct_stop = None  # the open position's premise level (soft: a de-risk trigger, never the exchange stop; None while flat)
+        self.prem_broken = False # latch: price has been beyond the premise level; cleared by a fill or a full recovery, like derisk_armed
         self.stop_px = None      # last stop returned; once set for a position it is never moved against the position
         self.peak = None         # best favourable mid since the last fill (retrace-based top detection)
         self.fail_n = 0          # trim-side stalls that failed to reach the LIFO lot's gate (gate relaxation); the lot's own history
@@ -569,10 +570,7 @@ class Strategy:
         def caps_why(extra):   # caps are quantity-based (a partially filled unit does not count as a whole one)
             if qty + extra > p["max_units"] * unit + 1e-9: return "max_units"
             if (qty + extra) * mid > p["max_notional"]: return "max_notional"
-            if self.stop_px is not None and qty and extra > 0:      # the loss cap is an add budget: never loosen the stop to fit more units
-                avg2 = (avg * qty + mid * extra) / (qty + extra)
-                if s * (avg2 - self.stop_px) * (qty + extra) > p["cap_usdt"]: return "cap"
-            return None
+            return None                                              # the money cap is the exchange stop itself: an add above it moves that stop up (loss at the stop stays = cap), never down
         if self.arm and self.arm_filled >= self.arm[2] - 1e-9: ev.append(("DISARM", dict(why="filled"))); self.arm = None   # a completed unit frees the next signal
         if buy_sig in names:
             why = None
@@ -615,10 +613,12 @@ class Strategy:
             self.last_lot = lot_id
             floor = 0.0 if is_core else p["gate_floor_unit_pct"]                              # core: breakeven; added unit: fees covered
             g_rel = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n            # the market refusing bounces lowers the bar
-            if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = self.brk_seen = False   # a fill or a full recovery clears the damage evidence (latch and break alike) ...
+            if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = self.brk_seen = self.prem_broken = False   # a fill or a full recovery clears the damage evidence (latch, break and premise alike) ...
             elif dev <= -step: self.derisk_armed = True                                    # ... and it can only re-arm on a later tick
+            soft = p.get("stop_structural") or self.struct_stop                            # the campaign's premise level is a de-risk trigger, not an exchange order (B, user 2026-08-30)
+            if soft is not None and s * (mid - soft) < 0: self.prem_broken = True         # beyond the premise: sell into the bounces, the money cap alone stays on the exchange
             derisk = p["derisk_pct"] > 0 and ((self.regime == "AGAINST" and p["derisk_on_against"]) or self.derisk_armed
-                                              or (p["derisk_on_breakdown"] and self.brk_seen))
+                                              or (p["derisk_on_breakdown"] and self.brk_seen) or self.prem_broken)
             gate = -p["derisk_pct"] if (derisk and is_core) else g_rel      # an added unit is only ever sold above its own buy price; the loss is taken on the core vs the average
             self.gate_eff = gate
             core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if (favor or (derisk and dev_lot < g_rel)) and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells, FAVOR or not; de-risk only shapes the weak bounce
@@ -653,24 +653,24 @@ class Strategy:
                 px = avg * (1 + s * p["trim_rest_pct"] / 100)
                 px = max(px, touch_out) if s > 0 else min(px, touch_out)
                 trim = (round_tick(px, tick), min(lot_qty, sellable) if favor else lot_qty, "maker")
-        # stop: structural level (frozen at open; ratchets in FAVOR), tightened by the USDT loss cap when that is closer
+        # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
+        # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = None; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0
+        if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0
         else:
             cap_px = avg - s * p["cap_usdt"] / qty
-            # the structural stop is the campaign's premise (15m/1H pivot) and must leave room for the remaining add ladder below the last buy;
-            # a level inside the ladder is ignored (money cap only). Structure only when switched on, or riding a FAVOR one-way.
+            # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
+            # ladder is ignored. Structure only when switched on, or riding a FAVOR one-way.
             lvl = structural_level(f, s, pos.get("last_buy_px") or mid, p, len(pos["lots"])) if (p["stop_structural_on"] or favor) else None
             if lvl and (f.get("atr15") or atr):
                 cand = lvl - s * p["stop_buffer_atr"] * (f.get("atr15") or atr)
                 if self.struct_stop is None and self.stop_px is None:
                     if s * (mid - cand) > 0: self.struct_stop = cand; ev.append(("STRUCT_STOP", dict(level=lvl, stop=round(cand, 6))))
-                    else: ev.append(("STRUCT_SKIP", dict(level=lvl, mid=mid)))          # structure is above the price: money cap only
+                    else: ev.append(("STRUCT_SKIP", dict(level=lvl, mid=mid)))          # structure is above the price: no premise level
                 elif (self.struct_stop is not None and (favor or p["stop_trail"]) and s * (mid - cand) > 0
                       and s * (round_tick(cand, tick) - round_tick(self.struct_stop, tick)) >= tick - 1e-12):    # a newly defended low, at least one tick tighter
                     self.struct_stop = cand; ev.append(("TRAIL", dict(level=lvl, stop=round_tick(cand, tick))))
-            st = p.get("stop_structural") or self.struct_stop
-            stop = cap_px if st is None else (max(st, cap_px) if s > 0 else min(st, cap_px))
+            stop = cap_px
             if self.stop_px is None and s * (mid - stop) <= 0:      # only a brand-new stop can be "wrong"; an existing one that price reaches is a stop hit, never moved
                 ev.append(("STOP_INVALID", dict(stop=stop, mid=mid)))
                 stop = cap_px if s * (mid - cap_px) > 0 else None

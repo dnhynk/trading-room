@@ -36,7 +36,7 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "rg_window": ("sig", [45, 60, 90, 120, 180]),
     "rg_drift_min_pct": ("sig", [1.0, 2.0, 3.0, 5.0]),         # a one-way that matters: the window's net move in % (0 would restore the ATR-only reading: not offered)
     "against_regime_mult": ("strat", [0.25, 0.5, 0.75, 1.0]),  # AGAINST scales the add (0 would restore the veto: not offered, user decision 2026-08-30)
-    "stop_buffer_atr": ("strat", [0.3, 0.5, 0.8, 1.2]),        # how far under the pivot the stop sits: hunt-proofing vs a larger loss on a real break (bot/sweeps.py measures the hunts)
+    "stop_buffer_atr": ("strat", [0.3, 0.5, 0.8, 1.2]),        # how far under the pivot the premise counts as broken (B: a de-risk trigger, not an exchange stop; bot/sweeps.py measures the hunts)
     "brk_atr": ("sig", [0.3, 0.5, 0.8, 1.2, 2.0]),             # how far under the 30-min low (in ATR) a volume push counts as a break -> the de-risk trigger's depth (2026-08-30: 3 of 4 campaigns were halved at -0.3% by breaks 0.25% under the low)
     "derisk_core_frac": ("strat", [0.25, 0.5, 0.75]),
 }

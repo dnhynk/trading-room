@@ -6,19 +6,19 @@
       "ticker",
       "candle1m"
     ],
-    "SOLUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
     "ZECUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "XRPUSDT": [
+    "DOGEUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SOLUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -36,13 +36,13 @@
       "ticker",
       "candle1m"
     ],
-    "BTCUSDT": [
-      "candle1m"
-    ],
     "PROMUSDT": [
       "trade",
       "books15",
       "ticker",
+      "candle1m"
+    ],
+    "BTCUSDT": [
       "candle1m"
     ]
   },
