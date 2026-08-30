@@ -39,7 +39,8 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
              derisk_on_against=True,                     # False: the AGAINST label (a trailing 90-min statistic, late by construction) only scales adds; de-risk keeps its timely triggers (latch, fresh break)
              cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_cooldown_s=300, max_stops_day=3,
-             buy_ttl_s=90, cancel_v=1.0, tick=0.001, qstep=0.1)
+             buy_ttl_s=90,                               # a real filter, not a backstop: rests beyond it pre-empt the next signal's lower fill (2026-08-30 tapes: 300/900/1800 s all worse even with the "left" cancel)
+             cancel_v=1.0, tick=0.001, qstep=0.1)
 
 
 class EMA:
@@ -591,6 +592,7 @@ class Strategy:
             if blocked: ev.append(("DISARM", dict(why=blocked))); self.arm = None
             elif caps_why(rem): ev.append(("DISARM", dict(why=caps_why(rem)))); self.arm = None
             elif t >= self.arm[0]: ev.append(("DISARM", dict(why="ttl"))); self.arm = None
+            elif s * (mid / self.arm[1] - 1) * 100 >= p["pop_min_pct"]: ev.append(("DISARM", dict(why="left", mid=mid))); self.arm = None   # a pop-sized bounce from the signal price: the move the deceleration predicted happened without us; a later fill here would be a new down-move bought without a reading
             elif s * f["v"] <= -p["cancel_v"]: ev.append(("DISARM", dict(why="reaccel", v=round(f["v"], 2)))); self.arm = None
             else:
                 px = touch_in; w = (working or {}).get("buy")

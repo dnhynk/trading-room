@@ -61,6 +61,15 @@ class Entry(unittest.TestCase):
         r = st.step(F(t=102, mid=2.99, bid=2.989, ask=2.991), [dict(sig="DIP_SLOWING")], pos)
         self.assertEqual(r["events"][0][0], "ARM")
 
+    def test_resting_entry_is_dropped_by_state_not_by_the_clock(self):
+        st = Strategy(dict(side="long", unit_qty=70, pop_min_pct=0.4, buy_ttl_s=900)); pos = dict(lots=[], last=None)
+        r = st.step(F(mid=3.0, bid=2.999, ask=3.001), [dict(sig="DIP_SLOWING")], pos); self.assertEqual(r["buy"], (2.999, 70))
+        r = st.step(F(t=700, mid=3.006, bid=3.005, ask=3.007), [], pos); self.assertIsNotNone(r["buy"]); self.assertIsNotNone(st.arm)      # a 10-min stall 0.2% above the signal: the same state, the order stays (a 90 s clock would have dropped it)
+        r = st.step(F(t=701, mid=3.013, bid=3.012, ask=3.014), [], pos)
+        self.assertIn(("DISARM", dict(why="left", mid=3.013)), r["events"]); self.assertIsNone(r["buy"]); self.assertIsNone(st.arm)        # +0.43% = a pop-sized bounce: the signal is consumed
+        st.step(F(t=1000, mid=3.0, bid=2.999, ask=3.001), [dict(sig="DIP_SLOWING")], pos); self.assertIsNotNone(st.arm)
+        r = st.step(F(t=1900, mid=3.0, bid=2.999, ask=3.001), [], pos); self.assertIn(("DISARM", dict(why="ttl")), r["events"])            # the clock only bounds a stall that never resolves
+
 class Stops(unittest.TestCase):
     def test_stop_never_loosens_after_an_add(self):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)

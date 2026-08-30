@@ -234,10 +234,9 @@ class Book:
         if not self.cy.live_ok(): self.ev("ORDER_BLOCKED", role=role, why="private feed down"); return
         self.seq += 1; oid = f"{self.OIDP}{role[0]}{int(time.time() * 1000)}{self.seq % 1000:03d}"
         w = dict(oid=oid, order_id=None, px=px, qty=qty, filled=0.0, t=time.time())
-        if self.mode == "dry":
-            lvl = dict(self.feat.bids if self.rest_on_bid(role) else self.feat.asks)
-            w["queue"] = lvl.get(px, 0.0)
-        else:
+        lvl = dict(self.feat.bids if self.rest_on_bid(role) else self.feat.asks)
+        w["queue"] = lvl.get(px, 0.0)                         # contracts already resting at our price (dry: the fill model's queue; live: the record — a miss is a queue that did not drain, not a price that did not come)
+        if self.mode != "dry":
             try:
                 sl = None
                 if role == "buy" and not self.pos["lots"]:      # first unit: the order carries the stop so the fill is protected from its first millisecond
