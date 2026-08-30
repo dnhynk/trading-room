@@ -24,6 +24,20 @@ class Sweeps(unittest.TestCase):
         young = [(t, m, a, (99.0,) if i >= 1100 else (), h) for i, (t, m, a, l, h) in enumerate(secs)]
         self.assertEqual(sweeps(young, 1), [])                                                 # a level younger than 15 min (the leg in progress) does not count
 
+class Follow(unittest.TestCase):
+    def test_the_active_side_follows_the_hint_and_flips_only_when_flat(self):
+        from bot.backtest import Engine
+        eng = Engine(None, dict(side="long", unit_qty=70), follow="15m", sides=["long", "short"])
+        eng.follow_step(1); self.assertEqual((eng.active, eng.flips), ("long", 0))                  # no hint yet: the configured (incumbent) side trades
+        eng.feat.side_hint_15m = "short"; eng.follow_step(2); self.assertEqual((eng.active, eng.flips), ("short", 1))
+        eng.books["short"].pos["lots"] = [[70, 3.0, "a"]]
+        eng.feat.side_hint_15m = "long"; eng.follow_step(3); self.assertEqual(eng.active, "short")   # positioned: the flip waits
+        eng.books["short"].pos["lots"] = []; eng.books["short"].work["buy"] = dict(px=3.1, qty=70, filled=0.0); eng.books["short"].strat.arm = (9, 3.1, 70)
+        eng.follow_step(4); self.assertEqual((eng.active, eng.flips), ("long", 2))
+        self.assertIsNone(eng.books["short"].work["buy"]); self.assertIsNone(eng.books["short"].strat.arm)   # the side that lost the turn rests nothing
+        eng.feat.side_hint_15m = None; eng.follow_step(5); self.assertEqual(eng.active, "long")     # None keeps the side
+        self.assertEqual(eng.active_s, {"long": 3, "short": 2})
+
 class Capture(unittest.TestCase):
     def test_a_book_that_holds_only_the_down_legs_captures_no_up(self):
         rows = [dict(ts=(1_700_000_000 + i * 60) * 1000, o=0, h=0, l=0, c=100 + (i if i < 60 else 120 - i), v=1) for i in range(120)]   # up 60 min, down 60 min

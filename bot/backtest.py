@@ -1,6 +1,9 @@
 """Offline run of the whole engine (Features + Strategy + the dry-run fill model) over recordings — the tuner's objective.
-  python -m bot.backtest FILE... [--sym TRUMPUSDT] [--sides long,short] [--sig k=v ...] [--strat k=v ...]
+  python -m bot.backtest FILE... [--sym TRUMPUSDT] [--sides long,short] [--follow 15m|1h|brk] [--sig k=v ...] [--strat k=v ...]
 --sides long,short runs a long book and a short book on the same feature stream (쌍검술); default = strat.side only.
+--follow is the side-automation counterfactual: both books exist but only the active side may trade; it starts on strat.side and
+changes only while flat, to the 15m / 1H structure hint's side or (brk) the side of the last volume break; a hint of None keeps
+it. Metrics carry follow={flips, share} and the events a FLIP per change.
 Recordings are first condensed to one record per exchange second (bid/ask, top-5 depth, mark, trades, candle rows), grouped and
 sorted by second so cross-channel timestamp inversions cannot leak future quotes into earlier seconds, and cached under data/cache/.
 Before the first second the engine is seeded like the live start: 1000 closed 1m candles (ATR, regime, VP, 1m structure), 200 closed
@@ -109,11 +112,13 @@ class Book:
         self.realized = self.day_realized = self.upl = 0.0; self.cycles = self.adds = self.stops = self.stops_today = 0; self.taker_t = -1e9; self.seq = 0
 
 class Engine:
-    def __init__(self, sig=None, strat=None, qstep=0.1, sides=None):
+    def __init__(self, sig=None, strat=None, qstep=0.1, sides=None, follow=None):
         self.feat = Features(sig); strat = strat or {}
         sides = list(sides or strat.get("sides") or [strat.get("side", STRAT["side"])])
         self.px_tick, self.qstep = None, qstep
-        self.books = {sd: Book(self.feat, strat, sd, len(sides), qstep) for sd in sides}
+        self.follow, self.flips, self.active_s = follow, 0, {}       # follow="15m"|"1h": one side at a time, chosen by that structure hint, flipped only when flat (the side automation counterfactual)
+        self.active = strat.get("side", STRAT["side"]) if follow else None   # starts on the configured side (the incumbent's, as select leaves it); the hint flips it
+        self.books = {sd: Book(self.feat, strat, sd, 1 if follow else len(sides), qstep) for sd in sides}
         self.peak = self.max_dd = 0.0; self.in_mkt = self.n = 0; self.last_t = None; self.day = None
         self.events = []
         self.by_hint, self.last_real = {}, {}                    # realized pnl per book split by the 1H structure hint in force
@@ -145,6 +150,19 @@ class Engine:
         if bk.stops_today >= bk.strat.p["max_stops_day"]: bk.pos["halt"] = "DAILY_STOPS"
         else: bk.pos["cooldown_until"] = self.feat.f["t"] + bk.strat.p["stop_cooldown_s"]
 
+    def follow_step(self, sec):
+        """Side automation as select would do it for the incumbent: the active side is the hint's side, changed only while every book is
+        flat; a hint of None keeps the current side. Books off the active side get no signals and no resting entry."""
+        f = self.feat.f
+        h = (self.feat.side_hint_15m if self.follow == "15m" else self.feat.side_hint_1h if self.follow == "1h"
+             else "short" if f.get("brk") else "long" if f.get("bko") else None)          # "brk": the side of the last volume break (5-min flag) — event-based, not structure-based
+        if h and h != self.active and not any(pos_stats(bk.pos)[0] for bk in self.books.values()):
+            if self.active: self.flips += 1
+            self.active = h; self.events.append((sec, "FLIP", h))
+            for sd, bk in self.books.items():
+                if sd != h: bk.work = dict(buy=None, trim=None); bk.strat.arm = None
+        self.active_s[self.active or "none"] = self.active_s.get(self.active or "none", 0) + 1
+
     # -- per-second step (same order as cycle.py)
     def tick(self, sigs):
         f = self.feat.f
@@ -153,7 +171,7 @@ class Engine:
             self.px_tick = self.feat.tick
             for bk in self.books.values(): bk.strat.p["tick"] = self.px_tick
         if self.px_tick is None: return
-        for bk in self.books.values(): self.tick_book(bk, sigs)
+        for bk in self.books.values(): self.tick_book(bk, sigs if not self.follow or bk.side == self.active else [])
 
     def tick_book(self, bk, sigs):
         f = self.feat.f; qty, avg = pos_stats(bk.pos)
@@ -208,6 +226,7 @@ class Engine:
             if rows and self.feat.sec is None:      # candle history must be in before the clock starts (ATR, warm-up of the 30-min window)
                 self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts)); fed_rows = True
             sigs = self.feat._clock(sec) if self.feat.mid is not None else []     # close N-1 on N-1's book and flow only (live: the first message of N does this)
+            if self.follow: self.follow_step(sec)
             if sigs or self.feat.f.get("t") != self.last_t: self.last_t = self.feat.f.get("t"); self.tick(sigs)
             if trades:
                 self.sim_trades(trades)
@@ -244,14 +263,16 @@ class Engine:
                     adds=sum(v["adds"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
                     in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"),
                     by_hint={k: round(v, 3) for k, v in sorted(self.by_hint.items())},
+                    follow=dict(hint=self.follow, flips=self.flips, share={k: round(v / max(self.n, 1), 3) for k, v in self.active_s.items()}) if self.follow else None,
                     capture={sd: dict(up=round(c['up_held'] / c['up_all'], 3) if c['up_all'] else 0.0, dn=round(c['dn_held'] / c['dn_all'], 3) if c['dn_all'] else 0.0) for sd, c in self.cap.items()})
 
 
-def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=0.1, sides=None):
-    """params.json is the base (as live); sig/strat overrides sit on top; sides default to strat.sides."""
+def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=0.1, sides=None, follow=None):
+    """params.json is the base (as live); sig/strat overrides sit on top; sides default to strat.sides; follow="15m"|"1h" runs both
+    sides with the structure hint choosing which one may trade (flat-only flips)."""
     p = load_params() or {}
     sig = {**(p.get("sig") or {}), **(sig or {})}; strat = {**(p.get("strat") or {}), **(strat or {})}
-    eng = Engine(sig, strat, qstep=qstep, sides=sides)
+    eng = Engine(sig, strat, qstep=qstep, sides=["long", "short"] if follow else sides, follow=follow)
     first = load_seconds(files[0], sym) if files else []
     if first: eng.seed(*seed_history(sym, first[0][0]))
     for path in files: eng.run(first if path == files[0] else load_seconds(path, sym))
@@ -260,16 +281,17 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
     return m
 
 if __name__ == "__main__":
-    args = sys.argv[1:]; files, sym, sig, strat, sides = [], "TRUMPUSDT", {}, {}, None
+    args = sys.argv[1:]; files, sym, sig, strat, sides, follow = [], "TRUMPUSDT", {}, {}, None, None
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--sym": sym = args[i + 1]; i += 2
         elif a == "--sides": sides = args[i + 1].split(","); i += 2
+        elif a == "--follow": follow = args[i + 1]; i += 2
         elif a in ("--sig", "--strat"):
             k, v = args[i + 1].split("="); (sig if a == "--sig" else strat)[k] = float(v) if v.replace(".", "", 1).replace("-", "", 1).isdigit() else v; i += 2
         else: files.append(a); i += 1
     if not files: print(__doc__); sys.exit(0)
-    t0 = time.time(); m = run_files(files, sym, sig, strat, events=True, sides=sides); ev = m.pop("events")
+    t0 = time.time(); m = run_files(files, sym, sig, strat, events=True, sides=sides, follow=follow); ev = m.pop("events")
     for e in ev[-12:]: print("  ", time.strftime("%m-%d %H:%M:%S", time.gmtime(e[0] or 0)), *e[1:])
     print(json.dumps(m), f"({time.time() - t0:.0f}s)")
