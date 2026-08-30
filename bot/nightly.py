@@ -27,6 +27,8 @@ def report(day):
         out.append("\n## sides (the day's tape as long / short / dual; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
         for sides in ("long", "short", "long,short"):
             out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sides", sides]).strip().split("\n") or [""])[-1])
+        out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")
+        out.append(run_cmd(["bot.sweeps"] + warm + files + ["--quiet", "--day", day]))
         out.append("\n## tuner (report only)\n")
         out.append(run_cmd(["bot.tune", "--days", "7", "--workers", "4"], timeout=7200))
     else: out.append("no recordings for this day\n")
