@@ -353,11 +353,14 @@ class Book:
         return self.guard(self.strat.stop_px if self.strat.stop_px is not None else avg - self.s * self.sp["cap_usdt"] / qty, avg)
 
     def guard(self, px, ref):
-        """Liquidation guard: a stop is never left beyond the liquidation price (isolated: ref x (1 -/+ 0.9/lever), or the exchange's own
-        figure once the position exists) — a money cap wider than the margin would otherwise make liquidation the real stop."""
+        """Liquidation guard: a stop is never left beyond the liquidation price — the exchange's own figure when it is a real price on the
+        loss side of the position (crossed: Bitget reports a NEGATIVE sentinel when the whole account backs the position, i.e. no
+        liquidation in range — 2026-08-30 23:53 a short's liq −8.34 turned into a stop request of −8.25, rejected 43011), else in
+        isolated mode ref x (1 -/+ 0.9/lever) (the position's own margin is the real stop when the cap is wider than it); crossed
+        without a real figure: no guard, the money cap stands."""
         liq = self.exch.get("liq"); g = None
-        if liq: g = liq * (1 + self.s * 0.01)
-        elif self.lever and ref: g = ref * (1 - self.s * 0.9 / self.lever)
+        if liq and liq > 0 and self.s * (ref - liq) > 0: g = liq * (1 + self.s * 0.01)
+        elif self.cy.b.margin_mode != "crossed" and self.lever and ref: g = ref * (1 - self.s * 0.9 / self.lever)
         if g is not None and self.s * (px - g) < 0:
             if self.guarded != round(g, 6): self.guarded = round(g, 6); self.ev("STOP_LIQ_GUARD", wanted=round(px, 6), stop=self.guarded, liq=liq, lever=self.lever)
             return g

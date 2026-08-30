@@ -7,7 +7,7 @@ from bot.cycle import Book, valid_params
 
 class FakeREST:
     """Records calls; answers like Bitget."""
-    def __init__(self): self.calls = []; self.plans = []; self.pend = []; self.pos = []; self.status = "cancelled"; self.market_raise = None
+    def __init__(self): self.calls = []; self.plans = []; self.pend = []; self.pos = []; self.status = "cancelled"; self.market_raise = None; self.margin_mode = "isolated"
     def cancel_order(self, symbol, order_id=None, client_oid=None): self.calls.append(("cancel", order_id or client_oid)); return {}
     def order_detail(self, symbol, order_id=None, client_oid=None): self.calls.append(("detail", order_id or client_oid)); return dict(status=self.status)
     def market_order(self, symbol, side, size, trade_side="open", client_oid=None, **kw):
@@ -145,6 +145,19 @@ class LiqGuard(unittest.TestCase):
         self.assertAlmostEqual(float(px), 3.0 * (1 - 0.09), 3); self.assertIn("STOP_LIQ_GUARD", kinds(cy)); self.assertAlmostEqual(bk.strat.stop_px, 2.73, 3)
         bk.on_position(dict(total="70", openPriceAvg="3.0", unrealizedPL="0", markPrice="3.0", liquidationPrice="2.76"))
         self.assertAlmostEqual(bk.guard(2.4, 3.0), 2.76 * 1.01, 6)                     # the exchange's own figure once known
+
+    def test_a_crossed_position_with_a_negative_liquidation_sentinel_has_no_guard(self):
+        cy = StubCy(); cy.b.margin_mode = "crossed"; bk = Book(cy, "short"); bk.lever = 10.0
+        bk.pos["lots"] = [[28.1, 2.544, "a"]]; bk.pos["avg"] = 2.544
+        bk.on_position(dict(total="28.1", openPriceAvg="2.544", unrealizedPL="0", markPrice="2.544", liquidationPrice="-8.336"))
+        self.assertAlmostEqual(bk.guard(2.773, 2.544), 2.773, 6); self.assertNotIn("STOP_LIQ_GUARD", kinds(cy))   # the sentinel (the whole account backs it) is not a price — 2026-08-30 23:53 it became a −8.25 stop request
+        bk.exch["liq"] = None; self.assertAlmostEqual(bk.guard(2.773, 2.544), 2.773, 6)                            # crossed without a figure: the money cap stands, no isolated formula
+        cy2, bk2 = book(lots=[[70, 3.0, "a"]]); cy2.b.margin_mode = "crossed"; bk2.lever = 10.0
+        self.assertAlmostEqual(bk2.guard(2.4, 3.0), 2.4, 6)
+        bk2.on_position(dict(total="70", openPriceAvg="3.0", unrealizedPL="0", markPrice="3.0", liquidationPrice="3.2"))
+        self.assertAlmostEqual(bk2.guard(2.4, 3.0), 2.4, 6)                                                       # a figure on the profit side is not this position's liquidation
+        bk2.on_position(dict(total="70", openPriceAvg="3.0", unrealizedPL="0", markPrice="3.0", liquidationPrice="2.5"))
+        self.assertAlmostEqual(bk2.guard(2.4, 3.0), 2.5 * 1.01, 6)                                                # a real one on the loss side still guards, crossed or not
 
 class Params(unittest.TestCase):
     def test_zero_windows_and_negative_file_keys_are_rejected(self):
