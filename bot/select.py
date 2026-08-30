@@ -7,7 +7,8 @@ over select.days windows) and logs/scan.json is rewritten. A switch happens only
   - the same candidate has qualified in select.confirm consecutive scans (hysteresis: yesterday's chop does not win a switch);
   - the incumbent has been held >= select.dwell_h hours (waived when it is flagged) and fewer than select.max_per_day switches today;
   - the candidate is not in select.exclude (BTC at low capital, CONCEPT).
-The switch rewrites params.json atomically: strat.symbol, strat.side/sides = the candidate's 1H structure side (long when unclear),
+The switch rewrites params.json atomically: strat.symbol, strat.side = the candidate's 1H structure side (long when unclear) and
+strat.sides = both sides when the incumbent runs 쌍검 (else [side]),
 record = the new symbol + the top select.record_top unflagged candidates with full channels (so the real tick backtest can later
 validate the proxy) + BTCUSDT candles. The recorder re-subscribes on the file change; the engine restarts on the symbol change (it is
 flat; its ledger for the new symbol starts fresh). Every scan also refreshes the recorded candidate set (a record-only rewrite: the
@@ -79,7 +80,8 @@ def decide(rows, incumbent, sel, st, flat, today, now):
 
 def switch(p, best, rows, sel):
     sp = p["strat"]; side = best.get("side") if best.get("side") in ("long", "short") else "long"
-    sp["symbol"], sp["side"], sp["sides"] = best["symbol"], side, [side]
+    dual = len(sp.get("sides") or []) > 1                                    # 쌍검 stays 쌍검 across a switch (user decision 2026-08-30); the structure side is the record only
+    sp["symbol"], sp["side"], sp["sides"] = best["symbol"], side, (["long", "short"] if dual else [side])
     p["record"] = record_dict(best["symbol"], rows, sel)
     write_json(PARAMS, p, indent=2)
     return side

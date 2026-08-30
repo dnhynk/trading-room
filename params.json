@@ -50,7 +50,8 @@
     "symbol": "TRUMPUSDT",
     "side": "long",
     "sides": [
-      "long"
+      "long",
+      "short"
     ],
     "mode": "live",
     "adopt": false,
@@ -87,9 +88,9 @@
     "cancel_v": 1.0,
     "gate_relax": 0.5,
     "gate_floor_unit_pct": 0.05,
-    "add_confirm": null,
+    "add_confirm": 0,
     "confirm_within_s": 90,
-    "against_daily_mult": 0.5,
+    "against_daily_mult": 1.0,
     "against_regime_mult": 0.5,
     "derisk_on_against": 0
   },

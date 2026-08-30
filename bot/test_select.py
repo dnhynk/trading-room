@@ -60,6 +60,18 @@ class Verdict(unittest.TestCase):
         rows = self.rows(); rows[1]["flags"] = ["ER0.40"]
         a, why, b = decide(rows, "A", sel, dict(since=now - 3600, streak={"B": 1}), True, "d", now); self.assertEqual(a, "switch")   # a flagged incumbent waives dwell and ratio
 
+    def test_a_switch_keeps_both_sides_when_the_incumbent_runs_dual(self):
+        import bot.select as S
+        rows = [dict(symbol="B", flags=[], proxy=1, concept=1)]; written = {}
+        orig = S.write_json; S.write_json = lambda path, obj, **kw: written.update(obj)
+        try:
+            p = dict(strat=dict(symbol="A", side="long", sides=["long", "short"]), record={})
+            self.assertEqual(S.switch(p, dict(symbol="B", side="short"), rows, dict(SELECT)), "short")
+            self.assertEqual((p["strat"]["symbol"], p["strat"]["side"], p["strat"]["sides"]), ("B", "short", ["long", "short"]))   # 쌍검 survives the switch
+            p = dict(strat=dict(symbol="A", side="long", sides=["long"]), record={})
+            S.switch(p, dict(symbol="B", side="short"), rows, dict(SELECT)); self.assertEqual(p["strat"]["sides"], ["short"])       # a single book follows the structure side
+        finally: S.write_json = orig
+
     def test_record_set_is_the_incumbent_plus_candidates_plus_btc_candles(self):
         rows = [dict(symbol=s, flags=[] if s != "F" else ["pump"], proxy=1, concept=1) for s in ("B", "C", "F", "D", "BTCUSDT")]
         rec = record_dict("A", rows, dict(SELECT, record_top=2))

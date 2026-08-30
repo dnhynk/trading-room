@@ -24,7 +24,7 @@
 - `STOP_FAILED` / `STOP_THROUGH` / `EMERGENCY_CLOSE` → 즉시 상태 확인, 포지션이 남았으면 보고.
 - `WS_DOWN` 60초 이상 → 프로세스·네트워크 확인. 재접속은 자동.
 - `MARGIN_LOCKED` → 사용자 수동 매매가 증거금을 잠금. 보고.
-- `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 기록만(방향은 종목 전환 시 select가 1H 구조로 정한다; 보유 중 자동 플립은 야간 롱/숏/쌍검 표가 갈릴 때 수정 세션이 켠다). `SYMBOL_SWITCH` → select가 종목·방향을 바꾼 것(flat에서, 엔진 재기동). RULES·메모리를 다시 읽고 한 줄 보고. 전환이 이상하면(플래그 종목·하루 2회 등) select 자식을 세우고 보고.
+- `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 기록만(쌍검이 기본이라 방향 플립은 없다; 추세 쪽 키우기는 NEXT 2). `SYMBOL_SWITCH` → select가 종목을 바꾼 것(flat에서, 엔진 재기동; 쌍검 유지, `side`는 기록). RULES·메모리를 다시 읽고 한 줄 보고. 전환이 이상하면(플래그 종목·하루 2회 등) select 자식을 세우고 보고.
 - `PARAMS_DEFERRED` → live에서 포지션·주문이 있어 symbol/sides/mode 변경을 플랫까지 보류 중. 기다린다(엔진이 플랫이 되면 스스로 재기동). `STATE_DISCARDED` → 모드가 바뀐 재기동이 이전 모드의 장부를 버린 것. 정보.
 - `EMERGENCY_CANCEL_UNCONFIRMED` → 비상 청산 전 취소 확인이 6초 안에 안 온 것. 즉시 `bot/trade.py status`로 포지션·주문 확인.
 - `STOP_LIQ_GUARD` → 원하는 스탑(돈 한도)이 청산가 너머라 청산가 바로 위로 올려 둔 것. B(구조가 소프트, 거래소 스탑 = cap)에서는 1~2유닛의 정상 상태라 events.jsonl에만 남는다. 기록만.
@@ -38,6 +38,6 @@
 
 ## 절대 규칙
 - 사용자의 수동 포지션·주문은 건드리지 않는다(엔진 주문은 clientOid `cycL-`/`cycS-`).
-- `mode: live` 전환·해제, 쌍검(`sides: ["long","short"]`) 활성화는 사용자 승인 후 포지션 0에서만. 종목·방향은 select 감시견의 규칙이 정한다 — 손으로 바꾸려면 select를 세우고, 사용자 승인 후 포지션 0에서.
+- `mode: live` 전환·해제, `sides` 변경(쌍검 ↔ 외검)은 사용자 승인 후에만 — params에 쓰면 엔진이 플랫에서 스스로 종료·재기동한다(PARAMS_DEFERRED → 감시견이 새 계약으로 올림). 종목은 select 감시견의 규칙이 정한다 — 손으로 바꾸려면 select를 세우고, 사용자 승인 후.
 - 스탑은 거래소에 항상 있어야 한다. 스탑을 없애거나 내리는 변경은 하지 않는다.
 - 결과 보고는 근거(명령·출력)와 함께. 실행 안 했으면 "실행 안 함"이라고 쓴다.
