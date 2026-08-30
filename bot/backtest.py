@@ -118,6 +118,7 @@ class Engine:
         sides = list(sides or strat.get("sides") or [strat.get("side", STRAT["side"])])
         self.px_tick, self.qstep = None, qstep
         self.follow, self.flips, self.active_s = follow, 0, {}       # follow="15m"|"1h": one side at a time, chosen by that structure hint, flipped only when flat (the side automation counterfactual)
+        self.follow_confirm_s, self.hint_last, self.hint_t = 0, None, None   # a flip needs the hint to have held for follow_confirm_s (0 = at once)
         self.active = strat.get("side", STRAT["side"]) if follow else None   # starts on the configured side (the incumbent's, as select leaves it); the hint flips it
         self.books = {sd: Book(self.feat, strat, sd, 1 if follow else len(sides), qstep) for sd in sides}
         self.peak = self.max_dd = 0.0; self.in_mkt = self.n = 0; self.last_t = None; self.day = None
@@ -159,7 +160,8 @@ class Engine:
         h = (self.feat.side_hint_15m if self.follow == "15m" else self.feat.side_hint_1h if self.follow == "1h"
              else ("short" if rg == "AGAINST" else "long" if rg == "FAVOR" else None) if self.follow == "regime"
              else "short" if f.get("brk") else "long" if f.get("bko") else None)          # "brk": the side of the last volume break (5-min flag) — event-based, not structure-based
-        if h and h != self.active and not any(pos_stats(bk.pos)[0] for bk in self.books.values()):
+        if h != self.hint_last: self.hint_last, self.hint_t = h, sec
+        if h and h != self.active and sec - self.hint_t >= self.follow_confirm_s and not any(pos_stats(bk.pos)[0] for bk in self.books.values()):
             if self.active: self.flips += 1
             self.active = h; self.events.append((sec, "FLIP", h))
             for sd, bk in self.books.items():
