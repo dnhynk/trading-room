@@ -1,9 +1,10 @@
 """Offline run of the whole engine (Features + Strategy + the dry-run fill model) over recordings — the tuner's objective.
-  python -m bot.backtest FILE... [--sym TRUMPUSDT] [--sides long,short] [--follow 15m|1h|brk] [--sig k=v ...] [--strat k=v ...]
+  python -m bot.backtest FILE... [--sym TRUMPUSDT] [--sides long,short] [--follow 15m|1h|brk|regime] [--sig k=v ...] [--strat k=v ...]
 --sides long,short runs a long book and a short book on the same feature stream (쌍검술); default = strat.side only.
 --follow is the side-automation counterfactual: both books exist but only the active side may trade; it starts on strat.side and
-changes only while flat, to the 15m / 1H structure hint's side or (brk) the side of the last volume break; a hint of None keeps
-it. Metrics carry follow={flips, share} and the events a FLIP per change.
+changes only while flat, to the 15m / 1H structure hint's side, (brk) the side of the last volume break, or (regime) the side the
+long book's regime label favours (AGAINST -> short, FAVOR -> long); None keeps it. Metrics carry follow={flips, share} and the
+events a FLIP per change.
 Recordings are first condensed to one record per exchange second (bid/ask, top-5 depth, mark, trades, candle rows), grouped and
 sorted by second so cross-channel timestamp inversions cannot leak future quotes into earlier seconds, and cached under data/cache/.
 Before the first second the engine is seeded like the live start: 1000 closed 1m candles (ATR, regime, VP, 1m structure), 200 closed
@@ -154,7 +155,9 @@ class Engine:
         """Side automation as select would do it for the incumbent: the active side is the hint's side, changed only while every book is
         flat; a hint of None keeps the current side. Books off the active side get no signals and no resting entry."""
         f = self.feat.f
+        rg = self.books["long"].strat.regime if "long" in self.books else None                  # the long book's side-relative label: AGAINST = the market runs short
         h = (self.feat.side_hint_15m if self.follow == "15m" else self.feat.side_hint_1h if self.follow == "1h"
+             else ("short" if rg == "AGAINST" else "long" if rg == "FAVOR" else None) if self.follow == "regime"
              else "short" if f.get("brk") else "long" if f.get("bko") else None)          # "brk": the side of the last volume break (5-min flag) — event-based, not structure-based
         if h and h != self.active and not any(pos_stats(bk.pos)[0] for bk in self.books.values()):
             if self.active: self.flips += 1
