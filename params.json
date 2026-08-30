@@ -6,13 +6,7 @@
       "ticker",
       "candle1m"
     ],
-    "HYPEUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "XRPUSDT": [
+    "SOLUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -24,7 +18,13 @@
       "ticker",
       "candle1m"
     ],
-    "SOLUSDT": [
+    "XRPUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "HYPEUSDT": [
       "trade",
       "books15",
       "ticker",

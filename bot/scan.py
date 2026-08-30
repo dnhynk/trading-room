@@ -14,9 +14,11 @@ Universe: contracts with symbolStatus normal and 24h quote volume >= --min-vol (
 Ranking value = the median over windows (a typical day, not yesterday). Symbols are ranked by proxy; concept is shown and is
 bot/select.py's second condition (a less two-way symbol never wins on the proxy alone).
 Flags (listed apart, never ranked): tick% > 0.05, spread > 10 bp, |funding| >= 0.1% per 8h, pump shape on >= 2 windows (the hour
-carrying the most volume >= 35% of the window while moving the price >= 4%), a parabolic runner (net >= +40% over the windows with
-bounce < 0.3), ER >= 0.35 in the latest window (one-way right now; re-judged next scan). A crash day is NOT a flag: the coin that
-fell 10% in an hour is often the best two-way tape afterwards (user 2026-08-29); its losses are the stop's business.
+carrying the most volume >= 35% of the window while moving the price >= 4%), a pump (an UP move of >= +25% in a window or >= +40%
+over the windows, however two-way the swings on the way — 작전 코인 is 순환매 지옥, user 2026-08-29; PROMUSDT +54%/day slipped
+through a bounce-based rule on 2026-08-30), ER >= 0.35 in the latest window (one-way right now; re-judged next scan). A crash day
+is NOT a flag: the coin that fell 10% in an hour is often the best two-way tape afterwards (user 2026-08-29); its losses are the
+stop's business.
 Also per symbol: the 1H structure side (`side`, the side a switch starts on), funding, OI. --json writes logs/scan.json for select."""
 import json, os, statistics, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -158,8 +160,8 @@ def flags_of(x, wins, net_total):
     if x["spread_bp"] > 10: f.append(f"spr{x['spread_bp']:.0f}bp")
     if abs(x["fund"]) >= 0.1: f.append(f"fund{x['fund']:+.2f}%")
     if sum(1 for w in wins if w and w["pump"]) >= 2: f.append("pump")
-    bounces = [w["bounce"] for w in wins if w]
-    if net_total >= 40 and bounces and statistics.median(bounces) < 0.3: f.append(f"parabolic{net_total:+.0f}%")
+    ups = [w["net"] for w in wins if w]
+    if (ups and max(ups) >= 25) or net_total >= 40: f.append(f"pump{max(ups + [net_total]):+.0f}%")   # a pump is an UP move (crashes are cycle heaven): +25% in a day or +40% over the windows, however two-way it swings on the way
     if wins and wins[0] and wins[0]["er"] >= 0.35: f.append(f"ER{wins[0]['er']:.2f}")
     return f
 

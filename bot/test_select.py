@@ -32,10 +32,12 @@ class Proxy(unittest.TestCase):
 class Flags(unittest.TestCase):
     def test_a_single_crash_day_is_not_a_flag(self):
         x = dict(tick_pct=0.01, spread_bp=1.0, fund=0.01)
-        wins = [dict(pump=True, bounce=0.9, er=0.05), dict(pump=False, bounce=0.8, er=0.1), dict(pump=False, bounce=0.7, er=0.1)]
+        wins = [dict(pump=True, bounce=0.9, er=0.05, net=-12.0), dict(pump=False, bounce=0.8, er=0.1, net=3.0), dict(pump=False, bounce=0.7, er=0.1, net=1.0)]
         self.assertEqual(flags_of(x, wins, -12.0), [])                                              # one crash day with two-way tape after it
         wins[1]["pump"] = True; self.assertIn("pump", flags_of(x, wins, 5.0))                        # the shape on two days is the pump coin
-        self.assertIn("parabolic+60%", flags_of(x, [dict(pump=False, bounce=0.1, er=0.2)] * 3, 60.0))
+        self.assertIn("pump+60%", flags_of(x, [dict(pump=False, bounce=0.9, er=0.2, net=20.0)] * 3, 60.0))          # +60% over the windows: a pump, however two-way
+        self.assertIn("pump+62%", flags_of(x, [dict(pump=False, bounce=0.8, er=0.09, net=54.0), dict(pump=False, bounce=0.9, er=0.02, net=6.0)], 62.0))   # PROMUSDT 2026-08-30: +54% in a day
+        self.assertEqual(flags_of(x, [dict(pump=False, bounce=0.6, er=0.1, net=-30.0)] * 2, -45.0), [])            # a crash, however deep, is not a pump
         self.assertTrue(any(f.startswith("ER") for f in flags_of(x, [dict(pump=False, bounce=0.5, er=0.5)], 3.0)))   # one-way right now
 
 class Verdict(unittest.TestCase):
