@@ -20,7 +20,7 @@ from bot.ws import load_params, PARAMS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
-SELECT = dict(every_h=4, ratio=1.5, confirm=2, dwell_h=24, max_per_day=1, record_top=5, min_vol=5e7, days=3, exclude=["BTCUSDT"])
+SELECT = dict(every_h=4, ratio=1.5, confirm=2, dwell_h=24, max_per_day=1, record_top=5, min_vol=5e7, days=3, exclude=["BTCUSDT"], record_extra=[])
 CHANNELS = ["trade", "books15", "ticker", "candle1m"]
 
 def log(s): print(time.strftime("%Y-%m-%d %H:%M:%S ") + s, flush=True)
@@ -55,6 +55,7 @@ def record_dict(symbol, rows, sel):
     rec = {symbol: CHANNELS}
     for r in [r for r in rows if not r["flags"] and r["symbol"] != symbol and r["symbol"] not in sel["exclude"]][:int(sel["record_top"])]:
         rec[r["symbol"]] = CHANNELS
+    for x in sel.get("record_extra") or []: rec.setdefault(x, CHANNELS)      # watchlist: recorded regardless of flags (evidence, never traded by select)
     rec["BTCUSDT"] = ["candle1m"]
     return rec
 

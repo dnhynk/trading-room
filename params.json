@@ -38,6 +38,12 @@
     ],
     "BTCUSDT": [
       "candle1m"
+    ],
+    "PROMUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
     ]
   },
   "strat": {
@@ -135,6 +141,9 @@
     "days": 3,
     "exclude": [
       "BTCUSDT"
+    ],
+    "record_extra": [
+      "PROMUSDT"
     ]
   }
 }
