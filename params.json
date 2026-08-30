@@ -84,7 +84,8 @@
     "add_confirm": null,
     "confirm_within_s": 90,
     "against_daily_mult": 0.5,
-    "against_regime_mult": 0.5
+    "against_regime_mult": 0.5,
+    "derisk_on_against": 0
   },
   "sig": {
     "vol_hl": 300,

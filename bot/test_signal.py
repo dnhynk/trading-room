@@ -270,6 +270,13 @@ class RegimeAction(unittest.TestCase):
         st2 = Strategy(dict(side="long", unit_qty=70)); st2.regime = "AGAINST"
         r = st2.step(F(), [dict(sig="DIP_SLOWING")], dict(lots=[], last=None)); self.assertEqual(r["events"][0][1]["why"], "regime")   # the veto (default)
 
+    def test_against_derisks_the_core_only_when_the_switch_is_on(self):
+        for on, expect in ((True, 35), (False, None)):
+            st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, derisk_on_against=on)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+            st.step(F(), [], pos); st.regime = "AGAINST"
+            r = st.step(F(t=101, mid=2.991, bid=2.99, ask=2.992), [dict(sig="POP_STALLING")], pos)      # -0.3%: not latched (step 0.5%), only the label
+            self.assertEqual(r["trim"][1] if r["trim"] else None, expect)
+
     def test_drift_floor_in_percent_keeps_a_small_grind_two_way(self):
         from bot.signal import SIG
         rg = dict(rg_t=1, rg_er=0.2, rg_drift=-7.6, rg_up=0, rg_dn=0, rg_med_up=0.0, rg_med_dn=0.0)

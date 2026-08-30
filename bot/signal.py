@@ -37,6 +37,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
              against_regime_mult=0.0,                    # > 0: an AGAINST regime scales the unit by this instead of vetoing adds (a size scale, never a veto)
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
+             derisk_on_against=True,                     # False: the AGAINST label (a trailing 90-min statistic, late by construction) only scales adds; de-risk keeps its timely triggers (latch, fresh break)
              cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_cooldown_s=300, max_stops_day=3,
              buy_ttl_s=90, cancel_v=1.0, tick=0.001, qstep=0.1)
 
@@ -614,7 +615,7 @@ class Strategy:
             g_rel = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n            # the market refusing bounces lowers the bar
             if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = self.brk_seen = False   # a fill or a full recovery clears the damage evidence (latch and break alike) ...
             elif dev <= -step: self.derisk_armed = True                                    # ... and it can only re-arm on a later tick
-            derisk = p["derisk_pct"] > 0 and (self.regime == "AGAINST" or self.derisk_armed
+            derisk = p["derisk_pct"] > 0 and ((self.regime == "AGAINST" and p["derisk_on_against"]) or self.derisk_armed
                                               or (p["derisk_on_breakdown"] and self.brk_seen))
             gate = -p["derisk_pct"] if (derisk and is_core) else g_rel      # an added unit is only ever sold above its own buy price; the loss is taken on the core vs the average
             self.gate_eff = gate
