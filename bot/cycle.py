@@ -836,12 +836,16 @@ class Cycle:
         except Exception as e: self.err("refresh_daily", e)
 
     async def refresh_lever(self):
-        """Isolated leverage per side from the account (the user changes it from the UI); None disables the margin gate."""
+        """Leverage per side from the account (the user changes it from the UI; crossed: one leverage for both sides) and the account's
+        margin mode, which every order must carry; None leverage disables the margin gate."""
         self.lever_t = time.time()
         try:
             a = await self.rest(self.b.account, self.symbol)
+            mode = a.get("marginMode") or self.b.margin_mode
+            if mode != self.b.margin_mode: self.ev("MARGIN_MODE", mode=mode, was=self.b.margin_mode)
+            self.b.margin_mode = mode
             for sd, bk in self.books.items():
-                lv = float(a.get("isolatedLongLever" if sd == "long" else "isolatedShortLever") or 0) or None
+                lv = float((a.get("crossedMarginLeverage") if mode == "crossed" else a.get("isolatedLongLever" if sd == "long" else "isolatedShortLever")) or 0) or None
                 if lv != bk.lever: bk.ev("LEVER", lever=lv, was=bk.lever, avail=float(a.get("available") or 0))
                 bk.lever = lv
         except Exception as e: self.err("refresh_lever", e)

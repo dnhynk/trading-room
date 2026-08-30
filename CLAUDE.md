@@ -12,7 +12,7 @@
 ## 진실의 순서
 `bot/CONCEPT.md`(사용자의 자연어 전략, 최상위 계약) → `bot/RULES.md`(코드가 그것을 구현하는 방식) → `params.json`(숫자). 결정·감사·증거는 메모리 `cycle-harness-plan`. 기억이나 추측이 아니라 파일을 읽고 답한다.
 
-## 계정 규칙 (Bitget 헤지 모드, 사용자가 같은 계정을 가끔 손으로도 쓴다)
+## 계정 규칙 (Bitget 헤지 모드 + 크로스 마진(2026-08-30, 쌍검용; 주문은 계정의 marginMode를 따라간다), 사용자가 같은 계정을 가끔 손으로도 쓴다)
 - 엔진은 `params.json`의 (symbol, sides)를 배타 소유한다 — 시작은 `TRUMPUSDT` long, 2026-08-30 22:36부터 쌍검(`sides: ["long","short"]`, 사용자 승인). **종목은 `bot/select.py`(감시견 `select`)가 RULES의 전환 규칙대로 flat에서 자동으로 바꾼다**(`SYMBOL_SWITCH` 알림; 쌍검 유지). `params.json`의 `strat.symbol/side/sides`·`record`는 select가 쓰고, 나머지 키는 사람(감독 세션)이 쓴다. 엔진 주문은 clientOid `cycL-`/`cycS-`, 엔진 스탑은 그 방향의 pos_loss 플랜. 그 밖의 포지션·주문·플랜은 사용자 것이며 절대 건드리지 않는다.
 - 거래소 스탑(돈 한도 pos_loss)을 없애는 변경은 하지 않는다. 구조가는 소프트(derisk 근거)다 — B, 사용자 결정 2026-08-30. `bot/trade.py`는 조회(`status`)와 사용자가 시킨 수동 조작에만 쓴다.
 - spot에 들어오는 수수료 페이백은 `sweep` 감시견이 선물 계좌로 옮긴다(복리). spot USDT를 다른 데 쓰지 않는다.

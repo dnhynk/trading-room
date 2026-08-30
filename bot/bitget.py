@@ -17,6 +17,7 @@ class Bitget:
         self.key, self.secret, self.passphrase = key, secret, passphrase
         self.offset_ms = 0
         self.hedge = True  # Bitget posMode; refreshed by refresh_mode()
+        self.margin_mode = "isolated"   # the account's marginMode ("isolated"|"crossed"): orders must carry the same one; cycle.refresh_lever reads it from the account
 
     # ---- transport -------------------------------------------------------
     def _sign(self, ts, method, path_q, body):
@@ -128,7 +129,7 @@ class Bitget:
     def market_order(self, symbol, side, size, sl=None, tp=None, trade_side="open", reduce_only=False, client_oid=None):
         """side: 'buy'=long / 'sell'=short. In hedge mode side is the POSITION direction and
         trade_side ('open'|'close') says whether we add to or reduce it (close long = buy/close)."""
-        body = dict(symbol=symbol, productType=PRODUCT, marginMode="isolated", marginCoin=MARGIN_COIN,
+        body = dict(symbol=symbol, productType=PRODUCT, marginMode=self.margin_mode, marginCoin=MARGIN_COIN,
                     size=str(size), side=side, orderType="market", force="gtc")
         if self.hedge:
             body["tradeSide"] = trade_side
@@ -144,7 +145,7 @@ class Bitget:
 
     def limit_order(self, symbol, side, price, size, trade_side="open", post_only=True, client_oid=None, sl=None, tp=None):
         """Maker entry/exit. hedge: side=position direction, trade_side open|close. post_only rejects if it would take."""
-        body = dict(symbol=symbol, productType=PRODUCT, marginMode="isolated", marginCoin=MARGIN_COIN,
+        body = dict(symbol=symbol, productType=PRODUCT, marginMode=self.margin_mode, marginCoin=MARGIN_COIN,
                     size=str(size), price=str(price), side=side, orderType="limit",
                     force="post_only" if post_only else "gtc")
         if self.hedge:
@@ -161,7 +162,7 @@ class Bitget:
 
     def place_plan_order(self, symbol, side, size, trigger, trade_side="open", sl=None, tp=None, order_type="market", price=None):
         """Conditional (stop) order: fires a market/limit order when mark price hits trigger."""
-        body = dict(planType="normal_plan", symbol=symbol, productType=PRODUCT, marginMode="isolated",
+        body = dict(planType="normal_plan", symbol=symbol, productType=PRODUCT, marginMode=self.margin_mode,
                     marginCoin=MARGIN_COIN, size=str(size), triggerPrice=str(trigger), triggerType="mark_price",
                     side=side, orderType=order_type)
         if self.hedge:
