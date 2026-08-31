@@ -109,6 +109,11 @@ class Stops(unittest.TestCase):
         st.step(F(t=103, mid=2.92, bid=2.919, ask=2.921, htf_lows=[2.85]), [], pos)
         self.assertFalse(st.prem_broken); self.assertGreater(st.gate_eff, 0)                                  # the fill clears the evidence and the price is back above the level: normal gates
 
+    def test_a_partial_first_fill_uses_the_full_units_cap_distance(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[4.3, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        r = st.step(F(), [], pos)
+        self.assertAlmostEqual(r["stop"], 3.0 - 20 / 70, 3); self.assertGreater(r["stop"], 0)   # cap over 4.3 contracts would be -1.65 (43011, needless close+HALT 2026-08-31 18:16); the unit's distance holds and risks only qty/unit x cap
+
     def test_no_stop_when_price_beyond_cap(self):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         r = st.step(F(mid=2.6, bid=2.599, ask=2.601), [], pos); self.assertTrue(r["no_stop"]); self.assertIsNone(r["stop"])

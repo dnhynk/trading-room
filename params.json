@@ -6,6 +6,12 @@
       "ticker",
       "candle1m"
     ],
+    "KORUUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "ZECUSDT": [
       "trade",
       "books15",
@@ -18,19 +24,13 @@
       "ticker",
       "candle1m"
     ],
-    "SOLUSDT": [
+    "CLUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "HYPEUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "ETHUSDT": [
+    "SKHYNIXUSDT": [
       "trade",
       "books15",
       "ticker",

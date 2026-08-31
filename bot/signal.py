@@ -658,7 +658,7 @@ class Strategy:
         stop = None
         if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0
         else:
-            cap_px = avg - s * p["cap_usdt"] / qty
+            cap_px = avg - s * p["cap_usdt"] / max(qty, unit)   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
             # ladder is ignored. Structure only when switched on, or riding a FAVOR one-way.
             lvl = structural_level(f, s, pos.get("last_buy_px") or mid, p, len(pos["lots"])) if (p["stop_structural_on"] or favor) else None

@@ -348,9 +348,10 @@ class Book:
             self.stop_fail += 1; self.ev("STOP_SET_FAIL", px=px, n=self.stop_fail, err=f"{type(e).__name__}: {str(e)[:140]}")
 
     def fallback_stop(self):
-        """A stop level that needs no features: the stop already set (persisted across a restart) or the money cap below the average."""
+        """A stop level that needs no features: the stop already set (persisted across a restart) or the money cap below the average
+        (over the full unit when the position is smaller — same rule as the Strategy)."""
         qty, avg = pos_stats(self.pos)
-        return self.guard(self.strat.stop_px if self.strat.stop_px is not None else avg - self.s * self.sp["cap_usdt"] / qty, avg)
+        return self.guard(self.strat.stop_px if self.strat.stop_px is not None else avg - self.s * self.sp["cap_usdt"] / max(qty, self.sp["unit_qty"]), avg)
 
     def guard(self, px, ref):
         """Liquidation guard: a stop is never left beyond the liquidation price — the exchange's own figure when it is a real price on the
@@ -363,7 +364,8 @@ class Book:
         elif self.cy.b.margin_mode != "crossed" and self.lever and ref: g = ref * (1 - self.s * 0.9 / self.lever)
         if g is not None and self.s * (px - g) < 0:
             if self.guarded != round(g, 6): self.guarded = round(g, 6); self.ev("STOP_LIQ_GUARD", wanted=round(px, 6), stop=self.guarded, liq=liq, lever=self.lever)
-            return g
+            px = g
+        if px < (self.cy.px_tick or 0.001): px = self.cy.px_tick or 0.001              # last line: an exchange trigger must be a positive price (43011 otherwise), whatever computed it
         return px
 
     async def ensure_stop(self):

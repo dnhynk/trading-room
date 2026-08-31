@@ -159,6 +159,10 @@ class LiqGuard(unittest.TestCase):
         bk2.on_position(dict(total="70", openPriceAvg="3.0", unrealizedPL="0", markPrice="3.0", liquidationPrice="2.5"))
         self.assertAlmostEqual(bk2.guard(2.4, 3.0), 2.5 * 1.01, 6)                                                # a real one on the loss side still guards, crossed or not
 
+    def test_a_stop_request_is_never_a_non_positive_price(self):
+        cy, bk = book(lots=[[4.3, 3.0, "a"]]); cy.b.margin_mode = "crossed"; bk.lever = 10.0
+        self.assertAlmostEqual(bk.guard(-0.156, 3.0), 0.001, 6)                       # last line of defence: whatever computed it, the exchange needs a positive trigger (43011 otherwise)
+
 class Params(unittest.TestCase):
     def test_zero_windows_and_negative_file_keys_are_rejected(self):
         self.assertEqual(valid_params({**STRAT, "daily_loss_limit": -1}, {"vol_hl": 0}), ["daily_loss_limit", "vol_hl"])
