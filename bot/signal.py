@@ -31,7 +31,10 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
 STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_pct=0.5, step_add_atr=0.7, gap_rebuy_pct=0.3,
              pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_rest_pct=0,
              trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then >= this x ATR back -> pull at once (wick protection, 0 disables)
-             unit_frac=0.0, cap_frac=0.0, daily_loss_frac=0.0,   # >0: unit notional / cap / daily limit as fractions of wallet equity (cycle.py resizes when flat)
+             unit_frac=0.0, cap_frac=0.0, daily_loss_frac=0.0, notional_frac=0.0,   # >0: unit notional / cap / daily limit / position notional cap as
+             # multiples of wallet equity (cycle.py resizes when flat). CONCEPT: "한 포지션에 거는 돈과 하루 손실에는 상한이 있고, 그 상한은 자본에 비례한다"
+             # — every limit here has to scale or it goes stale as the wallet compounds (2026-09-01: a fixed max_notional 900 fell below one
+             # resized unit and skipped most signals). notional_frac = max_units x unit_frac holds exactly one full ladder.
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: breakeven)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
@@ -60,7 +63,7 @@ def wilder_atr(cl, n=14):
 
 def round_tick(px, tick): return round(round(px / tick) * tick, 10)
 
-SPLIT_KEYS = ("unit_qty", "cap_usdt", "daily_loss_limit", "max_notional", "unit_frac", "cap_frac", "daily_loss_frac")
+SPLIT_KEYS = ("unit_qty", "cap_usdt", "daily_loss_limit", "max_notional", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac")
 
 def book_params(sp, side, tick, n_sides, qstep=None):
     """Per-side strategy params: side, tick, quantity step, and budgets split across the running sides (live and backtest use the same rule)."""
@@ -322,7 +325,7 @@ class Features:
             return []
         out = []
         if sec - self.sec > 120:            # outage: every second-level state is stale; rebuild the windows from candles like at start
-            self.vraw = EMA(p["v_hl"]); self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
+            self.vraw = EMA(self.p["v_hl"]); self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
             self.mids.clear(); self.flow.clear(); self.dbid.clear(); self.dask.clear(); self.b = self.s = 0.0; self.pending = []
             for c in self.candles[-(self.mids.maxlen // 60):]: self.mids.extend([c["c"]] * 60)
             for c in self.candles[-(self.flow.maxlen // 60):]: self.flow.extend([(c["v"] / 120, c["v"] / 120)] * 60)

@@ -1,7 +1,7 @@
 """OMS invariants of bot/cycle.py (Book against a stub exchange).  python -m unittest bot.test_cycle -v"""
 import asyncio, time, unittest
 from types import SimpleNamespace
-from bot.signal import Features, STRAT
+from bot.signal import Features, STRAT, book_params
 from bot import cycle
 from bot.cycle import Book, valid_params
 
@@ -167,6 +167,16 @@ class Params(unittest.TestCase):
     def test_zero_windows_and_negative_file_keys_are_rejected(self):
         self.assertEqual(valid_params({**STRAT, "daily_loss_limit": -1}, {"vol_hl": 0}), ["daily_loss_limit", "vol_hl"])
         self.assertEqual(valid_params({**STRAT, "daily_loss_limit": 40, "unit_frac": 1.5, "adopt": False, "sides": ["long"], "mode": "dry", "symbol": "TRUMPUSDT"}, {"vol_hl": 300}), [])
+
+    def test_every_equity_scaled_limit_has_a_fraction_and_they_split_alike(self):
+        """A fixed cap beside a scaling unit goes stale as the wallet compounds: on 2026-09-01 max_notional 900 (450 per book) fell under
+        one resized unit (546) and the book skipped most of its signals. notional_frac = max_units x unit_frac holds one full ladder at
+        any wallet size, and both fractions must split per book or the ladder no longer fits."""
+        self.assertEqual(valid_params({**STRAT, "notional_frac": 6.0, "symbol": "TRUMPUSDT"}, {}), [])
+        bp = book_params({**STRAT, "unit_frac": 1.5, "notional_frac": 6.0, "max_units": 4}, "long", 0.001, 2, 0.1)
+        self.assertEqual((bp["unit_frac"], bp["notional_frac"]), (0.75, 3.0))
+        for wallet in (150.0, 728.0, 5000.0):
+            self.assertAlmostEqual(wallet * bp["notional_frac"], wallet * bp["unit_frac"] * bp["max_units"], 6)
 
     def test_wrong_types_of_file_only_and_optional_keys_are_rejected(self):
         bad = valid_params({**STRAT, "daily_loss_limit": "40", "stop_structural": "oops", "adopt": "false", "symbol": "TRUMPUSDT"}, {})

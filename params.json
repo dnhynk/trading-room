@@ -6,7 +6,7 @@
       "ticker",
       "candle1m"
     ],
-    "KORUUSDT": [
+    "SUIUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -24,13 +24,13 @@
       "ticker",
       "candle1m"
     ],
-    "CLUSDT": [
+    "HYPEUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "SKHYNIXUSDT": [
+    "XRPUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -59,6 +59,7 @@
     "unit_frac": 1.5,
     "cap_frac": 0.15,
     "daily_loss_frac": 0.3,
+    "notional_frac": 6.5,
     "max_units": 4,
     "max_notional": 900,
     "step_add_pct": 0.5,
