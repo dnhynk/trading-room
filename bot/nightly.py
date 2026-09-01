@@ -1,6 +1,7 @@
 """Nightly evidence report, run under the supervisor (python -m bot.supervise nightly): waits for 00:10 UTC each day, then writes
 logs/nightly-YYYYMMDD.txt with (1) the replay signal summary for the previous UTC day split by signal source, volume-decay,
-CVD divergence, value-area position and regime, (2) the tuner report (report only, never --apply), (3) the symbol scanner.
+CVD divergence, value-area position and regime, (2) bot.recon — what the backtest got wrong against the live ledger that day,
+which every other backtest number in the file inherits, (3) the tuner report (report only, never --apply), (4) the symbol scanner.
 python -m bot.nightly --now runs it once immediately for the previous day (or --day YYYYMMDD)."""
 import glob, os, subprocess, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +25,8 @@ def report(day):
         out.append(run_cmd(["bot.legs"] + warm + files + ["--quiet", "--day", day]))
         out.append("\n## direction capture (live book from events.jsonl x the day's candles; up/dn held = share of minute moves and of legs that happened while holding)\n")
         out.append(run_cmd(["bot.capture", "--day", day]))
+        out.append("\n## recon (백테스트 캘리브레이션: 경계 이벤트 없는 구간만 골라 같은 사이즈로 돌린 백테스트와 실매매 장부를 대조 — 아래 backtest 기반 수치는 전부 이 오차를 진다)\n")
+        out.append(run_cmd(["bot.recon", "--day", day], timeout=1800))
         out.append("\n## sides (the day's tape as long / short / dual; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
         for sides in ("long", "short", "long,short"):
             out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sides", sides]).strip().split("\n") or [""])[-1])
