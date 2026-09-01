@@ -195,6 +195,19 @@ class Params(unittest.TestCase):
         self.assertEqual(valid_params({**STRAT, "wallet_frac": 0.5, "symbol": "AUSDT"}, {}), [])
         self.assertEqual(valid_params({**STRAT, "wallet_frac": 0, "symbol": "AUSDT"}, {}), ["wallet_frac"])   # 0 이면 사이즈가 0 이 된다
 
+    def test_a_new_engine_sizes_from_the_wallet_not_from_another_symbols_unit(self):
+        """resize 의 +-25% 클램프는 '변화'를 damp 하는 것이라 이전 동적 값이 있을 때만 건다. 파일의 unit_qty 는 심볼별 계약수라
+        다른 심볼로 새로 뜬 엔진의 기준이 못 된다 — 2026-09-01 dry: ZECUSDT(841$)가 TRUMP 기준 70 에 걸려 26.25계약(22,084$)."""
+        cy, bk = book(); cy.qstep, cy.vp = 0.01, 2          # 운영에선 qstep = 10**-vp 로 항상 짝이다
+        cy.acct = dict(equity=720.0, upl_all=0.0, avail=720.0)
+        bk.sp = {**bk.sp, "unit_frac": 0.75, "cap_frac": 0.075, "wallet_frac": 0.5, "unit_qty": 35.0}
+        bk.feat.f = {"mid": 841.0}; bk.dyn = {}; bk.pos["lots"] = []
+        bk.resize()
+        self.assertAlmostEqual(bk.dyn["unit_qty"], 0.32, 2)                       # 720 x 0.5 x 0.75 / 841 = 0.321
+        prev = bk.dyn["unit_qty"]; bk.feat.f = {"mid": 420.0}; bk.sized_t = 0
+        bk.resize()
+        self.assertAlmostEqual(bk.dyn["unit_qty"], prev * 1.25, 2)                # 이전 동적 값이 있으면 한 번에 25% 까지만
+
     def test_wrong_types_of_file_only_and_optional_keys_are_rejected(self):
         bad = valid_params({**STRAT, "daily_loss_limit": "40", "stop_structural": "oops", "adopt": "false", "symbol": "TRUMPUSDT"}, {})
         self.assertEqual(bad, ["adopt", "daily_loss_limit", "stop_structural"])

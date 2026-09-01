@@ -200,7 +200,9 @@ class Book:
         wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
         if self.sp.get("unit_frac"):
             u = round(wallet * self.sp["unit_frac"] / mid / self.cy.qstep) * self.cy.qstep
-            cur = self.sp["unit_qty"]; u = max(min(u, cur * 1.25), cur * 0.75); u = max(round(u / self.cy.qstep) * self.cy.qstep, self.cy.qstep)
+            cur = self.dyn.get("unit_qty")        # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
+            if cur: u = max(min(u, cur * 1.25), cur * 0.75)   # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛)
+            u = max(round(u / self.cy.qstep) * self.cy.qstep, self.cy.qstep)
             new["unit_qty"] = round(u, self.cy.vp)
         if self.sp.get("cap_frac"): new["cap_usdt"] = round(wallet * self.sp["cap_frac"], 2)
         if self.sp.get("daily_loss_frac"): new["daily_loss_limit"] = round(wallet * self.sp["daily_loss_frac"], 2)
@@ -654,8 +656,9 @@ class Cycle:
         os.replace(tmp, self.state); self.dirty = False
 
     def ev(self, kind, **kw):
-        line = json.dumps(dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), sec=self.feat.f.get("t"), ev=kind,
-                               symbol=getattr(self, "symbol", None), **kw), ensure_ascii=False)   # 엔진이 여럿이면 심볼 없이는 로그를 갈라 읽을 수 없다
+        # 엔진이 여럿이면 심볼 없이는 로그를 갈라 읽을 수 없다. kw 를 뒤에 둬서 호출자가 이미 symbol 을 넘기면(START) 그쪽이 이긴다
+        line = json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "sec": self.feat.f.get("t"), "ev": kind,
+                           "symbol": getattr(self, "symbol", None), **kw}, ensure_ascii=False)
         with open(EVENTS, "a", encoding="utf-8") as fh: fh.write(line + "\n")
         if kind in ALERT:
             with open(ALERTS, "a", encoding="utf-8") as fh: fh.write(line + "\n")

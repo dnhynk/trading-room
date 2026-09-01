@@ -95,6 +95,15 @@
     "against_regime_mult": 0.5,
     "derisk_on_against": 0
   },
+  "books": {
+    "TRUMPUSDT": {
+      "wallet_frac": 0.5
+    },
+    "ZECUSDT": {
+      "wallet_frac": 0.5,
+      "mode": "dry"
+    }
+  },
   "sig": {
     "vol_hl": 300,
     "v_hl": 8,
