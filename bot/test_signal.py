@@ -1,6 +1,6 @@
 """Invariants of bot/signal.py (pure).  python -m unittest bot.test_signal -v"""
 import unittest
-from bot.signal import Strategy, apply_fill, pos_stats, zigzag, sim_match
+from bot.signal import Strategy, apply_fill, pos_stats, zigzag, sim_match, book_params
 
 class FillModel(unittest.TestCase):
     def test_one_print_is_shared_by_orders_of_two_books_at_the_same_price(self):
@@ -123,7 +123,7 @@ class Trims(unittest.TestCase):
         st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[], last=None)
         apply_fill(pos, 1, True, 70, 3.041, "a"); apply_fill(pos, 1, True, 70, 2.985, "b")
         r = st.step(F(mid=3.0, bid=2.999, ask=3.001), [dict(sig="POP_STALLING")], pos)
-        self.assertEqual(r["trim"], (3.001, 70, "maker")); self.assertEqual(r["events"][0][1]["mode"], "normal")
+        self.assertEqual(r["trim"][:3], (3.001, 70, "maker")); self.assertEqual(r["events"][0][1]["mode"], "normal")
 
     def test_wick_top_is_sold_on_retrace_without_a_signal(self):
         st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
@@ -212,6 +212,107 @@ class Trims(unittest.TestCase):
         apply_fill(pos, 1, True, 70, 2.97, "b")
         st.step(F(t=101, mid=2.97, bid=2.969, ask=2.971), [], pos); self.assertFalse(st.derisk_armed)   # the fill clears it this tick
         st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [], pos); self.assertTrue(st.derisk_armed)    # -2.3% under the new average: re-armed next tick
+
+class DeriskUnderUnits(unittest.TestCase):
+    def test_a_weak_bounce_cuts_the_core_lot_while_a_unit_sits_on_top(self):
+        """CONCEPT: 손실 중 약반등에 물량을 좀 덜어(부분손절) — 저점 물량은 자기 가격 위에서만, 손실은 평단 기준의 물량에서 감수한다.
+        The LIFO unit cannot sell under its price, so the cut comes out of the core lot (trim lot=0); before, a 2-lot underwater position
+        had no partial stop at all (all 98 live cuts were 1-lot)."""
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60, derisk_pct=3.0, derisk_core_frac=0.5))
+        pos = dict(lots=[[70, 3.0, "a"], [70, 2.95, "b"]], avg=2.975, last="buy", last_buy_px=2.95)
+        for t in (100, 101): st.step(F(t=t, mid=2.90, bid=2.899, ask=2.901), [], pos)          # -2.5% under the average, no add possible: latched
+        self.assertTrue(st.derisk_armed)
+        r = st.step(F(t=102, mid=2.93, bid=2.929, ask=2.931), [dict(sig="POP_STALLING")], pos)   # weak bounce: the unit is still -0.7% under its price
+        pt = [e for e in r["events"] if e[0] == "PULL_TRIM"][0][1]
+        self.assertEqual((pt["qty"], pt["lot"], pt["mode"], pt["path"]), (35, "core", "derisk", "stall")); self.assertEqual(r["trim"][3], 0)
+        self.assertAlmostEqual(pt["ref"], 2.975)                                                    # judged against the average, as a core cut is
+        apply_fill(pos, 1, False, 35, 2.931, "t", lot=0); st.on_fill("trim", 35)
+        self.assertEqual(pos["lots"], [[35, 3.0, "a"], [70, 2.95, "b"]])                            # the core lot shrank; the unit is untouched
+        st.step(F(t=103, mid=2.93, bid=2.929, ask=2.931), [], pos)
+        r = st.step(F(t=104, mid=2.955, bid=2.954, ask=2.956), [dict(sig="POP_STALLING")], pos)     # +0.17% over the unit: the unit cycles out normally
+        self.assertEqual((r["trim"][1], r["trim"][3]), (70, None)); self.assertEqual(r["events"][-1][1]["mode"], "normal")
+        st2 = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60, derisk_under_units=0))   # the switch: only a lone core is cut
+        pos2 = dict(lots=[[70, 3.0, "a"], [70, 2.95, "b"]], avg=2.975, last="buy", last_buy_px=2.95)
+        for t in (100, 101): st2.step(F(t=t, mid=2.90, bid=2.899, ask=2.901), [], pos2)
+        self.assertIsNone(st2.step(F(t=102, mid=2.93, bid=2.929, ask=2.931), [dict(sig="POP_STALLING")], pos2)["trim"])
+
+    def test_a_unit_sale_at_its_normal_gate_is_not_labelled_derisk(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60)); pos = dict(lots=[[70, 3.0, "a"], [70, 2.95, "b"]], avg=2.975, last="buy", last_buy_px=2.95)
+        st.step(F(), [], pos); st.regime = "AGAINST"                                                 # a persistent de-risk trigger
+        r = st.step(F(t=101, mid=2.96, bid=2.959, ask=2.961), [dict(sig="POP_STALLING")], pos)     # +0.34% over the unit's price >= 0.15%: a normal unit trim
+        self.assertEqual(r["trim"][1], 70); self.assertEqual(r["events"][-1][1]["mode"], "normal")   # the label is the gate in force, not the flag (10 of 108 live 'derisk' labels were this)
+
+class NoSacredCore(unittest.TestCase):
+    def test_favor_does_not_hold_the_core(self):
+        st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        base = dict(rg_er=0.23, rg_med_up=3.7, rg_med_dn=1.22, rg_drift=9.66, rg_up=3, rg_dn=1)
+        for k in range(1, 5): st.step(F(t=k * 60, rg_t=k, **base), [], pos)
+        self.assertEqual(st.regime, "FAVOR")
+        r = st.step(F(t=400, mid=3.026, bid=3.025, ask=3.027, rg_t=5, **base), [dict(sig="POP_STALLING")], pos)   # +0.87% >= pop_min x favor_pop_mult (0.8%)
+        self.assertIsNotNone(r["trim"]); self.assertEqual(r["trim"][1], 70); self.assertEqual(r["events"][-1][1]["mode"], "favor")   # CONCEPT: no sacred core — the gate is scaled, nothing is exempt
+
+class Premise(unittest.TestCase):
+    def test_an_adopted_exchange_stop_is_not_a_premise_and_a_late_level_is_taken(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        r = st.step(F(htf_lows=[2.95]), [], pos)                                                     # 2.95 is inside the ladder: no premise
+        self.assertIsNone(st.struct_stop); self.assertEqual([e[0] for e in r["events"]], []); self.assertIsNotNone(st.stop_px)
+        st.adopt_stop(2.8)                                                                           # the exchange stop (liq guard / resync) becomes the baseline ...
+        self.assertEqual(st.stop_px, 2.8); self.assertIsNone(st.struct_stop)                        # ... and nothing else
+        r = st.step(F(t=101, htf_lows=[2.95, 2.85]), [], pos)                                        # a qualifying pivot confirms later: it is the premise now
+        self.assertAlmostEqual(st.struct_stop, 2.85 - 0.018, 3); self.assertEqual([e[0] for e in r["events"]], ["STRUCT_STOP"])
+        self.assertEqual(r["stop"], 2.8)                                                             # the exchange stop stays the money cap baseline
+
+    def test_structure_above_the_price_is_reported_once(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        n = sum(1 for t in (100, 101, 102) for e in st.step(F(t=t, mid=2.80, bid=2.799, ask=2.801, htf_lows=[2.85]), [], pos)["events"] if e[0] == "STRUCT_SKIP")
+        self.assertEqual(n, 1)
+
+class RetraceShare(unittest.TestCase):
+    def test_a_top_must_give_back_a_share_of_its_bounce(self):
+        """0.5 x ATR1m is 0.02-0.06% on the 2026-09-02 basket: the retrace exit fired on any wiggle at the gate and was 63% of all pulls.
+        A reversal gives back retrace_frac of the bounce (peak - trough since the last fill); the ATR term stays as the floor."""
+        st = Strategy(dict(side="long", unit_qty=70, retrace_frac=0.33)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(t=100, mid=3.0), [], pos)
+        st.step(F(t=101, mid=3.06, bid=3.059, ask=3.061), [], pos)                                   # +2% bounce from the trough 3.0
+        r = st.step(F(t=102, mid=3.045, bid=3.044, ask=3.046), [], pos); self.assertIsNone(r["trim"])   # 0.75 ATR back but only a quarter of the bounce: not a reversal
+        r = st.step(F(t=103, mid=3.038, bid=3.037, ask=3.039), [], pos)                              # 0.022 back = 37% of the bounce
+        self.assertEqual(r["events"][-1][0], "PULL_TRIM"); self.assertEqual(r["events"][-1][1]["path"], "retrace")
+        st2 = Strategy(dict(side="long", unit_qty=70, retrace_frac=0.0)); pos2 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st2.step(F(t=100, mid=3.0), [], pos2); st2.step(F(t=101, mid=3.06, bid=3.059, ask=3.061), [], pos2)
+        self.assertIsNotNone(st2.step(F(t=102, mid=3.045, bid=3.044, ask=3.046), [], pos2)["trim"])   # 0 restores the ATR-only rule
+
+class UnitFloor(unittest.TestCase):
+    def test_the_relaxed_unit_gate_never_falls_under_the_round_trip_fee(self):
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60, gate_floor_unit_pct=0.05, fee_rt_pct=0.08))
+        pos = dict(lots=[[70, 3.05, "a"], [70, 3.0, "b"]], avg=3.025, last="buy", last_buy_px=3.0)
+        st.step(F(), [], pos); st.fail_n = 10
+        st.step(F(t=101, mid=3.002, bid=3.001, ask=3.003), [dict(sig="POP_STALLING")], pos)
+        self.assertAlmostEqual(st.gate_eff, 0.08, 3)                                                 # CONCEPT: the unit's round trip is a profit — a taker exit included
+        self.assertEqual(book_params(dict(unit_qty=70), "long", 0.001, 1, 0.1, fee_rt=0.08)["fee_rt_pct"], 0.08)
+        self.assertEqual(book_params(dict(unit_qty=70, fee_rt_pct=0), "long", 0.001, 1, 0.1, fee_rt=0.08)["fee_rt_pct"], 0)   # a file value (0 = off) outranks the contract
+
+class GapReturns(unittest.TestCase):
+    def test_a_feed_gap_return_enters_neither_sigma_nor_velocity(self):
+        from bot.signal import Features
+        book = lambda m, ts: dict(arg=dict(channel="books15"), data=[dict(bids=[[m - 0.01 - i * 0.01, 5] for i in range(5)], asks=[[m + 0.01 + i * 0.01, 5] for i in range(5)], ts=str(ts))], ts=ts)
+        feat = Features(dict(vol_hl=300)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
+        t = 7200
+        for i in range(400): feat.feed(book(100 + 0.01 * (i % 2), t * 1000 + 500)); t += 1             # a mature, tiny sigma (1-tick flicker)
+        var0 = feat.var.v
+        feat.feed(book(101, (t + 30) * 1000 + 500)); t += 31                                          # 30 s of silence, then +1%: the gap return
+        out = []
+        for _ in range(20): out += feat.feed(book(101, t * 1000 + 500)); t += 1
+        self.assertLess(feat.var.v, var0 * 2)                                                         # sigma did not swallow a 1% "1-second" return (x20 without the skip)
+        self.assertFalse(any(x["sig"] in ("DIP_SLOWING", "POP_STALLING") for x in out))              # and no fake fast->slow transition fired
+        feat.feed(book(101, (t + 200) * 1000 + 500))                                                  # > 120 s: an outage restarts the normaliser too (RULES)
+        self.assertLessEqual(feat.var.n, 1)                                                          # the normaliser restarts: v is silent for vol_hl again
+
+class LotRouting(unittest.TestCase):
+    def test_apply_fill_reduces_the_named_lot_first_then_lifo(self):
+        pos = dict(lots=[[70, 3.0, "a"], [70, 2.95, "b"]], avg=2.975, last="buy")
+        apply_fill(pos, 1, False, 35, 2.93, "t1", lot=0); self.assertEqual(pos["lots"], [[35, 3.0, "a"], [70, 2.95, "b"]])
+        apply_fill(pos, 1, False, 50, 2.93, "t2", lot=0); self.assertEqual(pos["lots"], [[55, 2.95, "b"]])   # the core lot gone, the rest LIFO
+        self.assertAlmostEqual(pos["avg"], 2.975)                                                     # exchange accounting: the average never moves on a reduce
 
 class DeriskQuantity(unittest.TestCase):
     def test_a_core_smaller_than_a_unit_is_still_cut_in_half_first(self):

@@ -1,7 +1,8 @@
 """Invariants of the symbol selector (bot/scan.py metrics and score, bot/select.py basket verdicts).  python -m unittest bot.test_select"""
 import math, time, unittest
 from bot.scan import two_way, trials, edge_of, flags_of, WIN, EDGE
-from bot.select import plan, apply, flat_of, record_dict, SELECT
+from bot import select
+from bot.select import plan, apply, flat_of, flats_now, record_dict, recent_engines, SELECT
 
 def sine(days=2, period=60, amp=3.0, base=100.0, vol=1000.0):
     """1m candles of a smooth cycle: amp % swings every `period` minutes."""
@@ -155,12 +156,33 @@ class Flat(unittest.TestCase):
         stale = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 600))
         self.assertFalse(flat_of({"A": dict(t=stale, books={"long": empty})}, now)["A"])        # an engine that is down is not flat
 
+    def test_the_verdict_reads_the_state_files_after_the_scan(self):
+        """A scan takes over a minute; states read before it are older than the 60 s flat window by the time the verdict is made, so
+        BOOK_DROP could never fire (every SELECT through 2026-09-02 shows flat=False, the wound-down book included)."""
+        now = time.time(); empty = dict(pos=dict(lots=[]), working=dict(buy=None, trim=None))
+        stamp = lambda age: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - age))
+        states = {"A": dict(t=stamp(0), books={"long": empty}), "B": dict(t=stamp(70), books={"long": empty})}
+        orig = select.load_states; select.load_states = lambda: states
+        try: flats = flats_now()
+        finally: select.load_states = orig
+        self.assertTrue(flats["A"]); self.assertFalse(flats["B"])                                # what the files say now, not what they said before the scan
+        self.assertEqual(recent_engines(states, now), ["A", "B"]); self.assertEqual(recent_engines({"C": dict(t=stamp(90000))}, now), [])
+
+    def test_a_wound_down_book_whose_flag_is_gone_adds_again(self):
+        p = dict(strat=dict(symbol="AUSDT"), books={"AUSDT": {"wind_down": 1}, "BUSDT": {}})
+        acts = apply(p, [row("AUSDT"), row("BUSDT")], [], [], {"AUSDT": False}, {**SELECT, "n": 4})
+        self.assertEqual(acts, [("resume", "AUSDT", "flags cleared")]); self.assertNotIn("wind_down", p["books"]["AUSDT"])   # ER is re-judged every scan: the fact that sent it out is gone
+        p2 = dict(strat=dict(symbol="AUSDT"), books={"AUSDT": {"wind_down": 1}, "BUSDT": {}})
+        apply(p2, [row("AUSDT", flags=["vol24M"]), row("BUSDT")], [("AUSDT", "vol24M")], [], {"AUSDT": False}, {**SELECT, "n": 4})
+        self.assertEqual(p2["books"]["AUSDT"]["wind_down"], 1)                                     # still flagged: still winding down
+
 class Record(unittest.TestCase):
     def test_books_are_always_recorded_and_flagged_candidates_are_not(self):
         rows = [row("AUSDT"), row("BUSDT", flags=["pump"]), row("CUSDT"), row("DUSDT")]
-        rec = record_dict(["AUSDT", "ZUSDT"], rows, {**SELECT, "record_top": 1, "record_extra": ["EUSDT"]})
+        rec = record_dict(["AUSDT", "ZUSDT"], rows, {**SELECT, "record_top": 1, "record_extra": ["EUSDT"]}, recent=["YUSDT"])
         self.assertIn("ZUSDT", rec)                                                             # a book with no row still gets its tape
         self.assertNotIn("BUSDT", rec); self.assertIn("CUSDT", rec); self.assertIn("EUSDT", rec)
+        self.assertIn("YUSDT", rec)                                                             # a book that just left keeps its tape for a day
 
 if __name__ == "__main__":
     unittest.main()

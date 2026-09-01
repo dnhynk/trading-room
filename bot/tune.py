@@ -1,7 +1,9 @@
 """Bounded, walk-forward parameter tuning on recordings. Report first; --apply only when every acceptance rule passes.
-  python -m bot.tune [--days 7] [--sym TRUMPUSDT] [--keys dip_min_atr,v_fast] [--workers 6] [--apply]
+  python -m bot.tune [--days 7] [--sym A,B] [--keys dip_min_atr,v_fast] [--workers 6] [--apply]
 Data: the last --days of recordings (data/ws/pub-*.jsonl[.gz]), split walk-forward — train = all days but the last, validate = the
-last day (with a single day: train = first 2/3 of the files, validate = the rest).
+last day (with a single day: train = first 2/3 of the files, validate = the rest). Symbols: params.books (the basket) unless --sym;
+a candidate is scored on every symbol's tape at live sizing (bot.backtest's equity sizing, one equity for the whole run) and the
+metrics are summed — the rules are common to the basket, so a change has to pay across it, not on one symbol.
 Search: a coordinate neighbourhood, not a grid — for each key in --keys (default: rotate through SPACE by weekday) the incumbent
 value moves one grid step down or up. Each nightly run can therefore change each key by at most one step (slow drift) and only
 inside the grid bounds. Objective = train pnl − train max_dd (USDT).
@@ -12,8 +14,8 @@ Output: logs/tune-YYYYMMDD.json and a printed table. --apply writes the accepted
 import glob, json, os, sys, time
 from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot.backtest import run_files
-from bot.ws import load_params, PARAMS
+from bot.backtest import run_files, latest_equity
+from bot.ws import load_params, PARAMS, portfolio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them tunable
@@ -39,6 +41,7 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "stop_buffer_atr": ("strat", [0.3, 0.5, 0.8, 1.2]),        # how far under the pivot the premise counts as broken (B: a de-risk trigger, not an exchange stop; bot/sweeps.py measures the hunts)
     "brk_atr": ("sig", [0.3, 0.5, 0.8, 1.2, 2.0]),             # how far under the 30-min low (in ATR) a volume push counts as a break -> the de-risk trigger's depth (2026-08-30: 3 of 4 campaigns were halved at -0.3% by breaks 0.25% under the low)
     "derisk_core_frac": ("strat", [0.25, 0.5, 0.75]),
+    "retrace_frac": ("strat", [0.2, 0.33, 0.5]),               # the share of the bounce a top must give back (0 would restore the ATR-only wiggle: not offered)
 }
 MIN_CYCLES, MIN_GAIN = 30, 0.10
 
@@ -48,12 +51,17 @@ def arg(flag, default):
 def objective(m): return m["total"] - m["max_dd"]
 
 def evaluate(job):
-    files, sym, sig, strat = job
-    return run_files(files, sym, sig, strat)
+    """One candidate on one file set: the basket's symbols summed (pnl, total, cycles; max_dd summed = the conservative bound)."""
+    files, syms, sig, strat, equity = job
+    ms = [run_files(files, sym, sig, strat, equity=equity) for sym in syms]
+    return dict(pnl=round(sum(m["pnl"] for m in ms), 3), total=round(sum(m["total"] for m in ms), 3), max_dd=round(sum(m["max_dd"] for m in ms), 3),
+                cycles=sum(m["cycles"] for m in ms), per={s: dict(pnl=m["pnl"], total=m["total"], cycles=m["cycles"]) for s, m in zip(syms, ms)})
 
 def main():
-    days, sym, workers = arg("--days", 7), arg("--sym", "TRUMPUSDT"), arg("--workers", 6)
+    days, workers = arg("--days", 7), arg("--workers", 6)
     p = load_params() or {}; sig0, strat0 = dict(p.get("sig") or {}), dict(p.get("strat") or {})
+    syms = arg("--sym", "").split(",") if "--sym" in sys.argv else [s for s in portfolio(p) if s]
+    equity = latest_equity()                                  # one wallet for every candidate: the sizing must not differ between them
     files = sorted(glob.glob(os.path.join(ROOT, "data", "ws", "pub-*.jsonl*")))
     files = [f for f in files if not (f.endswith(".jsonl") and os.path.exists(f + ".gz"))]
     active = [f for f in files if f.endswith(".jsonl") and time.time() - os.path.getmtime(f) < 900]   # still being written: every candidate must see the same tape
@@ -66,7 +74,7 @@ def main():
     else:
         k = max(1, len(files) * 2 // 3); train, valid = files[:k], files[k:]
     keys = arg("--keys", "").split(",") if "--keys" in sys.argv else [list(SPACE)[(time.localtime().tm_yday * 2 + i) % len(SPACE)] for i in range(2)]
-    print(f"train {len(train)} files, validate {len(valid)} files, keys {keys}", flush=True)
+    print(f"train {len(train)} files, validate {len(valid)} files, keys {keys}, symbols {syms}, equity {equity}", flush=True)
     # candidates: incumbent, and for each key its one-step neighbours (plus two-step neighbours for the plateau check)
     cands = {"incumbent": (sig0, strat0)}
     for k in keys:
@@ -80,12 +88,14 @@ def main():
     if not valid:
         print("no validation files (need >= 2 days, or >= 2 files): report only, nothing can be accepted"); MIN_ACCEPT = False
     else: MIN_ACCEPT = True
-    from bot.backtest import load_seconds, seed_history
-    for f in train + valid: load_seconds(f, sym)          # build the per-second caches once, before the workers read them
-    for fs in (train, valid):                             # and each set's REST seed once: a burst of worker fetches could be rate-limited and leave some candidates unseeded (incomparable)
-        secs = load_seconds(fs[0], sym) if fs else []
-        if secs: seed_history(sym, secs[0][0])
-    jobs = [(train, sym, s, t) for s, t in cands.values()] + [(valid or train, sym, s, t) for s, t in cands.values()]
+    from bot.backtest import load_seconds, seed_history, contract_meta
+    for sym in syms:
+        contract_meta(sym)                                # the quantity step, cached once
+        for f in train + valid: load_seconds(f, sym)      # build the per-second caches once, before the workers read them
+        for fs in (train, valid):                         # and each set's REST seed once: a burst of worker fetches could be rate-limited and leave some candidates unseeded (incomparable)
+            secs = load_seconds(fs[0], sym) if fs else []
+            if secs: seed_history(sym, secs[0][0])
+    jobs = [(train, syms, s, t, equity) for s, t in cands.values()] + [(valid or train, syms, s, t, equity) for s, t in cands.values()]
     with Pool(min(workers, len(jobs))) as pool: res = pool.map(evaluate, jobs)
     n = len(cands); names = list(cands)
     tr = dict(zip(names, res[:n])); va = dict(zip(names, res[n:]))
@@ -110,13 +120,13 @@ def main():
     if len(accepted) > 1:      # keys were judged one at a time: the combination must pass the same bar before it is applied together
         s2, t2 = dict(sig0), dict(strat0)
         for k, (val, _, sec) in accepted.items(): (s2 if sec == "sig" else t2)[k] = val
-        ctr, cva = evaluate((train, sym, s2, t2)), evaluate((valid or train, sym, s2, t2))
+        ctr, cva = evaluate((train, syms, s2, t2, equity)), evaluate((valid or train, syms, s2, t2, equity))
         best_single = max(objective(tr[f"{k}={v[0]}"]) for k, v in accepted.items())
         if not (objective(ctr) >= best_single and cva["total"] >= inc_va["total"] and ctr["cycles"] >= MIN_CYCLES):
             print(f"combined {list(accepted)} fails together (train obj {objective(ctr):.2f} vs best single {best_single:.2f}, valid {cva['total']:.2f}): keeping only the best single key")
             kbest = max(accepted, key=lambda k: accepted[k][1]); accepted = {kbest: accepted[kbest]}
         else: print(f"combined {list(accepted)}: train obj {objective(ctr):.2f}, valid {cva['total']:.2f} -> ok")
-    report = dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), sym=sym, days=days_avail, keys=keys, train=tr, valid=va, accepted={k: v[0] for k, v in accepted.items()})
+    report = dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), symbols=syms, equity=equity, days=days_avail, keys=keys, train=tr, valid=va, accepted={k: v[0] for k, v in accepted.items()})
     os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)
     with open(os.path.join(ROOT, "logs", f"tune-{time.strftime('%Y%m%d')}.json"), "w", encoding="utf-8") as f: json.dump(report, f)
     print("accepted:", {k: v[0] for k, v in accepted.items()} or "none")

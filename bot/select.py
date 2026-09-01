@@ -20,19 +20,24 @@ is allowed — live against live.
 
 WIND-DOWN. A flagged book is not closed at market; 순환매 sells into a stall (CONCEPT). `books[sym]["wind_down"] = 1` stops new
 entries (cycle.py treats it as a per-symbol PAUSE), trims and stops keep working, and the key is removed once that engine reports
-flat — at which point its engine exits by itself (cycle.py: a pinned symbol that left `books` is a contract change) and the slot is
-free. `books` never becomes empty: the last book stays, wound down, rather than falling back to whole-wallet sizing on strat.symbol.
+flat (read from the state files AFTER the scan — a scan takes over a minute and the flat window is 60 s) — at which point its engine
+exits by itself (cycle.py: a pinned symbol that left `books` is a contract change) and the slot is free. A wound-down book whose flag
+is gone on a later scan (ER is re-judged every scan) adds again (BOOK_RESUME). `books` never becomes empty: the last book stays, wound
+down, rather than falling back to whole-wallet sizing on strat.symbol.
 
 Also written by this job: `strat.symbol` (the highest-ranked held symbol — the default for bot.trade and for an unpinned engine),
-`strat.side` (that symbol's 1H structure, a record; 쌍검 `sides` is preserved), and `record` = every book + the top
-`select.record_top` unflagged candidates + `select.record_extra` (a watchlist, recorded whatever its flags say, never traded here)
-+ BTCUSDT candles. Everything else in params.json belongs to the person.
-Events: SELECT (every scan's verdict) in logs/events.jsonl; BOOK_ADD / BOOK_WIND_DOWN / BOOK_DROP also in logs/alerts.jsonl.
+`strat.side` (that symbol's 1H structure, a record; 쌍검 `sides` is preserved), and `record` = every book + engines seen within a day
+(a book that just left keeps its tape) + the top `select.record_top` unflagged candidates + `select.record_extra` (a watchlist,
+recorded whatever its flags say, never traded here) + BTCUSDT candles. Everything else in params.json belongs to the person.
+The engine geometry the score charges (win / loss / fee per cycle) is re-measured from the live ledger at every scan (bot.cycles
+.geometry, >= 200 cycles; else scan.EDGE; `select.edge` overrides both).
+Events: SELECT (every scan's verdict) in logs/events.jsonl; BOOK_ADD / BOOK_WIND_DOWN / BOOK_RESUME / BOOK_DROP also in logs/alerts.jsonl.
 State (add streaks, openings today) in logs/select-state.json. --once runs one scan; --dry scans and decides, and writes only the
 report (logs/scan.json) — never params.json or the state."""
 import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.scan import rank
+from bot.cycles import geometry
 from bot.ws import load_params, PARAMS, load_states, portfolio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,10 +78,25 @@ def flat_of(states, now):
         except Exception: out[sym] = False
     return out
 
-def record_dict(held, rows, sel):
+def flats_now():
+    """The engines' flat verdicts read at this moment. Read after the scan, never before it: a scan takes over a minute and a state file
+    older than 60 s is not flat by definition, so states read before the scan could never say flat and BOOK_DROP never fired (every
+    SELECT verdict through 2026-09-02 shows flat=False for every book, the wound-down one included)."""
+    return flat_of(load_states(), time.time())
+
+def recent_engines(states, now, hours=24):
+    """Symbols whose engine wrote a state within `hours`: a book that just left keeps its tape for a day (the post-mortem needs it)."""
+    out = []
+    for sym, s in (states or {}).items():
+        try:
+            if now - time.mktime(time.strptime(s["t"], "%Y-%m-%d %H:%M:%S")) < hours * 3600: out.append(sym)
+        except Exception: pass
+    return out
+
+def record_dict(held, rows, sel, recent=()):
     """Full channels for every book plus the top unflagged candidates — a symbol has a tape before it is ever traded, and a symbol we
-    dropped keeps one. `record_extra` is a watchlist: recorded whatever its flags say, never a candidate here."""
-    rec = {s: CHANNELS for s in held}
+    dropped keeps one for a day (`recent`). `record_extra` is a watchlist: recorded whatever its flags say, never a candidate here."""
+    rec = {s: CHANNELS for s in list(held) + [x for x in recent if x not in held]}
     ok = [r for r in rows if not r["flags"] and r["symbol"] not in rec and r["symbol"] not in sel["exclude"]]
     for r in ok[:int(sel["record_top"])]: rec[r["symbol"]] = CHANNELS
     for x in sel.get("record_extra") or []: rec.setdefault(x, CHANNELS)
@@ -107,7 +127,7 @@ def plan(rows, held, sel, st, today):
     if adds and left <= 0: why.append(f"{sel['max_per_day']} openings already today")
     return wind, adds, "; ".join(why)
 
-def apply(p, rows, wind, adds, flats, sel):
+def apply(p, rows, wind, adds, flats, sel, recent=()):
     """Bring params.json to the planned basket. Returns [(action, symbol, detail)] — nothing is written by this function."""
     by = {r["symbol"]: r for r in rows}; n = max(int(sel["n"]), 1); acts = []
     sp = p.setdefault("strat", {})
@@ -115,6 +135,8 @@ def apply(p, rows, wind, adds, flats, sel):
     if not books: books = {sp.get("symbol"): {}} if sp.get("symbol") else {}      # first run in basket mode: the running symbol becomes book one
     for s, w in wind:
         if not books.get(s, {}).get("wind_down"): books.setdefault(s, {})["wind_down"] = 1; acts.append(("wind", s, w))
+    for s in [s for s in books if books[s].get("wind_down") and s in by and not by[s]["flags"]]:
+        del books[s]["wind_down"]; acts.append(("resume", s, "flags cleared"))    # the fact that sent it out is gone (ER is re-judged every scan): it adds again
     for s in [s for s in books if books[s].get("wind_down") and flats.get(s)]:
         if len(books) > 1 or adds: del books[s]; acts.append(("drop", s, "flat"))   # never ends empty: the last book stays, wound down, unless a replacement opens now
     for s in adds:
@@ -126,7 +148,7 @@ def apply(p, rows, wind, adds, flats, sel):
         first = next((r["symbol"] for r in rows if r["symbol"] in held), held[0])
         sp["symbol"] = first
         if (by.get(first) or {}).get("side") in ("long", "short"): sp["side"] = by[first]["side"]
-    p["record"] = record_dict(held, rows, sel)
+    p["record"] = record_dict(held, rows, sel, recent)
     return acts
 
 def main():
@@ -136,28 +158,29 @@ def main():
         held = [s for s in portfolio(p) if s]
         t0 = time.time(); states = load_states()
         eq = next((((s.get("acct") or {}).get("equity")) for s in states.values() if (s.get("acct") or {}).get("equity")), None)
+        edge = sel.get("edge") or geometry()                 # the engine's measured geometry, re-read from the live ledger every scan (None: scan.EDGE)
         try: rows = rank(min_vol=sel["min_vol"], days=int(sel["days"]), exclude=sel["exclude"], log=log,
                          always=tuple(held),               # a held symbol is always measured, and never exempted from a gate by it
-                         equity=eq, n_books=int(sel["n"]), edge=sel.get("edge"))
+                         equity=eq, n_books=int(sel["n"]), edge=edge)
         except Exception as e: log(f"scan failed: {type(e).__name__}: {e}"); rows = None
         if rows:
             os.makedirs(LOGS, exist_ok=True)
-            write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], rows=rows))
+            write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], edge=edge, rows=rows))
             now = time.time(); today = time.strftime("%Y%m%d", time.gmtime(now))
             st = read_json(os.path.join(LOGS, "select-state.json"), {})
             if st.get("day") != today: st["day"], st["opens"] = today, 0
-            flats = flat_of(states, now)
+            flats = flats_now()                              # after the scan: the verdict needs this minute's state files
             wind, adds, why = plan(rows, held, sel, st, today)
-            ev("SELECT", n=int(sel["n"]), held=held, flat=flats, wind=[s for s, _ in wind], adds=adds, why=why, took_s=int(time.time() - t0),
+            ev("SELECT", n=int(sel["n"]), held=held, flat=flats, wind=[s for s, _ in wind], adds=adds, why=why, took_s=int(time.time() - t0), edge=edge,
                top=[[r["symbol"], round(r["edge"], 3), round(r["p_up"], 2), round(r["trials_h"], 2), round(r["impact"], 4), bool(r.get("entry")), r["side"]]
                     for r in rows[:6]])
             if not dry:
                 before, rec0 = json.dumps(p, sort_keys=True), set(p.get("record") or {})
-                acts = apply(p, rows, wind, adds, flats, sel)
+                acts = apply(p, rows, wind, adds, flats, sel, recent=recent_engines(load_states(), now))
                 if json.dumps(p, sort_keys=True) != before: write_json(PARAMS, p, indent=2)
                 for kind, sym, detail in acts:
                     if kind == "add": st["opens"] = st.get("opens", 0) + 1; st["streak"] = {}
-                    ev({"add": "BOOK_ADD", "wind": "BOOK_WIND_DOWN", "drop": "BOOK_DROP"}[kind], alert=True, symbol=sym, why=detail,
+                    ev({"add": "BOOK_ADD", "wind": "BOOK_WIND_DOWN", "drop": "BOOK_DROP", "resume": "BOOK_RESUME"}[kind], alert=True, symbol=sym, why=detail,
                        books=list(p.get("books") or {}))
                 if not acts and set(p.get("record") or {}) != rec0: ev("RECORD_SET", symbols=list(p.get("record") or {}))
                 write_json(os.path.join(LOGS, "select-state.json"), st)

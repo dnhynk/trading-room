@@ -246,8 +246,10 @@ def main():
     top, days, min_vol = arg("--top", 15), arg("--days", 3), arg("--min-vol", 5e7)
     nb = arg("--n-books", int((p.get("select") or {}).get("n") or len(p.get("books") or {}) or 1))   # the TARGET basket, so the table's flags match select's
     syms = arg("--sym", "").split(",") if "--sym" in sys.argv else None
-    t0 = time.time(); rows = rank(min_vol, days, syms, equity=eq, n_books=nb, always=tuple(portfolio(p)) if p else ())
-    table(rows, top); print(f"--- {len(rows)} symbols, {days} windows of 24h, {time.time() - t0:.0f}s")
+    from bot.cycles import geometry
+    edge = (p.get("select") or {}).get("edge") or geometry()          # as select charges it: the live ledger's current geometry, else EDGE
+    t0 = time.time(); rows = rank(min_vol, days, syms, equity=eq, n_books=nb, always=tuple(portfolio(p)) if p else (), edge=edge)
+    table(rows, top, edge); print(f"--- {len(rows)} symbols, {days} windows of 24h, {time.time() - t0:.0f}s" + (f", geometry from {edge['n']} live cycles" if edge and edge.get('n') else ", geometry = EDGE constants"))
     if "--json" in sys.argv:
         os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)
         with open(os.path.join(ROOT, "logs", "scan.json"), "w", encoding="utf-8") as f: json.dump(dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=days, rows=rows), f)

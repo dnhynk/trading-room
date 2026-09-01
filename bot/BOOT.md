@@ -25,7 +25,7 @@
 - `STOP_FAILED` / `STOP_THROUGH` / `EMERGENCY_CLOSE` → 즉시 상태 확인, 포지션이 남았으면 보고.
 - `WS_DOWN` 60초 이상 → 프로세스·네트워크 확인. 재접속은 자동.
 - `MARGIN_LOCKED` → 사용자 수동 매매가 증거금을 잠금. 보고.
-- `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 기록만(쌍검이 기본이라 방향 플립은 없다; 추세 쪽 키우기는 NEXT 2). `BOOK_WIND_DOWN` → 보유 종목이 자격을 잃었다(플래그가 `why`에 있다). 담기만 멈춘 것이고 포지션은 정체에서 빠져나간다 — 손댈 것 없음, 한 줄 보고. `BOOK_DROP` → 그 책이 flat이 되어 빠졌다(엔진도 종료). `BOOK_ADD` → 빈 슬롯에 새 종목이 들어왔다(엔진이 뜬다). RULES·메모리를 다시 읽고 한 줄 보고. 이상하면(플래그 종목이 들어옴·하루 개시 한도 초과) select 자식을 세우고 보고.
+- `REGIME_CHANGE` → 라벨만. `SIDE_HINT` → 기록만(쌍검이 기본이라 방향 플립은 없다; 추세 쪽 키우기는 NEXT 2). `BOOK_WIND_DOWN` → 보유 종목이 자격을 잃었다(플래그가 `why`에 있다). 담기만 멈춘 것이고 포지션은 정체에서 빠져나간다 — 손댈 것 없음, 한 줄 보고. `BOOK_RESUME` → 그 플래그가 다음 스캔에서 사라져 담기가 다시 열렸다. `BOOK_DROP` → 그 책이 flat이 되어 빠졌다(엔진도 종료). `BOOK_ADD` → 빈 슬롯에 새 종목이 들어왔다(엔진이 뜬다). RULES·메모리를 다시 읽고 한 줄 보고. 이상하면(플래그 종목이 들어옴·하루 개시 한도 초과) select 자식을 세우고 보고.
 - `PARAMS_DEFERRED` → live에서 포지션·주문이 있어 symbol/sides/mode 변경을 플랫까지 보류 중. 기다린다(엔진이 플랫이 되면 스스로 재기동). `STATE_DISCARDED` → 모드가 바뀐 재기동이 이전 모드의 장부를 버린 것. 정보.
 - `EMERGENCY_CANCEL_UNCONFIRMED` → 비상 청산 전 취소 확인이 6초 안에 안 온 것. 즉시 `bot/trade.py status`로 포지션·주문 확인.
 - `STOP_LIQ_GUARD` → 원하는 스탑(돈 한도)이 청산가 너머라 청산가 바로 위로 올려 둔 것. B(구조가 소프트, 거래소 스탑 = cap)에서는 1~2유닛의 정상 상태라 events.jsonl에만 남는다. 기록만.
@@ -35,7 +35,7 @@
 - `ERROR` 반복 → 로그 원인 확인 후 보고. 코드 수정은 아래 절차로.
 
 ## 규칙 변경 절차
-메커니즘·코드 변경은 감독 세션이 하지 않는다 — 사용자에게 수정 세션(`CLAUDE.md`의 역할 구분)을 제안하고, 수정 세션이 재기동을 넘기면 포지션 0에서 재기동 후 RULES.md를 다시 읽는다. params 한 줄 조정만 감독 세션 몫. 참고로 절차는: 사용자 자연어(메커니즘) → `bot/RULES.md` 수정 → `bot/signal.py`/`bot/cycle.py` 최소 diff → `python -m unittest bot.test_signal bot.test_cycle bot.test_select` → `python -m bot.backtest data/ws/pub-20260829-0[4-6].jsonl.gz`(기준 테이프; 수치는 RULES 도구 절) → 자식 재기동 → 한 줄 보고. 숫자는 전부 휴리스틱: 근거는 야간 리포트(신호 분할·legs 속도 모델 표·롱/숏/쌍검 by_hint·튜너)·`bot/replay.py --by`·`bot/legs.py`·`bot/tune.py`(리포트 우선, `--apply`는 사용자 승인). 예정된 수정 세션 두 건은 메모리 `cycle-harness-plan`에 있다: 속도 모델 고도화(legs 표가 며칠 쌓이면)와 방향 메커니즘(by_hint 표가 갈리면). 매매 세션이나 외부 조언의 규칙은 가설이며 재생·백테스트로 검증한 뒤에만 넣는다. 급락 뒤 첫 감속을 막는 규칙은 넣지 않는다. 순서는 항상 **개념 → 코드 → 결과 확인**이다: 메커니즘은 개념에서만 바뀌고, 결과가 나빠도 되돌리지 않는다(나쁜 결과는 "그 원칙의 전제가 이 테이프에서 성립했나"를 묻는 질문이다). 데이터로 움직이는 건 숫자뿐이고 그것도 튜너 울타리 안에서.
+메커니즘·코드 변경은 감독 세션이 하지 않는다 — 사용자에게 수정 세션(`CLAUDE.md`의 역할 구분)을 제안하고, 수정 세션이 재기동을 넘기면 포지션 0에서 재기동 후 RULES.md를 다시 읽는다. params 한 줄 조정만 감독 세션 몫. 참고로 절차는: 사용자 자연어(메커니즘) → `bot/RULES.md` 수정 → `bot/signal.py`/`bot/cycle.py` 최소 diff → `python -m unittest bot.test_signal bot.test_cycle bot.test_select` → `python -m bot.backtest data/ws/pub-20260829-0[4-6].jsonl.gz`(기준 테이프; 수치는 RULES 도구 절) → 자식 재기동 → 한 줄 보고. 숫자는 전부 휴리스틱: 근거는 야간 리포트(책마다 신호 분할·legs 속도 모델 표·롱/숏/쌍검 by_hint, 바구니 전체 튜너)·`bot/replay.py --by`·`bot/legs.py`·`bot/tune.py`(리포트 우선, `--apply`는 사용자 승인). 미뤄둔 메커니즘 작업과 착수 조건은 `bot/NEXT.md`다. 매매 세션이나 외부 조언의 규칙은 가설이며 재생·백테스트로 검증한 뒤에만 넣는다. 급락 뒤 첫 감속을 막는 규칙은 넣지 않는다. 순서는 항상 **개념 → 코드 → 결과 확인**이다: 메커니즘은 개념에서만 바뀌고, 결과가 나빠도 되돌리지 않는다(나쁜 결과는 "그 원칙의 전제가 이 테이프에서 성립했나"를 묻는 질문이다). 데이터로 움직이는 건 숫자뿐이고 그것도 튜너 울타리 안에서.
 
 ## 절대 규칙
 - 사용자의 수동 포지션·주문은 건드리지 않는다(엔진 주문은 clientOid `cycL-`/`cycS-`).

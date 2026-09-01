@@ -58,7 +58,7 @@ def quantize_unit(tgt, cur, qstep):
 
 POSITIVE = dict(strat=("unit_qty", "max_units", "max_notional", "cap_usdt", "pop_min_pct", "tick", "qstep", "buy_ttl_s", "confirm_within_s", "wallet_frac"),
                 sig=("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels", "rg_window", "vp_window", "vp_bucket_ticks", "stop_lookback"))
-OPTIONAL_NUM = ("stop_structural", "add_confirm", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac", "daily_loss_limit")   # None or a non-negative number
+OPTIONAL_NUM = ("stop_structural", "add_confirm", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac", "daily_loss_limit", "fee_rt_pct")   # None or a non-negative number
 # 자본 비례 한도: 고정 키 -> 그 키를 대신하는 지갑 배수. resize·load·apply_params·snapshot이 전부 여기서 읽는다 —
 # 같은 대응을 여러 곳에 적어두면 하나가 뒤처진다(2026-09-01 max_notional이 그렇게 낡았다). 새 한도는 여기만 더한다.
 SIZED = {"unit_qty": "unit_frac", "cap_usdt": "cap_frac", "daily_loss_limit": "daily_loss_frac", "max_notional": "notional_frac"}
@@ -89,7 +89,7 @@ class Book:
     def __init__(self, cy, side):
         self.cy, self.side, self.s = cy, side, (1 if side == "long" else -1)
         self.OIDP = f"cyc{'L' if self.s > 0 else 'S'}-"
-        self.sp = book_params(cy.sp, side, cy.px_tick, len(cy.sides), cy.qstep); self.dyn, self.sized_t = {}, 0.0
+        self.sp = book_params(cy.sp, side, cy.px_tick, len(cy.sides), cy.qstep, fee_rt=(cy.maker + cy.taker) * 100); self.dyn, self.sized_t = {}, 0.0
         if self.sp.get("add_confirm") is None: self.sp["add_confirm"] = 1 if len(cy.sides) > 1 else 0
         self.strat = Strategy(self.sp, cy.feat.p)
         self.pos = dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, halt=None, pause=False)
@@ -100,6 +100,8 @@ class Book:
         self.mismatch_since, self.lever, self.margin_alert_t, self.taker_t, self.seq = None, None, 0.0, 0.0, 0
         self.stop_oids, self.stop_hit_oids, self.unmatched_close = deque(maxlen=20), deque(maxlen=20), []   # known stop plan ids; stop orders already counted; close fills awaiting identity
         self.market_pending, self.stop_try_t, self.guarded = None, 0.0, None   # a market order whose response was lost (no second one until settled); fallback-stop throttle; last liq guard
+        self.trim_lot = {}                                      # trim clientOid -> the lot its fills reduce (0 = the core lot, a de-risk cut under units; None = LIFO)
+        self._stop_lock = asyncio.Lock()                        # set_stop is find-then-place: two callers (a fill's reconcile, housekeeping's ensure_stop) must not both find nothing
         self._lock = self.acquire_lock()
 
     def acquire_lock(self):
@@ -193,11 +195,14 @@ class Book:
         self.ev("DAY_CLOSE", day=day, realized=rnd(self.realized), stops=self.stops_today, halt=self.pos["halt"]); self.realized, self.stops_today = 0.0, 0
         if self.pos["halt"] in ("DAILY_STOPS", "DAILY_LOSS"): self.pos["halt"] = None
 
-    def apply_params(self, sp):
-        """New file params: fractions switched off return their keys to the file's fixed values; dynamic overrides outrank the file."""
+    def apply_params(self, sp, gone=False):
+        """New file params: fractions switched off return their keys to the file's fixed values; dynamic overrides outrank the file.
+        gone = this symbol left params.books: strat_for then falls back to the common defaults (wallet_frac 1.0, wind_down off), so while
+        the engine waits for flat it keeps its wallet share and never adds again — a removed book only winds down."""
         for fixed, frac in SIZED.items():
             if not sp.get(frac): self.dyn.pop(fixed, None)
-        self.sp = {**book_params(sp, self.side, self.cy.px_tick, len(self.cy.sides), self.cy.qstep), **self.dyn}
+        keep = dict(wallet_frac=self.sp.get("wallet_frac", 1.0), wind_down=True) if gone else {}
+        self.sp = {**book_params(sp, self.side, self.cy.px_tick, len(self.cy.sides), self.cy.qstep, fee_rt=(self.cy.maker + self.cy.taker) * 100), **self.dyn, **keep}
         if self.sp.get("add_confirm") is None: self.sp["add_confirm"] = 1 if len(self.cy.sides) > 1 else 0   # two books: each book's add is the other's trim -> higher bar
         self.strat.p = self.sp
 
@@ -238,12 +243,12 @@ class Book:
                 if w: await self.cancel(role); w = self.work[role]
                 if w or self.market_pending: continue            # the maker order rests until its cancel is confirmed, and a market order with a lost response is settled first
                 if want[1] < self.cy.qstep - 1e-9: continue                               # below one exchange step: nothing the exchange can fill (the Strategy quantises pulls; this is the backstop)
-                if time.time() - self.taker_t >= 5: await self.taker(want[1])
+                if time.time() - self.taker_t >= 5: await self.taker(want[1], want[3] if len(want) > 3 else None)
                 continue
             if w and want is not None and abs(want[0] - w["px"]) < self.cy.px_tick / 2 and abs(want[1] - (w["qty"] - w["filled"])) < self.cy.qstep / 2: continue
             if w and (want is None or time.time() - self.replaced[role] >= 1.0):
                 await self.cancel(role); w = self.work[role]
-            if want is not None and w is None: await self.place(role, want[0], want[1])
+            if want is not None and w is None: await self.place(role, want[0], want[1], want[3] if role == "trim" and len(want) > 3 else None)
         if qty and d["stop"] is not None:
             px = self.guard(d["stop"], pos_stats(self.pos)[1])
             if self.stop is None or abs(px - self.stop["px"]) >= self.cy.px_tick / 2:
@@ -251,10 +256,16 @@ class Book:
                 if px != d["stop"] and self.stop: self.strat.adopt_stop(self.stop["px"])   # the guarded level is the stop from now on (never loosened back)
         if not qty: self.stop = None
 
-    async def place(self, role, px, qty):
+    def remember_lot(self, oid, lot):
+        """Which lot a trim's fills reduce (cycles and the ledger read it back as FILL.lot); the map stays small."""
+        if lot is None: return
+        self.trim_lot[oid] = lot
+        for k in list(self.trim_lot)[:-50]: del self.trim_lot[k]
+
+    async def place(self, role, px, qty, lot=None):
         if not self.cy.live_ok(): self.ev("ORDER_BLOCKED", role=role, why="private feed down"); return
         self.seq += 1; oid = f"{self.OIDP}{role[0]}{int(time.time() * 1000)}{self.seq % 1000:03d}"
-        w = dict(oid=oid, order_id=None, px=px, qty=qty, filled=0.0, t=time.time())
+        w = dict(oid=oid, order_id=None, px=px, qty=qty, filled=0.0, t=time.time()); self.remember_lot(oid, lot)
         lvl = dict(self.feat.bids if self.rest_on_bid(role) else self.feat.asks)
         w["queue"] = lvl.get(px, 0.0)                         # contracts already resting at our price (dry: the fill model's queue; live: the record — a miss is a queue that did not drain, not a price that did not come)
         if self.mode != "dry":
@@ -272,14 +283,14 @@ class Book:
         self.work[role] = w; self.replaced[role] = time.time()
         self.ev("PLACE", role=role, px=px, qty=qty, oid=oid, queue=w.get("queue"))
 
-    async def taker(self, qty):
-        """Reduce by qty at market (the speed-based trim that a maker order did not fill in time)."""
+    async def taker(self, qty, lot=None):
+        """Reduce by qty at market (the speed-based trim that a maker order did not fill in time); lot = the lot it reduces (core cut)."""
         if not self.cy.live_ok(): self.ev("ORDER_BLOCKED", role="taker", why="private feed down"); return
-        oid = f"{self.OIDP}m{int(time.time() * 1000)}"; self.taker_t = time.time()
+        oid = f"{self.OIDP}m{int(time.time() * 1000)}"; self.taker_t = time.time(); self.remember_lot(oid, lot)
         if self.mode == "dry":
             px = self.feat.bid if self.s > 0 else self.feat.ask
             self.ev("TAKER", qty=qty, px=px, oid=oid)
-            await self.on_fill("trim", qty, px, qty * px * self.cy.taker, oid, "taker"); return
+            await self.on_fill("trim", qty, px, qty * px * self.cy.taker, oid, "taker", lot=lot); return
         try:
             await self.cy.rest(self.cy.b.market_order, self.symbol, "buy" if self.s > 0 else "sell", self.fq(qty), trade_side="close", client_oid=oid)
             self.ev("TAKER", qty=qty, oid=oid)
@@ -336,6 +347,9 @@ class Book:
                 elif time.time() - mp["t"] >= 30: self.market_pending = None; self.ev("ERROR", where="taker settle", msg=f"{mp['oid']} unresolved after 30s: {str(e)[:120]}")
 
     async def set_stop(self, px):
+        async with self._stop_lock: await self._set_stop(px)   # one caller at a time: find-then-place is not atomic (a fill's reconcile and ensure_stop both call it)
+
+    async def _set_stop(self, px):
         if self.mode == "dry":
             self.stop = dict(px=px, order_id=None); self.ev("STOP_SET", px=px); return
         if self.stop and self.stop.get("order_id"):
@@ -354,7 +368,7 @@ class Book:
             ex = await self.find_pos_loss()                       # never a second pos_loss: one the book lost track of is adopted (then moved)
             if ex:
                 self.stop, self.stop_fail = ex, 0; self.ev("ADOPT_STOP", px=ex["px"], order_id=ex["order_id"], via="set_stop")
-                if abs(ex["px"] - px) >= self.cy.px_tick / 2: await self.set_stop(px)
+                if abs(ex["px"] - px) >= self.cy.px_tick / 2: await self._set_stop(px)
                 return
             r = await self.cy.rest(self.cy.b.place_pos_tpsl, self.symbol, self.side, sl=self.fpx(px)); self.stop = dict(px=px, order_id=r["pos_loss"]["orderId"])
             self.stop_fail = 0; self.ev("STOP_SET", px=px, order_id=self.stop["order_id"])
@@ -454,15 +468,17 @@ class Book:
                 except Exception as e: self.cy.err("cancel_all", e)
 
     # ---- fills --------------------------------------------------------------------
-    async def on_fill(self, role, qty, px, fee, oid, scope="maker"):
-        pnl = apply_fill(self.pos, self.s, role == "buy", qty, px, oid=oid, fee=fee)
+    async def on_fill(self, role, qty, px, fee, oid, scope="maker", lot=None):
+        if lot is None and role == "trim": lot = self.trim_lot.get(oid)
+        pnl = apply_fill(self.pos, self.s, role == "buy", qty, px, oid=oid, fee=fee, lot=lot)
         self.realized += pnl; self.strat.on_fill(role, qty)
         w = self.work[role]
         if w and w["oid"] == oid:
             w["filled"] += qty
             if w["filled"] >= w["qty"] - self.cy.qstep / 2: self.work[role] = None
         q, avg = pos_stats(self.pos)
-        self.ev("FILL", role=role, qty=qty, px=px, fee=rnd(fee), pnl=rnd(pnl), scope=scope, pos_qty=rnd(q), avg=rnd(avg), realized=rnd(self.realized), oid=oid)
+        self.ev("FILL", role=role, qty=qty, px=px, fee=rnd(fee), pnl=rnd(pnl), scope=scope, pos_qty=rnd(q), avg=rnd(avg), realized=rnd(self.realized), oid=oid,
+                lot="core" if lot == 0 else None)   # a de-risk cut under units reduces the core lot, not the LIFO unit (bot.cycles follows this)
         await self.tick([])          # re-place the opposite side at once
 
     async def on_stop_hit(self, px, qty=None, fee=None, oid=None):
@@ -869,7 +885,7 @@ class Cycle:
         else: self.pending_restart = None
         changed = {k: v for k, v in sp.items() if self.sp.get(k) != v}
         self.sp, self.p = sp, p
-        for bk in self.books.values(): bk.apply_params(sp)
+        for bk in self.books.values(): bk.apply_params(sp, gone=gone)
         if not (restart and restart[0] == "sig window"):       # the signal set applies as one snapshot (a key removed from the file returns to its default); a pending window change waits whole
             self.feat.p.clear(); self.feat.p.update({**SIG, **sig})
         self.ev("PARAMS", changed=changed, sig=sig)

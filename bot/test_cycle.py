@@ -17,7 +17,8 @@ class FakeREST:
         return dict(orderId="M1")
     def limit_order(self, symbol, side, price, size, **kw): self.calls.append(("limit", side, price, size)); return dict(orderId="L%d" % len(self.calls))
     def pending_plan_orders(self, symbol): return dict(entrustedList=list(self.plans))
-    def place_pos_tpsl(self, symbol, hold_side, sl=None, tp=None): self.calls.append(("pos_tpsl", sl)); return dict(pos_loss=dict(orderId="P-new"))
+    def place_pos_tpsl(self, symbol, hold_side, sl=None, tp=None): self.calls.append(("pos_tpsl", sl)); self.plans.append(dict(planType="pos_loss", posSide=hold_side, triggerPrice=sl, orderId="P-new")); return dict(pos_loss=dict(orderId="P-new"))
+    def modify_pos_tpsl(self, symbol, order_id, trigger, hold_side): self.calls.append(("modify", order_id, trigger)); return {}
     def pending_orders(self, symbol): return dict(entrustedList=list(self.pend))
     def positions(self): return list(self.pos)
 
@@ -246,6 +247,38 @@ class Params(unittest.TestCase):
         self.assertEqual(bk.pos["lots"], []); self.assertEqual(bk.realized, 0.0); self.assertEqual(bk.stops_today, 0); self.assertIsNone(bk.pos["halt"]); self.assertEqual(bk.dyn, {})
         self.assertEqual(kinds(cy)[-1], "STATE_DISCARDED")
 
+
+class RemovedBook(unittest.TestCase):
+    def test_a_book_that_left_params_keeps_its_share_and_only_winds_down(self):
+        """select drops a book only when it saw it flat, but a fill can land in between: strat_for then falls back to the common defaults
+        (wallet_frac 1.0, wind_down off) and the deferred engine would add again on the whole wallet until flat."""
+        cy, bk = book(lots=[[70, 3.0, "a"]]); bk.sp["wallet_frac"] = 0.25
+        bk.apply_params({**STRAT, "symbol": "TESTUSDT"}, gone=True)
+        self.assertTrue(bk.sp["wind_down"]); self.assertEqual(bk.sp["wallet_frac"], 0.25); self.assertIs(bk.strat.p, bk.sp)
+        asyncio.run(bk.tick([])); self.assertTrue(bk.pos["pause"])                                   # no new entry while it waits for flat
+        bk.apply_params({**STRAT, "symbol": "TESTUSDT", "wallet_frac": 0.5}); self.assertFalse(bk.sp["wind_down"]); self.assertEqual(bk.sp["wallet_frac"], 0.5)
+
+class LotRouting(unittest.TestCase):
+    def test_a_core_cut_reduces_the_core_lot_and_the_ledger_says_so(self):
+        cy, bk = book(lots=[[70, 3.0, "a"], [70, 2.95, "b"]]); bk.pos["avg"] = 2.975
+        d = dict(buy=None, trim=(3.02, 35, "maker", 0), stop=None, no_stop=False, events=[])
+        asyncio.run(bk.reconcile(d)); oid = bk.work["trim"]["oid"]
+        self.assertEqual(bk.trim_lot[oid], 0)                                                          # the order remembers the lot its fills reduce
+        asyncio.run(bk.on_private_fill(dict(clientOid=oid, tradeSide="close", side="sell", tradeScope="maker"), 35, 3.02, 0.02))
+        self.assertEqual(bk.pos["lots"], [[35, 3.0, "a"], [70, 2.95, "b"]])
+        fill = [kw for k, kw in cy.events if k == "FILL"][-1]; self.assertEqual(fill["lot"], "core")
+        cy2, bk2 = book(lots=[[70, 3.0, "a"], [70, 2.95, "b"]]); bk2.pos["avg"] = 2.975
+        asyncio.run(bk2.on_fill("trim", 35, 3.02, 0.02, "cycL-t7", "taker", lot=None))                 # LIFO when no lot is named
+        self.assertEqual(bk2.pos["lots"], [[70, 3.0, "a"], [35, 2.95, "b"]])
+
+class StopLock(unittest.TestCase):
+    def test_two_concurrent_stop_requests_place_one_pos_loss(self):
+        cy, bk = book(lots=[[70, 3.0, "a"]])
+        async def rest(fn, *a, **kw): await asyncio.sleep(0); return fn(*a, **kw)                    # a REST call yields, as the executor does
+        cy.rest = rest
+        async def both(): await asyncio.gather(bk.set_stop(2.9), bk.set_stop(2.9))                 # a fill's reconcile and housekeeping's ensure_stop at once
+        asyncio.run(both())
+        self.assertEqual(sum(1 for c in cy.b.calls if c[0] == "pos_tpsl"), 1); self.assertEqual(bk.stop["order_id"], "P-new")
 
 class Sizing(unittest.TestCase):
     def test_a_coarse_qstep_unit_does_not_flap_at_the_rounding_boundary(self):

@@ -21,14 +21,15 @@ def _secs(a, b):
     return (dt.datetime.strptime(b, f) - dt.datetime.strptime(a, f)).total_seconds()
 
 
-def _close(lots, done, side, s, qty, px, fee, t, why):
-    """덜기/손절 체결을 LIFO로 로트에 배분한다. 다 팔린 로트는 사이클로 확정."""
+def _close(lots, done, side, s, qty, px, fee, t, why, from_core=False):
+    """덜기/손절 체결을 LIFO로 로트에 배분한다. 다 팔린 로트는 사이클로 확정. from_core = 엔진이 코어 로트에 붙인 derisk 컷
+    (FILL.lot == "core"): 첫 로트부터 차감하고 남으면 LIFO."""
     left, rate, orphan = qty, (fee / qty if qty else 0.0), 0.0
     while left > EPS:
         if not lots:
             orphan += left
             break
-        lot = lots[-1]
+        lot = lots[0] if from_core else lots[-1]
         take = min(left, lot["qty"])
         lot["out_val"] += take * px
         lot["fee_out"] += rate * take
@@ -43,7 +44,8 @@ def _close(lots, done, side, s, qty, px, fee, t, why):
             done.append(dict(symbol=lot["sym"], side=side, t0=lot["t0"], t1=lot["t1"], hold=_secs(lot["t0"], lot["t1"]),
                              qty=lot["qty0"], entry=entry, exit=exitp, gross=gross, fee=fees,
                              net=gross - fees, why=lot["why"], depth=lot["depth"]))
-            lots.pop()
+            lots.remove(lot)
+        from_core = False                      # 코어 로트가 다 팔리면 나머지는 LIFO
     return orphan
 
 
@@ -83,12 +85,28 @@ def build(since=LIVE, only=None, sym=None):
                 lot["qty"] += d["qty"]; lot["qty0"] += d["qty"]
                 lot["cost0"] += d["qty"] * d["px"]; lot["fee_in"] += d.get("fee", 0.0)
             elif ev == "FILL" and d.get("role") == "trim":
-                orphan += _close(lots, done, side, s, d["qty"], d["px"], d.get("fee", 0.0), t, "trim")
+                orphan += _close(lots, done, side, s, d["qty"], d["px"], d.get("fee", 0.0), t, "trim", from_core=d.get("lot") == "core")
             elif ev == "STOP_HIT":
                 # STOP_HIT에는 fee 필드가 없다 — 엔진이 쓴 pnl은 수수료를 뺀 값이므로 (평단 기준 총손익 − pnl)로 역산한다
                 fee = (d["px"] - d["avg"]) * d["qty"] * s - d["pnl"] if d.get("avg") else 0.0
                 orphan += _close(lots, done, side, s, d["qty"], d["px"], max(fee, 0.0), t, "stop")
     return done, books, orphan, eng
+
+
+def geometry_of(done):
+    """엔진 기하: 완결 사이클의 평균 gross 이익%·손실%·왕복 수수료%(명목가 대비)와 승률. scan.EDGE 의 값이다. 사이클이 없으면 None."""
+    g = [(c["gross"] / (c["qty"] * c["entry"]) * 100, c["fee"] / (c["qty"] * c["entry"]) * 100, c["net"]) for c in done if c["qty"] and c["entry"]]
+    if not g: return None
+    avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
+    return dict(n=len(g), win_pct=avg([a for a, _, n in g if n > 0]), loss_pct=abs(avg([a for a, _, n in g if n <= 0])),
+                fee_pct=avg([b for _, b, _ in g]), p_win=sum(1 for _, _, n in g if n > 0) / len(g))
+
+
+def geometry(since=LIVE, min_n=200):
+    """실매매 장부에서 잰 현재 기하(win_pct/loss_pct/fee_pct) — scan 이 EDGE 대신 쓴다. 사이클이 min_n 미만이면 None(상수 유지)."""
+    try: e = geometry_of(build(since)[0])
+    except FileNotFoundError: return None
+    return {k: e[k] for k in ("win_pct", "loss_pct", "fee_pct")} | dict(n=e["n"]) if e and e["n"] >= min_n else None
 
 
 def report(done, books, orphan, eng, top=20, csv=None):
@@ -126,12 +144,10 @@ def report(done, books, orphan, eng, top=20, csv=None):
             print(f"        이익 사이클 {sum(1 for n in net if n > 0):3d}개 {pos:+8.3f} / "
                   f"손실 사이클 {sum(1 for n in net if n < 0):3d}개 {neg:+8.3f}"
                   f"  (수수료 {fee:.3f} 포함)")
-    g = [(c["gross"] / (c["qty"] * c["entry"]) * 100, c["fee"] / (c["qty"] * c["entry"]) * 100, c["net"]) for c in done if c["qty"] and c["entry"]]
-    if g:      # 엔진 기하 — bot/scan.py EDGE 의 출처. 명목가 대비 %라 종목이 섞여도 더할 수 있다
-        avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
-        W = avg([a for a, _, n in g if n > 0]); L = abs(avg([a for a, _, n in g if n <= 0])); F = avg([b for _, b, _ in g])
-        pw = sum(1 for _, _, n in g if n > 0) / len(g)
-        print(f"\n엔진 기하 (bot/scan.py EDGE 에 넣는 값, n={len(g)}): win_pct {W:.3f}  loss_pct {L:.3f}  fee_pct {F:.4f}"
+    e = geometry_of(done)
+    if e:      # 엔진 기하 — bot/scan.py EDGE 의 출처(select 이 스캔 때마다 여기서 다시 잰다). 명목가 대비 %라 종목이 섞여도 더할 수 있다
+        W, L, F, pw = e["win_pct"], e["loss_pct"], e["fee_pct"], e["p_win"]
+        print(f"\n엔진 기하 (bot/scan.py EDGE, n={e['n']}): win_pct {W:.3f}  loss_pct {L:.3f}  fee_pct {F:.4f}"
               f"  | 손익분기 승률 {(L + F) / (W + L):.3f} vs 실측 {pw:.3f}  → 사이클당 {pw * W - (1 - pw) * L - F:+.4f}%")
     left = {f"{k[0]}/{k[1]}" if isinstance(k, tuple) else k: round(sum(l['qty'] for l in v), 1) for k, v in books.items() if v}
     print(f"\n미완결 로트 {left or '없음'} | 로트에 못 붙인 청산 수량 {orphan:.1f}")

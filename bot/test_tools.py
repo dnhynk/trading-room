@@ -86,5 +86,52 @@ class SymbolAttribution(unittest.TestCase):
         self.assertEqual((qstep_of(evs, z, "ZECUSDT"), qstep_of(evs, z, "TRUMPUSDT")), (0.001, 0.1))   # 백테스트 유닛 양자화
         self.assertEqual(live(evs, 0, z, "TRUMPUSDT")[0], 7.0)                     # 실현손익도 자기 심볼만
 
+class Ledger(unittest.TestCase):
+    """bot.cycles reads the engine's lot bookkeeping back from FILL events: LIFO, except a de-risk cut the engine booked against the core
+    (FILL.lot == "core"), which reduces the oldest lot first."""
+    LINES = [
+        '{"t": "2026-09-02 10:00:00", "ev": "START", "symbol": "AUSDT", "sides": ["long"], "tick": 0.001, "qstep": 0.1, "books": {"long": {"lots": []}}}',
+        '{"t": "2026-09-02 10:01:00", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "buy", "qty": 70, "px": 3.0, "fee": 0.042, "pnl": -0.042, "oid": "cycL-b1", "pos_qty": 70}',
+        '{"t": "2026-09-02 10:05:00", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "buy", "qty": 70, "px": 2.95, "fee": 0.041, "pnl": -0.041, "oid": "cycL-b2", "pos_qty": 140}',
+        '{"t": "2026-09-02 10:09:00", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "trim", "qty": 35, "px": 2.93, "fee": 0.02, "pnl": -1.6, "oid": "cycL-t1", "pos_qty": 105, "lot": "core"}',
+        '{"t": "2026-09-02 10:20:00", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "trim", "qty": 70, "px": 2.96, "fee": 0.041, "pnl": -1.09, "oid": "cycL-t2", "pos_qty": 35}',
+    ]
+
+    def setUp(self):
+        import tempfile, os
+        from bot import cycles
+        self.dir = tempfile.mkdtemp(); self.path = os.path.join(self.dir, "events.jsonl")
+        with open(self.path, "w", encoding="utf-8") as f: f.write(chr(10).join(self.LINES) + chr(10))
+        self.old = cycles.LOG; cycles.LOG = self.path
+
+    def tearDown(self):
+        from bot import cycles
+        cycles.LOG = self.old
+
+    def test_a_core_cut_reduces_the_first_lot_and_the_unit_cycles_whole(self):
+        from bot.cycles import build, geometry_of, geometry
+        done, books, orphan, eng = build(since="2026-09-02 00:00")
+        self.assertEqual(orphan, 0.0)
+        self.assertEqual([(c["depth"], c["qty"], c["exit"]) for c in done], [(2, 70.0, 2.96)])      # the unit (lot 2) closed whole at 2.96 ...
+        self.assertAlmostEqual(sum(l["qty"] for l in books[("AUSDT", "long")]), 35.0)              # ... and 35 of the core lot remain (LIFO would have eaten the unit first)
+        self.assertEqual(geometry_of(done)["n"], 1); self.assertIsNone(geometry(since="2026-09-02 00:00", min_n=2))   # too few cycles: the constants stand
+
+class BacktestSizing(unittest.TestCase):
+    def test_equity_freezes_the_live_sizes_and_switches_the_fractions_off(self):
+        from bot.backtest import size_from_equity
+        s = size_from_equity(dict(unit_frac=1.5, cap_frac=0.15, daily_loss_frac=0.3, notional_frac=6.5, wallet_frac=0.25, unit_qty=70, cap_usdt=20), 700.0, 82.3, 0.01)
+        self.assertAlmostEqual(s["unit_qty"], 3.19, 6); self.assertAlmostEqual(s["cap_usdt"], 26.25, 6); self.assertAlmostEqual(s["daily_loss_limit"], 52.5, 6)
+        self.assertEqual((s["unit_frac"], s["cap_frac"], s["daily_loss_frac"], s["notional_frac"]), (0.0, 0.0, 0.0, 0.0))   # the engine cannot resize offline
+        self.assertEqual(size_from_equity(dict(unit_qty=70, cap_usdt=20), 700.0, 82.3, 0.01)["unit_qty"], 70)               # no fractions: the file's fixed sizes
+
+    def test_the_contract_step_is_read_from_the_cache(self):
+        import json, os
+        from bot import backtest
+        cp = os.path.join(backtest.CACHE, "contract-TESTQUSDT.json")
+        os.makedirs(backtest.CACHE, exist_ok=True)
+        with open(cp, "w", encoding="utf-8") as f: json.dump(dict(qstep=0.001, tick=0.01), f)
+        try: self.assertEqual(backtest.contract_meta("TESTQUSDT")["qstep"], 0.001)
+        finally: os.remove(cp)
+
 if __name__ == "__main__":
     unittest.main()

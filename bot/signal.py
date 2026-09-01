@@ -30,7 +30,11 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            vd_spike=2.0, vd_decay=0.5, vd_gate=0)
 STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_pct=0.5, step_add_atr=0.7, gap_rebuy_pct=0.3,
              pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_rest_pct=0,
-             trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then >= this x ATR back -> pull at once (wick protection, 0 disables)
+             trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then back by >= this x ATR AND >= retrace_frac of the bounce
+             retrace_frac=0.33,      # ... (peak - trough since the last fill) -> pull at once. The ATR term alone is a wiggle on a quiet tape (0.5 x ATR1m =
+                                     # 0.02-0.06% on the 2026-09-02 basket) and made the retrace the main exit (63% of pulls) at the gate: a top has to give
+                                     # back a fixed share of the move it crowned to count as a reversal. 0 restores the ATR-only rule; trim_retrace_atr 0 disables both
+             fee_rt_pct=None,        # round-trip fee (%) flooring an added unit's relaxed gate (a taker exit still pays): None = from the contract (OMS / backtest)
              wallet_frac=1.0,   # 이 엔진이 쓰는 지갑의 몫. 심볼 하나면 1.0, 포트폴리오면 심볼마다 나눠 합이 1.0 (params["books"][symbol])
              wind_down=False,   # 이 심볼만의 PAUSE: 담기 중단, 덜기·스탑은 그대로. select가 자격 잃은 책을 flat 으로 몰 때 켠다(정체에서 팔지 시장가로 던지지 않는다)
              unit_frac=0.0, cap_frac=0.0, daily_loss_frac=0.0, notional_frac=0.0,   # >0: unit notional / cap / daily limit / position notional cap as
@@ -43,6 +47,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              against_regime_mult=0.0,                    # > 0: an AGAINST regime scales the unit by this instead of vetoing adds (a size scale, never a veto)
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
              derisk_on_against=True,                     # False: the AGAINST label (a trailing 90-min statistic, late by construction) only scales adds; de-risk keeps its timely triggers (latch, fresh break)
+             derisk_under_units=True,                    # the weak-bounce cut also reaches a core that has units on top (booked against the core lot); False: only a lone core is cut (pre-2026-09-02)
              cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_cooldown_s=300, max_stops_day=3,
              buy_ttl_s=90,                               # a real filter, not a backstop: rests beyond it pre-empt the next signal's lower fill (2026-08-30 tapes: 300/900/1800 s all worse even with the "left" cancel)
              cancel_v=1.0, tick=0.001, qstep=0.1)
@@ -66,11 +71,14 @@ def wilder_atr(cl, n=14):
 def round_tick(px, tick): return round(round(px / tick) * tick, 10)
 
 SPLIT_KEYS = ("unit_qty", "cap_usdt", "daily_loss_limit", "max_notional", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac")
+GAP_S = 5   # a feed gap of more than this many seconds: its return is not a 1-second return and never enters sigma / velocity
 
-def book_params(sp, side, tick, n_sides, qstep=None):
-    """Per-side strategy params: side, tick, quantity step, and budgets split across the running sides (live and backtest use the same rule)."""
+def book_params(sp, side, tick, n_sides, qstep=None, fee_rt=None):
+    """Per-side strategy params: side, tick, quantity step, the round-trip fee (maker in + taker out, %) that floors an added unit's
+    gate, and budgets split across the running sides (live and backtest use the same rule)."""
     p = {**sp, "side": side, "tick": tick}
     if qstep: p["qstep"] = qstep
+    if fee_rt is not None and p.get("fee_rt_pct") is None: p["fee_rt_pct"] = fee_rt
     if n_sides > 1:
         for k in SPLIT_KEYS:
             if p.get(k): p[k] = p[k] / n_sides
@@ -184,6 +192,7 @@ class Features:
         self.dip = dict(minv=0.0, lows=[], hold=0, last=None, div=False)   # tracked since the swing high
         self.pop = dict(maxv=0.0, highs=[], hold=0, last=None, div=False)  # tracked since the swing low
         self.brk_until = self.bko_until = 0
+        self.gap_sec = None                                                # the second whose close carries a feed gap's return (skipped)
         self.f = {}
 
     # ---- input ------------------------------------------------------------
@@ -326,8 +335,10 @@ class Features:
                 for c in self.candles[-(self.flow.maxlen // 60):]: self.flow.extend([(c["v"] / 120, c["v"] / 120)] * 60)   # and the volume baseline is not blind for a minute
             return []
         out = []
-        if sec - self.sec > 120:            # outage: every second-level state is stale; rebuild the windows from candles like at start
-            self.vraw = EMA(self.p["v_hl"]); self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
+        if sec - self.sec > GAP_S: self.gap_sec = sec   # the first close that sees the post-gap mid would book the whole gap as one 1-second return
+        if sec - self.sec > 120:            # outage: every second-level state is stale; rebuild the windows from candles like at start —
+            # sigma included (RULES: the v rule is silent for vol_hl after an outage as after a restart; keeping sigma trusted a one-sample v)
+            self.var, self.vraw = EMA(self.p["vol_hl"]), EMA(self.p["v_hl"]); self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
             self.mids.clear(); self.flow.clear(); self.dbid.clear(); self.dask.clear(); self.b = self.s = 0.0; self.pending = []
             for c in self.candles[-(self.mids.maxlen // 60):]: self.mids.extend([c["c"]] * 60)
             for c in self.candles[-(self.flow.maxlen // 60):]: self.flow.extend([(c["v"] / 120, c["v"] / 120)] * 60)
@@ -340,6 +351,7 @@ class Features:
         p, mid, sec = self.p, self.mid, self.sec
         prev = self.mids[-1] if self.mids else mid
         r = math.log(mid / prev) if prev else 0.0
+        if self.gap_sec == sec: r, self.gap_sec = 0.0, None   # a gap's return is not a 1-second return: neither sigma nor velocity may see it
         self.var.add(r * r); sigma = max(math.sqrt(self.var.v), 1e-7)
         self.vraw.add(r); v = self.vraw.v / sigma
         ve = v if self.var.n >= p["vol_hl"] else 0.0        # the normaliser needs a half-life of data before v means anything: at a restart v was +-1 from its
@@ -450,11 +462,11 @@ def pos_stats(pos):
     qty = sum(l[0] for l in pos["lots"])
     return qty, (pos.get("avg") if qty else None)
 
-def apply_fill(pos, side_s, is_add, qty, px, oid=None, fee=0.0):
+def apply_fill(pos, side_s, is_add, qty, px, oid=None, fee=0.0, lot=None):
     """Mutates pos (lots=[[qty, px, oid], ...], avg). Exchange-style accounting (Bitget openPriceAvg): the average moves only on
     adds; a reduce realizes side*(px - avg)*qty and leaves the average unchanged, so a cycle (add low, sell that unit on a weak
-    bounce) shows as a lower average on the same size. Lots keep the buy prices for LIFO gating; trims reduce LIFO.
-    Returns realized pnl of this fill net of fee."""
+    bounce) shows as a lower average on the same size. Lots keep the buy prices for LIFO gating; trims reduce LIFO, except a
+    de-risk cut booked against the core (lot=0): it reduces that lot first, the remainder LIFO. Returns realized pnl net of fee."""
     lots = pos["lots"]; q0 = sum(l[0] for l in lots)
     if is_add:
         pos["avg"] = px if not q0 else (pos["avg"] * q0 + px * qty) / (q0 + qty)
@@ -464,6 +476,10 @@ def apply_fill(pos, side_s, is_add, qty, px, oid=None, fee=0.0):
         pos["last"], pos["last_buy_px"] = "buy", px
         return -fee
     pnl, rem = side_s * (px - pos["avg"]) * min(qty, q0), qty
+    if lot is not None and lot < len(lots) and rem > 1e-12:
+        lq, lpx, loid = lots[lot]; take = min(lq, rem); rem -= take
+        if take >= lq - 1e-12: del lots[lot]
+        else: lots[lot] = [lq - take, lpx, loid]
     while rem > 1e-12 and lots:
         lq, lpx, loid = lots[-1]; take = min(lq, rem); rem -= take
         if take >= lq - 1e-12: lots.pop()
@@ -479,20 +495,22 @@ class Strategy:
     pause / post-stop cooldown / AGAINST regime, unit and notional caps, step_add below the last buy, gap_rebuy below the last trim
     while inventory is held (a flat book takes the next deceleration as a new campaign), free margin (live).
     Trim (primary, speed-based): trim-side signal with dev >= pop_min_pct sells the LIFO unit (everything at dev >= full_exit_pct)
-    as a maker at the touch, then as a taker after trim_taker_after_s; dropped if dev falls back under the gate.
-      FAVOR regime: the first core_units lots are never sold by pulls or the backstop; pop_min is multiplied by favor_pop_mult.
+    as a maker at the touch, then as a taker after trim_taker_after_s; dropped if dev falls back under the gate. A top confirmed by
+    retrace (peak above the gate, back by >= trim_retrace_atr x ATR and >= retrace_frac of the bounce since the last fill) pulls too.
+      FAVOR regime: pop_min is multiplied by favor_pop_mult; no lot is exempt from a sale (CONCEPT: no sacred core).
       De-risk (AGAINST regime, or -- with derisk_on_breakdown -- a BREAKDOWN/BREAKOUT that fired against a position the book already
       held; a unit bought at the deceleration after a break is not that break's victim): the gate drops to -derisk_pct so a weak
       bounce that stalls near breakeven reduces the position (half the core, then the rest); a stall at or above the normal gate
-      is a normal trim even in de-risk. Break evidence clears like the latch: a fill (the campaign is cycling) or a full recovery.
+      is a normal trim even in de-risk. With units on top of the core the cut is booked against the core lot (trim lot=0), since an
+      added unit only ever sells above its own price. Break evidence clears like the latch: a fill or a full recovery.
     Trim (backstop): while no pull is active, the LIFO unit rests at avg +/- trim_rest_pct (0 disables).
-    Stop: structural level frozen when the position opens = last 1m pivot low/high (Features.struct_lo/hi) -/+ stop_buffer_atr x ATR,
-    or strat.stop_structural when set; in FAVOR it ratchets with new pivots and never loosens. The loss cap avg -/+ cap_usdt/qty
-    applies whenever it is tighter.
+    Stop: the exchange stop is the money cap avg -/+ cap_usdt/max(qty, unit), never loosened. The premise level (the nearest 15m/1H
+    pivot that leaves room for the remaining ladder, -/+ stop_buffer_atr x ATR15) is soft: beyond it prem_broken joins the de-risk
+    evidence; it is taken when it first qualifies and trails only tighter (stop_trail / FAVOR).
     pos = dict(lots=[[qty, px, oid], ...], last=None|"buy"|"trim", last_buy_px, last_trim_px, halt=None|str, pause=bool,
                cooldown_until=sec, avail=USDT|None, lever=float|None).
     working = dict(buy=(px, qty)|None, trim=(px, qty)|None) currently resting, so the entry never chases a touch that moved away.
-    Returned trim = (px, qty, "maker"|"taker")."""
+    Returned trim = (px, qty, "maker"|"taker", lot) with lot = 0 for a core cut under units, else None (LIFO)."""
     def __init__(self, strat=None, sig=None):
         self.p = {**STRAT, **(strat or {})}; self.sig = sig if sig is not None else dict(SIG)
         self.arm = None          # (until_sec, ref_mid) after a buy-side signal
@@ -501,6 +519,8 @@ class Strategy:
         self.prem_broken = False # latch: price has been beyond the premise level; cleared by a fill or a full recovery, like derisk_armed
         self.stop_px = None      # last stop returned; once set for a position it is never moved against the position
         self.peak = None         # best favourable mid since the last fill (retrace-based top detection)
+        self.trough = None       # worst mid since the last fill: peak - trough is the bounce a retrace is measured against
+        self.struct_skip = False # STRUCT_SKIP reported once per position (a level may still qualify later)
         self.fail_n = 0          # trim-side stalls that failed to reach the LIFO lot's gate (gate relaxation); the lot's own history
         self.last_lot = None     # LIFO lot id at the last step: a new lot (buy, or the next lot after a sell-out) starts a fresh count
         self.gate_eff = None     # the relaxed gate in force (state/report)
@@ -515,8 +535,10 @@ class Strategy:
         if role == "buy" and self.arm: self.arm_filled += qty
 
     def adopt_stop(self, px):
-        """An existing exchange stop becomes the position's baseline: it can only tighten from here."""
-        self.struct_stop = self.stop_px = px
+        """An existing exchange stop becomes the position's baseline: it can only tighten from here. The premise level (struct_stop) is
+        untouched — it is a structural level or nothing, never the money cap (writing the cap there made prem_broken meaningless and
+        blocked a later structural level after every adoption / liquidation guard)."""
+        self.stop_px = px
 
     def _regime(self, f, s, ev):
         """Side-relative regime from the per-minute block in f. A circuit breaker, not a filter: strong drift against us with the
@@ -616,7 +638,7 @@ class Strategy:
             lot_id = pos["lots"][-1][2]
             if qty > self.last_qty or lot_id != self.last_lot: self.fail_n = 0               # a new lot gets a fresh expectation; a partial trim of the same lot keeps its refusals
             self.last_lot = lot_id
-            floor = 0.0 if is_core else p["gate_floor_unit_pct"]                              # core: breakeven; added unit: fees covered
+            floor = 0.0 if is_core else max(p["gate_floor_unit_pct"], p.get("fee_rt_pct") or 0.0)   # core: breakeven; added unit: its round trip paid even as a taker (CONCEPT: 그 물량의 왕복은 이익)
             g_rel = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n            # the market refusing bounces lowers the bar
             if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = self.brk_seen = self.prem_broken = False   # a fill or a full recovery clears the damage evidence (latch, break and premise alike) ...
             elif dev <= -step: self.derisk_armed = True                                    # ... and it can only re-arm on a later tick
@@ -633,57 +655,69 @@ class Strategy:
                 if dev >= g_avg: ref, dev_lot, gate = avg, dev, g_avg
             self.gate_eff = gate
             # 되돌림 고점 출구가 쓰는 가격 문턱: derisk 의 −derisk_pct 완화는 쓰지 않는다. 그 완화 아래에서는 "고점"이 평단을 한 번
-            # 스친 것이 되고, 되돌림 조건(0.5 ATR)은 진입가 아래 트레일링 스탑으로 퇴화한다 — 래치가 켜지는 순간 이미 참이라 즉시
+            # 스친 것이 되고, 되돌림 조건은 진입가 아래 트레일링 스탑으로 퇴화한다 — 래치가 켜지는 순간 이미 참이라 즉시
             # 발화한다(2026-09-01 live: derisk 체결 10건 중 6건이 최유리점에서 0.49~0.92% 반대쪽, dev 가 arming 문턱 −step 바로
             # 아래에 몰렸다). CONCEPT "순환매의 매도는 언제나 정체에서" · RULES derisk "약반등 정체에서 덞".
             gate_top = g_rel if (derisk and is_core) else gate
-            core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if (favor or (derisk and dev_lot < g_rel)) and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells, FAVOR or not; de-risk only shapes the weak bounce
-            sellable = max(qty - core, 0.0)
-            if derisk and sellable <= 0:                                                # only the core left: cut part of it near breakeven ...
-                sellable = core * p["derisk_core_frac"]
-                if core - sellable <= unit * (1 - p["derisk_core_frac"]) ** 2 + 1e-9: sellable = core   # ... half, then the rest: a remainder no bigger than what two cuts leave (a quarter unit) goes whole, never a dust tail
+            # de-risk with units on top: the LIFO unit only ever sells above its own price, so the weak bounce takes the loss on the core lot
+            # (CONCEPT: 저점 물량은 자기 가격 위에서만, 손실은 평단 기준의 물량에서 감수한다). The exchange sees contracts either way; only the
+            # book's lot changes — before this the partial stop was unreachable exactly when the position was largest (all 98 live cuts were 1-lot).
+            cut = p["derisk_under_units"] and derisk and not is_core and dev_lot < gate and dev >= -p["derisk_pct"] and dev < p["full_exit_pct"]
+            core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if derisk and dev_lot < g_rel and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells; de-risk only shapes the weak bounce (FAVOR no longer holds it: CONCEPT)
+            sellable = max(qty - core, 0.0); lot_from = None
+            if derisk and (sellable <= 0 or cut):                                       # only the core can go: cut part of it near breakeven ...
+                core_lot = pos["lots"][0][0]; sellable = core_lot * p["derisk_core_frac"]
+                if core_lot - sellable <= unit * (1 - p["derisk_core_frac"]) ** 2 + 1e-9: sellable = core_lot   # ... half, then the rest: a remainder no bigger than what two cuts leave (a quarter unit) goes whole, never a dust tail
+                if cut: lot_from = 0                                                     # booked against the core lot, not the LIFO unit
             if self.pull and qty <= self.pull["target"] + qs / 2: self.pull = None          # sold what the pull asked for (within half an exchange step)
             elif self.pull and qty > self.last_qty + 1e-9: ev.append(("PULL_DROP", dict(why="add", dev_lot=round(dev_lot, 2)))); self.pull = None   # a lot bought meanwhile is not the pull's to sell (its target is absolute): the next stall judges the new LIFO lot
             if trim_sig in names and not self.pull and dev_lot < gate and p["gate_relax"] > 0:   # a stall the lot could not use: relax its gate
                 self.fail_n += 1; ev.append(("GATE_RELAX", dict(fails=self.fail_n, gate=round(floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n, 3), dev_lot=round(dev_lot, 2))))
-            # top confirmed by retrace: the best price since the last fill cleared the gate and price has come back >= trim_retrace_atr x ATR
-            if qty != self.last_qty or self.peak is None: self.peak = mid
-            elif s * (mid - self.peak) > 0: self.peak = mid
+            # top confirmed by retrace: the best price since the last fill cleared the gate and price has come back by >= trim_retrace_atr x ATR
+            # and >= retrace_frac of the bounce it crowned (peak - trough since the last fill): a reversal of the move, not a wiggle at the gate
+            if qty != self.last_qty or self.peak is None: self.peak = self.trough = mid
+            else:
+                if s * (mid - self.peak) > 0: self.peak = mid
+                if s * (mid - self.trough) < 0: self.trough = mid
+            back = max(p["trim_retrace_atr"] * atr, p["retrace_frac"] * s * (self.peak - self.trough)) if atr else None
             retrace_top = (p["trim_retrace_atr"] > 0 and atr and s * (self.peak / ref - 1) * 100 >= g_rel
-                           and s * (self.peak - mid) >= p["trim_retrace_atr"] * atr and dev_lot >= gate_top)
-            if (trim_sig in names or retrace_top) and dev_lot >= gate and not self.pull and sellable >= qs - 1e-9:
-                sell = sellable if dev >= p["full_exit_pct"] else min(lot_qty, sellable)
+                           and s * (self.peak - mid) >= back and dev_lot >= gate_top)
+            if ((trim_sig in names and (cut or dev_lot >= gate)) or retrace_top) and not self.pull and sellable >= qs - 1e-9:
+                sell = sellable if (dev >= p["full_exit_pct"] or lot_from is not None) else min(lot_qty, sellable)
                 sell = min(qty, round(round(sell / qs) * qs, 9))                                  # whole exchange steps: a half of 76.1 is 38.0, never 38.05 (live 21:37: the 0.05 remainder was rejected every 5s and the zombie pull blocked every later trim)
                 if sell < qs - 1e-9: sell = 0.0
-                self.pull = dict(t=t, qty=sell, target=qty - sell, gate=gate, ref=ref, px0=touch_out)
-                ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=ref, qty=sell, all=sell >= qty - 1e-9, px=touch_out,
-                                             mode="derisk" if derisk else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),
-                                             path="stall" if trim_sig in names else "retrace",   # mode 는 발효 중인 게이트, path 는 발화 경로 — derisk 게이트 아래의 되돌림 출구가 mode=derisk 로 찍혀 둘을 못 가른다
+                is_cut = lot_from is not None or (derisk and is_core and dev_lot < g_rel)           # the de-risk gate is in force only for a core cut on a weak bounce
+                self.pull = dict(t=t, qty=sell, target=qty - sell, gate=-p["derisk_pct"] if lot_from is not None else gate,
+                                 ref=avg if lot_from is not None else ref, px0=touch_out, lot=lot_from)
+                ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=self.pull["ref"], qty=sell, all=sell >= qty - 1e-9, px=touch_out,
+                                             mode="derisk" if is_cut else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),   # the gate in force
+                                             path="stall" if trim_sig in names else "retrace", lot="core" if lot_from is not None else None,
                                              peak=self.peak)))
             if self.pull:
                 if s * (mid / self.pull["ref"] - 1) * 100 < self.pull["gate"] - tick / self.pull["ref"] * 100:   # one tick of hysteresis: a wiggle at the gate must not cancel and re-queue the maker (2026-08-30 03:17: six pull/drop flips in 41 s lost the queue)
                     ev.append(("PULL_DROP", dict(dev_lot=round(dev_lot, 2)))); self.pull = None
                 elif t - self.pull["t"] >= p["trim_taker_after_s"] or s * (self.pull["px0"] - mid) / mid * 100 >= p["trim_taker_slip_pct"]:
-                    trim = (round_tick(touch_in, tick), round(qty - self.pull["target"], 9), "taker")   # waited long enough, or the stall is already turning: take it
-                else: trim = (round_tick(touch_out, tick), round(qty - self.pull["target"], 9), "maker")
-            if trim is None and p["trim_rest_pct"] > 0 and (min(lot_qty, sellable) if favor else lot_qty) > 0:
+                    trim = (round_tick(touch_in, tick), round(qty - self.pull["target"], 9), "taker", self.pull.get("lot"))   # waited long enough, or the stall is already turning: take it
+                else: trim = (round_tick(touch_out, tick), round(qty - self.pull["target"], 9), "maker", self.pull.get("lot"))
+            if trim is None and p["trim_rest_pct"] > 0 and min(lot_qty, sellable) > 0:
                 px = avg * (1 + s * p["trim_rest_pct"] / 100)
                 px = max(px, touch_out) if s > 0 else min(px, touch_out)
-                trim = (round_tick(px, tick), min(lot_qty, sellable) if favor else lot_qty, "maker")
+                trim = (round_tick(px, tick), min(lot_qty, sellable), "maker", None)
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0
+        if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0
         else:
             cap_px = avg - s * p["cap_usdt"] / max(qty, unit)   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
-            # ladder is ignored. Structure only when switched on, or riding a FAVOR one-way.
+            # ladder is ignored. Structure only when switched on, or riding a FAVOR one-way. A position without a premise takes the first
+            # level that qualifies (a pivot confirms with a lag; an adopted or guarded exchange stop is not a premise and never blocks this).
             lvl = structural_level(f, s, pos.get("last_buy_px") or mid, p, len(pos["lots"])) if (p["stop_structural_on"] or favor) else None
             if lvl and (f.get("atr15") or atr):
                 cand = lvl - s * p["stop_buffer_atr"] * (f.get("atr15") or atr)
-                if self.struct_stop is None and self.stop_px is None:
+                if self.struct_stop is None:
                     if s * (mid - cand) > 0: self.struct_stop = cand; ev.append(("STRUCT_STOP", dict(level=lvl, stop=round(cand, 6))))
-                    else: ev.append(("STRUCT_SKIP", dict(level=lvl, mid=mid)))          # structure is above the price: no premise level
+                    elif not self.struct_skip: self.struct_skip = True; ev.append(("STRUCT_SKIP", dict(level=lvl, mid=mid)))   # structure is above the price: no premise level (reported once)
                 elif (self.struct_stop is not None and (favor or p["stop_trail"]) and s * (mid - cand) > 0
                       and s * (round_tick(cand, tick) - round_tick(self.struct_stop, tick)) >= tick - 1e-12):    # a newly defended low, at least one tick tighter
                     self.struct_stop = cand; ev.append(("TRAIL", dict(level=lvl, stop=round_tick(cand, tick))))
