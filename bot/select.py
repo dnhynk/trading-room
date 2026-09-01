@@ -2,15 +2,17 @@
 Every select.every_h hours (and at start) the universe is scanned (bot.scan.rank: the concept metrics and the candle-level engine proxy
 over select.days windows) and logs/scan.json is rewritten. A switch happens only when ALL of these hold:
   - the engine is flat: no lots, no working order, no pull, state.json younger than 60 s;
-  - the best unflagged candidate's proxy >= select.ratio x the incumbent's proxy AND its concept >= the incumbent's (a less two-way
-    symbol never wins on the proxy alone); when the incumbent is flagged (one-way now, pump shape, funding, tick) the ratio is 1;
+  - the best unflagged candidate's concept >= select.ratio x the incumbent's concept; concept is a product of non-negative terms, so
+    the multiplier is always a real hurdle. When the incumbent is flagged (one-way now, pump shape, funding, tick) the ratio is 1.
+    The candle proxy is reported (scan.json, the SELECT event, the recorded set) but never decides: it scores the live symbol
+    negative in 12 of 18 scans, so a proxy gate cannot choose the symbol the engine is profitably trading (RULES 도구 절);
   - the same candidate has qualified in select.confirm consecutive scans (hysteresis: yesterday's chop does not win a switch);
   - the incumbent has been held >= select.dwell_h hours (waived when it is flagged) and fewer than select.max_per_day switches today;
   - the candidate is not in select.exclude (BTC at low capital, CONCEPT).
 The switch rewrites params.json atomically: strat.symbol, strat.side = the candidate's 1H structure side (long when unclear) and
 strat.sides = both sides when the incumbent runs 쌍검 (else [side]),
-record = the new symbol + the top select.record_top unflagged candidates with full channels (so the real tick backtest can later
-validate the proxy) + BTCUSDT candles. The recorder re-subscribes on the file change; the engine restarts on the symbol change (it is
+record = the new symbol + the top select.record_top unflagged candidates (concept order) + whichever candidate the proxy ranks
+first, all with full channels so the real tick backtest can keep validating the proxy, + BTCUSDT candles. The recorder re-subscribes on the file change; the engine restarts on the symbol change (it is
 flat; its ledger for the new symbol starts fresh). Every scan also refreshes the recorded candidate set (a record-only rewrite: the
 engine reloads without restarting). Events: SELECT (every scan's verdict) in logs/events.jsonl, SYMBOL_SWITCH also in logs/alerts.jsonl.
 State (dwell start, streak, switches today) in logs/select-state.json. --once runs one scan; --dry never writes params or state."""
@@ -53,9 +55,12 @@ def engine_flat(state, now):
     except Exception: return False
 
 def record_dict(symbol, rows, sel):
+    """The incumbent + the top record_top candidates (concept order) + whichever candidate the proxy ranks first (so the tick
+    backtest keeps a tape for the metric that no longer decides — the proxy stays under validation, RULES 도구 절)."""
+    ok = [r for r in rows if not r["flags"] and r["symbol"] != symbol and r["symbol"] not in sel["exclude"]]
     rec = {symbol: CHANNELS}
-    for r in [r for r in rows if not r["flags"] and r["symbol"] != symbol and r["symbol"] not in sel["exclude"]][:int(sel["record_top"])]:
-        rec[r["symbol"]] = CHANNELS
+    for r in ok[:int(sel["record_top"])]: rec[r["symbol"]] = CHANNELS
+    if ok: rec.setdefault(max(ok, key=lambda r: r["proxy"])["symbol"], CHANNELS)
     for x in sel.get("record_extra") or []: rec.setdefault(x, CHANNELS)      # watchlist: recorded regardless of flags (evidence, never traded by select)
     rec["BTCUSDT"] = ["candle1m"]
     return rec
@@ -65,13 +70,17 @@ def decide(rows, incumbent, sel, st, flat, today, now):
     by = {r["symbol"]: r for r in rows}; inc = by.get(incumbent)
     ok = [r for r in rows if not r["flags"] and r["symbol"] != incumbent and r["symbol"] not in sel["exclude"]]
     if not ok: st["streak"] = {}; return "keep", "no unflagged candidate", None
-    best = ok[0]; inc_flagged = inc is None or bool(inc["flags"])
-    ratio = 1.0 if inc_flagged else sel["ratio"]; inc_proxy = inc["proxy"] if inc else 0.0; inc_concept = inc["concept"] if inc else 0.0
-    qualifies = best["proxy"] > 0 and best["proxy"] >= ratio * max(inc_proxy, 0.0) and best["concept"] >= inc_concept
+    best = ok[0]
+    if inc is None:                                                  # a switch is a comparison: with no numbers for the symbol being
+        st["streak"] = {}                                            # traded there is nothing to compare, and absence is not evidence
+        return "keep", f"{incumbent} missing from the scan - no comparison", best
+    inc_flagged = bool(inc["flags"])
+    ratio = 1.0 if inc_flagged else sel["ratio"]; inc_proxy, inc_concept = inc["proxy"], inc["concept"]
+    qualifies = best["concept"] > 0 and best["concept"] >= ratio * inc_concept
     n = st.get("streak", {}).get(best["symbol"], 0) + 1 if qualifies else 0
     st["streak"] = {best["symbol"]: n} if qualifies else {}
-    head = f"{best['symbol']} proxy {best['proxy']:.2f}/{best['concept']:.2f} vs {incumbent} {inc_proxy:.2f}/{inc_concept:.2f}"
-    if not qualifies: return "keep", head + f" (needs x{ratio:.1f} and concept >=)", best
+    head = f"{best['symbol']} concept {best['concept']:.2f} vs {incumbent} {inc_concept:.2f} (proxy {best['proxy']:.2f} vs {inc_proxy:.2f}, reported only)"
+    if not qualifies: return "keep", head + f" (needs concept x{ratio:.1f})", best
     if n < sel["confirm"]: return "keep", head + f" qualifies {n}/{int(sel['confirm'])}", best
     if not inc_flagged and now - st.get("since", 0) < sel["dwell_h"] * 3600: return "keep", head + f" confirmed; dwell {(now - st.get('since', 0)) / 3600:.1f}h < {sel['dwell_h']}h", best
     if st.get("switch_day") == today and st.get("switches", 0) >= sel["max_per_day"]: return "keep", head + " confirmed; already switched today", best
@@ -92,7 +101,10 @@ def main():
         p = load_params() or {}; sel = {**SELECT, **(p.get("select") or {})}
         incumbent = (p.get("strat") or {}).get("symbol")
         t0 = time.time()
-        try: rows = rank(min_vol=sel["min_vol"], days=int(sel["days"]), exclude=sel["exclude"], log=log)
+        state = read_json(os.path.join(LOGS, "state.json"), {})
+        try: rows = rank(min_vol=sel["min_vol"], days=int(sel["days"]), exclude=sel["exclude"], log=log,
+                         always=(incumbent,) if incumbent else (),    # the traded symbol is measured even below the volume gate
+                         equity=(state.get("acct") or {}).get("equity"))   # sizes the reported impact to the wallet we actually trade
         except Exception as e: log(f"scan failed: {type(e).__name__}: {e}"); rows = None
         if rows and incumbent:
             os.makedirs(LOGS, exist_ok=True)
@@ -100,10 +112,10 @@ def main():
             now = time.time(); today = time.strftime("%Y%m%d", time.gmtime(now))
             st = read_json(os.path.join(LOGS, "select-state.json"), {})
             if st.get("symbol") != incumbent: st.update(symbol=incumbent, since=now, streak={})   # the dwell clock starts when a symbol is first seen
-            flat = engine_flat(read_json(os.path.join(LOGS, "state.json"), {}), now)
+            flat = engine_flat(state, now)
             action, why, best = decide(rows, incumbent, sel, st, flat, today, now)
             ev("SELECT", action=action, why=why, incumbent=incumbent, flat=flat, took_s=int(time.time() - t0),
-               top=[[r["symbol"], round(r["proxy"], 2), round(r["concept"], 2), r["side"]] for r in rows[:5]])
+               top=[[r["symbol"], round(r["proxy"], 2), round(r["concept"], 2), r["side"], round(r.get("impact", 0.0), 4)] for r in rows[:5]])
             if action == "switch" and not dry:
                 side = switch(p, best, rows, sel)
                 st.update(symbol=best["symbol"], since=now, switch_day=today, switches=(st.get("switches", 0) + 1) if st.get("switch_day") == today else 1, streak={})

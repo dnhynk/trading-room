@@ -1,5 +1,7 @@
 """Offline run of the whole engine (Features + Strategy + the dry-run fill model) over recordings — the tuner's objective.
-  python -m bot.backtest FILE... [--sym TRUMPUSDT] [--sides long,short] [--follow 15m|1h|brk|regime] [--sig k=v ...] [--strat k=v ...]
+  python -m bot.backtest FILE... [--sym TRUMPUSDT] [--qstep 0.1] [--sides long,short] [--follow 15m|1h|brk|regime] [--sig k=v ...] [--strat k=v ...]
+--sym with --qstep and --strat unit_qty= runs another recorded symbol from the same tape: matched unit notional and that symbol's own
+quantity step are both required or the comparison is meaningless (RULES 도구 절, the 2026-09-01 proxy validation).
 --sides long,short runs a long book and a short book on the same feature stream (쌍검술); default = strat.side only.
 --follow is the side-automation counterfactual: both books exist but only the active side may trade; it starts on strat.side and
 changes only while flat, to the 15m / 1H structure hint's side, (brk) the side of the last volume break, or (regime) the side the
@@ -286,17 +288,18 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
     return m
 
 if __name__ == "__main__":
-    args = sys.argv[1:]; files, sym, sig, strat, sides, follow = [], "TRUMPUSDT", {}, {}, None, None
+    args = sys.argv[1:]; files, sym, sig, strat, sides, follow, qstep = [], "TRUMPUSDT", {}, {}, None, None, 0.1
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--sym": sym = args[i + 1]; i += 2
+        elif a == "--qstep": qstep = float(args[i + 1]); i += 2      # the traded symbol's quantity step: required to compare symbols (ZEC 0.001, ETH/HYPE 0.01, TRUMP/SOL/PROM 0.1)
         elif a == "--sides": sides = args[i + 1].split(","); i += 2
         elif a == "--follow": follow = args[i + 1]; i += 2
         elif a in ("--sig", "--strat"):
             k, v = args[i + 1].split("="); (sig if a == "--sig" else strat)[k] = float(v) if v.replace(".", "", 1).replace("-", "", 1).isdigit() else v; i += 2
         else: files.append(a); i += 1
     if not files: print(__doc__); sys.exit(0)
-    t0 = time.time(); m = run_files(files, sym, sig, strat, events=True, sides=sides, follow=follow); ev = m.pop("events")
+    t0 = time.time(); m = run_files(files, sym, sig, strat, events=True, qstep=qstep, sides=sides, follow=follow); ev = m.pop("events")
     for e in ev[-12:]: print("  ", time.strftime("%m-%d %H:%M:%S", time.gmtime(e[0] or 0)), *e[1:])
     print(json.dumps(m), f"({time.time() - t0:.0f}s)")

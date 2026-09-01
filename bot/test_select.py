@@ -54,11 +54,38 @@ class Verdict(unittest.TestCase):
         a, why, b = decide(self.rows(), "A", sel, st2, True, "d", now); self.assertEqual(a, "keep"); self.assertIn("dwell", why)   # held only an hour
         st3 = dict(since=0, streak={"B": 1})
         a, why, b = decide(self.rows(best_concept=0.5), "A", sel, st3, True, "d", now); self.assertEqual(a, "keep"); self.assertEqual(st3["streak"], {})   # less two-way: never
-        a, why, b = decide(self.rows(best_proxy=1.2), "A", sel, dict(since=0, streak={"B": 1}), True, "d", now); self.assertEqual(a, "keep")   # not 1.5x better
+        a, why, b = decide(self.rows(best_concept=1.2), "A", sel, dict(since=0, streak={"B": 1}), True, "d", now); self.assertEqual(a, "keep")   # better, but not 1.5x
         st4 = dict(since=0, streak={"B": 1}, switch_day="d", switches=1)
         a, why, b = decide(self.rows(), "A", sel, st4, True, "d", now); self.assertEqual(a, "keep"); self.assertIn("today", why)    # one switch a day
         rows = self.rows(); rows[1]["flags"] = ["ER0.40"]
         a, why, b = decide(rows, "A", sel, dict(since=now - 3600, streak={"B": 1}), True, "d", now); self.assertEqual(a, "switch")   # a flagged incumbent waives dwell and ratio
+
+    def test_the_proxy_neither_elects_nor_vetoes(self):
+        """The live symbol's proxy was negative in 12 of 18 scans, so a proxy gate cannot choose the symbol the engine is trading."""
+        sel = dict(SELECT); now = 10 * 86400
+        rows = [dict(symbol="B", proxy=-9.0, concept=2.0, flags=[], side="long"), dict(symbol="A", proxy=5.0, concept=1.0, flags=[], side="long")]
+        a, why, b = decide(rows, "A", sel, dict(since=0, streak={"B": 1}), True, "d", now)
+        self.assertEqual(a, "switch")                       # a negative proxy does not veto a more two-way candidate
+        rows = [dict(symbol="B", proxy=99.0, concept=1.0, flags=[], side="long"), dict(symbol="A", proxy=-9.0, concept=1.0, flags=[], side="long")]
+        a, why, b = decide(rows, "A", sel, dict(since=0, streak={"B": 1}), True, "d", now)
+        self.assertEqual(a, "keep")                         # and a huge proxy does not elect one that is no more two-way
+
+    def test_an_incumbent_missing_from_the_scan_never_elects_a_challenger(self):
+        """2026-09-01 09:55: TRUMPUSDT fell under the 24h volume gate and left the table, so the incumbent read 0.00/0.00 and any
+        candidate cleared a zero hurdle. rank(always=incumbent) keeps it measured; this is the backstop if it is missing anyway."""
+        st = dict(since=0, streak={"B": 1})
+        rows = [dict(symbol="B", proxy=9.0, concept=9.0, flags=[], side="long")]
+        a, why, b = decide(rows, "A", dict(SELECT), st, True, "d", 10 * 86400)
+        self.assertEqual(a, "keep"); self.assertIn("missing", why); self.assertEqual(st["streak"], {})
+
+    def test_the_prom_near_switch_is_blocked(self):
+        """2026-08-30 11:41 live scan: PROMUSDT 9.13/4.03 vs TRUMPUSDT 1.34/3.10 reached 'qualifies 1/2' under the proxy gate; the
+        tick backtest then put PROM at -14.32/day against TRUMP +3.54 (RULES 도구 절). concept x1.5 = 4.65 > 4.03 blocks it."""
+        st = dict(since=0, streak={"PROMUSDT": 1})
+        rows = [dict(symbol="PROMUSDT", proxy=9.13, concept=4.03, flags=[], side="short"),
+                dict(symbol="TRUMPUSDT", proxy=1.34, concept=3.10, flags=[], side="long")]
+        a, why, b = decide(rows, "TRUMPUSDT", dict(SELECT), st, True, "d", 10 * 86400)
+        self.assertEqual(a, "keep"); self.assertEqual(st["streak"], {})
 
     def test_a_switch_keeps_both_sides_when_the_incumbent_runs_dual(self):
         import bot.select as S
@@ -76,6 +103,11 @@ class Verdict(unittest.TestCase):
         rows = [dict(symbol=s, flags=[] if s != "F" else ["pump"], proxy=1, concept=1) for s in ("B", "C", "F", "D", "BTCUSDT")]
         rec = record_dict("A", rows, dict(SELECT, record_top=2))
         self.assertEqual(list(rec), ["A", "B", "C", "BTCUSDT"]); self.assertEqual(rec["BTCUSDT"], ["candle1m"])
+
+    def test_the_record_set_still_carries_the_proxys_own_pick(self):
+        """The proxy no longer decides but stays under validation: whatever it ranks first keeps a tape for the tick backtest."""
+        rows = [dict(symbol=s, flags=[], proxy=p, concept=c) for s, p, c in (("B", 0.0, 3.0), ("C", 0.0, 2.0), ("D", 9.0, 0.5))]
+        self.assertEqual(list(record_dict("A", rows, dict(SELECT, record_top=2))), ["A", "B", "C", "D", "BTCUSDT"])
 
 if __name__ == "__main__":
     unittest.main()

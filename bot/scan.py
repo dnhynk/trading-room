@@ -11,8 +11,9 @@ Universe: contracts with symbolStatus normal and 24h quote volume >= --min-vol (
   proxy    the engine replayed on the candles: bot.signal.candle_rule (the live 1m rule), the step ladder, gap_rebuy, the unit/core
            trim gates with relaxation, the retrace top, the 15m/1H structural stop with the money cap, 3 stops/day -> halt; fills at
            the close, maker fee on adds, taker on trims; no v rule, no de-risk. Net pnl in % of one unit's notional per window.
-Ranking value = the median over windows (a typical day, not yesterday). Symbols are ranked by proxy; concept is shown and is
-bot/select.py's second condition (a less two-way symbol never wins on the proxy alone).
+Ranking value = the median over windows (a typical day, not yesterday). Symbols are ranked by concept; the proxy is reported but
+neither orders the table nor gates a switch — its cross-symbol ordering is unvalidated against the tick engine and is biased against
+the symbols that cycle most, because it charges taker on every trim (RULES 도구 절).
 Flags (listed apart, never ranked): tick% > 0.05, spread > 10 bp, |funding| >= 0.1% per 8h, pump shape on >= 2 windows (the hour
 carrying the most volume >= 35% of the window while moving the price >= 4%), a pump (an UP move of >= +25% in a window or >= +40%
 over the windows, however two-way the swings on the way — 작전 코인 is 순환매 지옥, user 2026-08-29; PROMUSDT +54%/day slipped
@@ -165,9 +166,13 @@ def flags_of(x, wins, net_total):
     if wins and wins[0] and wins[0]["er"] >= 0.35: f.append(f"ER{wins[0]['er']:.2f}")
     return f
 
-def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print):
-    """Scan the universe; returns rows sorted: unflagged by proxy (desc) first, then flagged by volume. Public REST only."""
+def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equity=None):
+    """Scan the universe; returns rows sorted: unflagged by concept (desc) first, then flagged by volume. Public REST only.
+    `always` = symbols kept even when they fail the volume gate (bot/select.py passes the incumbent: a switch is a comparison, so
+    the symbol being traded must always carry numbers — 2026-09-01, TRUMPUSDT fell under the gate and vanished from the table)."""
     b = Bitget("", "", ""); p = load_params() or {}; sp = {**STRAT, **(p.get("strat") or {})}; sg = {**SIG, **(p.get("sig") or {})}
+    n_sides = max(len(sp.get("sides") or [sp.get("side")]), 1)                 # budgets are split per book (signal.SPLIT_KEYS)
+    unit_usdt = sp["unit_frac"] * equity / n_sides if sp.get("unit_frac") and equity else 0.0
     contracts = {c["symbol"]: c for c in b.get("/api/v2/mix/market/contracts", auth=False, productType=PRODUCT) if c.get("symbolStatus") == "normal"}
     tickers = b.get("/api/v2/mix/market/tickers", auth=False, productType=PRODUCT)
     cand = []
@@ -175,13 +180,15 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print):
         s = t["symbol"]; c = contracts.get(s)
         if not c or not s.endswith("USDT") or s in exclude or (syms and s not in syms): continue
         qv = float(t.get("quoteVolume") or 0)
-        if qv < min_vol and not syms: continue
+        if qv < min_vol and not syms and s not in always: continue
         px = float(t["lastPr"]); bid, ask = float(t.get("bidPr") or px), float(t.get("askPr") or px)
         tick = float(c["priceEndStep"]) * 10 ** -int(c["pricePlace"])
         cand.append(dict(symbol=s, px=px, qv=qv, chg=float(t.get("change24h") or 0) * 100, fund=float(t.get("fundingRate") or 0) * 100,
                          oi=float(t.get("holdingAmount") or 0) * px, tick_pct=tick / px * 100, spread_bp=(ask - bid) / px * 1e4))
     cand.sort(key=lambda x: -x["qv"])
-    log(f"{len(cand)} symbols (24h volume >= {min_vol:.0f}); pulling {days} days of 1m candles ...")
+    below = [x["symbol"] for x in cand if x["qv"] < min_vol]
+    log(f"{len(cand)} symbols (24h volume >= {min_vol:.0f}{'; under the gate but kept: ' + ','.join(below) if below else ''}); "
+        f"pulling {days} days of 1m candles ...")
     rows = []
     for x in cand:
         try:
@@ -198,6 +205,14 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print):
                  cyc_d=med([r["cycles"] for r in prs if r]), stops_d=med([r["stops"] for r in prs if r]), dd=max([r["dd"] for r in prs if r] or [0.0]),
                  legs_h=med([w["legs_h"] for w in wins if w]), leg=med([w["leg"] for w in wins if w]), bounce=med([w["bounce"] for w in wins if w]),
                  er=wins[0]["er"] if wins and wins[0] else 0.0, atr_pct=wins[0]["atr_pct"] if wins and wins[0] else 0.0)
+        # our own footprint, reported only (never ranks or gates): square-root impact sigma_daily x sqrt(unit notional / 24h volume).
+        # Compare against the measured round-trip fee (0.048% of notional, RULES 도구 절). Calibration is open — the law is written for
+        # institutional participation and our unit is ~20 ppm of ADV, so this reads as an upper bound; the tick backtest (which fills
+        # against recorded book depth) is what can calibrate it. NEXT 6.
+        rr = [a["c"] / q["c"] - 1 for q, a in zip(c1[-WIN:], c1[-WIN + 1:]) if q["c"]]
+        sig_d = statistics.pstdev(rr) * (1440 ** 0.5) * 100 if len(rr) > 60 else 0.0
+        x["unit_usdt"] = un = unit_usdt or sp["unit_qty"] * x["px"] / n_sides
+        x["impact"] = sig_d * (un / x["qv"]) ** 0.5 if x["qv"] else 0.0
         bars15 = {}
         for v in c1:
             k = v["ts"] // 900_000; r = bars15.setdefault(k, dict(ts=k * 900_000, o=v["o"], h=v["h"], l=v["l"], c=v["c"]))
@@ -206,16 +221,17 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print):
         x["side"] = (structure_side(b1h, wilder_atr(b1h)) if len(b1h) >= 20 else structure_side(s15, wilder_atr(s15))) or "-"
         x["flags"] = flags_of(x, wins, (c1[-1]["c"] / c1[0]["c"] - 1) * 100)
         rows.append(x)
-    ok = sorted([r for r in rows if not r["flags"]], key=lambda r: -r["proxy"])
+    ok = sorted([r for r in rows if not r["flags"]], key=lambda r: -r["concept"])
     bad = sorted([r for r in rows if r["flags"]], key=lambda r: -r["qv"])
     return ok + bad
 
 def table(rows, top):
-    hdr = f"{'symbol':<12}{'proxy%/d':>9}{'concept':>8}{'legs/h':>7}{'leg%':>6}{'bounce':>7}{'ER':>6}{'atr%':>6}{'cyc/d':>6}{'stop/d':>7}{'dd%':>6}{'vol24h':>8}{'fund%':>7}  side  flags"
+    hdr = f"{'symbol':<12}{'proxy%/d':>9}{'concept':>8}{'legs/h':>7}{'leg%':>6}{'bounce':>7}{'ER':>6}{'atr%':>6}{'imp%':>7}{'cyc/d':>6}{'stop/d':>7}{'dd%':>6}{'vol24h':>8}{'fund%':>7}  side  flags"
     print(hdr)
     for r in rows[:top] + [r for r in rows if r["flags"]][:top]:
         print(f"{r['symbol']:<12}{r['proxy']:9.2f}{r['concept']:8.2f}{r['legs_h']:7.2f}{r['leg']:6.2f}{r['bounce']:7.2f}{r['er']:6.2f}{r['atr_pct']:6.2f}"
-              f"{r['cyc_d']:6.1f}{r['stops_d']:7.1f}{r['dd']:6.2f}{r['qv'] / 1e6:7.0f}M{r['fund']:+7.3f}  {r['side']:<5} {' '.join(r['flags'])}")
+              f"{r.get('impact', 0.0):7.4f}{r['cyc_d']:6.1f}{r['stops_d']:7.1f}{r['dd']:6.2f}{r['qv'] / 1e6:7.0f}M{r['fund']:+7.3f}  {r['side']:<5} {' '.join(r['flags'])}")
+    if rows: print(f"  imp% = sigma_daily x sqrt(unit {rows[0].get('unit_usdt', 0):.0f} USDT / 24h volume); live round-trip fee is 0.048% of notional")
 
 def main():
     top, days, min_vol = arg("--top", 15), arg("--days", 3), arg("--min-vol", 50e6)
