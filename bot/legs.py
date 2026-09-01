@@ -5,9 +5,10 @@ book's add) and every leg top (a pop, the short book's add / the long book's tri
 and the extreme of the engine's per-second velocity v (sigma units of 1-second returns) inside it, then for each detector the first
 firing after the leg started: latency from the extreme (seconds; negative = fired before the extreme) and distance from the extreme
 (% of price, and in units of the add step max(step_add_pct, step_add_atr x ATR15)). Detectors: the engine's DIP_SLOWING /
-POP_STALLING by source (v = velocity model, 1m = candle rule), and candidate horizon speeds s_h = (mid - mid h seconds ago) / ATR for
-h = 8/30/60/120 s, "decelerated" (causally) when the leg has fallen >= --atr x ATR and the fall's speed drops to <= 30% of its
-running maximum.
+POP_STALLING by source (v = velocity model, 1m = candle rule, s8 = the third source, counted whether it trades or is recorded-only;
+"any" = the signals the Strategy sees, shadow ones excluded), and offline candidate horizon speeds c_h = (mid - mid h seconds ago) /
+ATR for h = 8/30/60/120 s, "decelerated" (causally) when the leg has fallen >= --atr x ATR and the fall's speed drops to <= 30% of
+its running maximum (c8 = the same rule as the engine's s8 but measured from the confirmed pivot instead of the running swing high).
 A leg has several pauses and every detector fires at pauses, so the table accounts for the ladder: "units" = firings the step gate
 lets through before the extreme (each >= a step under the previous one — units a campaign spends on the leg), "last-pre" = the
 distance of the last of those from the extreme, "post lat" = the first firing after the extreme, "actionable" = some let-through
@@ -31,7 +32,7 @@ def collect(files, sym, sig):
             if f.get("t") and f.get("atr") and (not secs or secs[-1][0] != f["t"]):
                 secs.append((f["t"], f["mid"], f["atr"], f["v"], f.get("atr15") or f["atr"]))
             for x in out:
-                if x["sig"] in ("DIP_SLOWING", "POP_STALLING"): sigs.append((x["t"], x["sig"], x.get("src", "?"), x["mid"]))
+                if x["sig"] in ("DIP_SLOWING", "POP_STALLING"): sigs.append((x["t"], x["sig"], x.get("src", "?"), x["mid"], bool(x.get("shadow"))))
     return secs, sigs
 
 def pivots(secs, k, s):
@@ -78,7 +79,7 @@ def account(fires, s, tL, pxL, step):
 
 def legs(secs, sigs, k, s, strat, day=None):
     name = "DIP_SLOWING" if s > 0 else "POP_STALLING"; piv = pivots(secs, k, s); rows = []
-    sig_t = [(t, src, mid) for t, sg, src, mid in sigs if sg == name]
+    sig_t = [(t, src, mid, sh) for t, sg, src, mid, sh in sigs if sg == name]
     for (kh, ih), (kl, il) in zip(piv, piv[1:]):
         if kh != "H" or kl != "L": continue
         t0, tL, pxL, atrL, a15 = secs[ih][0], secs[il][0], secs[il][1], secs[il][2], secs[il][4]
@@ -87,16 +88,16 @@ def legs(secs, sigs, k, s, strat, day=None):
         step = max(strat["step_add_pct"], strat["step_add_atr"] * a15 / pxL * 100) if strat["step_add_atr"] > 0 else strat["step_add_pct"]
         vext = min(s * secs[i][3] for i in range(ih, il + 1))
         det = {}
-        for src in ("any", "v", "1m"):
-            det[src] = account([(t, mid) for t, sc, mid in sig_t if t0 < t <= tL + WINDOW and (src == "any" or sc == src)], s, tL, pxL, step)
+        for src in ("any", "v", "1m", "s8"):
+            det[src] = account([(t, mid) for t, sc, mid, sh in sig_t if t0 < t <= tL + WINDOW and ((not sh) if src == "any" else sc == src)], s, tL, pxL, step)
         for h in H:
-            det[f"s{h}"] = account(horizon_fires(secs, s, ih, il, h, k), s, tL, pxL, step)
+            det[f"c{h}"] = account(horizon_fires(secs, s, ih, il, h, k), s, tL, pxL, step)
         fwd = max((s * (secs[i][1] - pxL) / pxL * 100 for i in range(il + 1, min(il + FWD, len(secs) - 1) + 1)), default=None)
         rows.append(dict(t=tL, px=pxL, depth=depth, depth_atr=s * (secs[ih][1] - pxL) / atrL, dur=dur, speed=depth / dur * 60, vext=vext, step=step, det=det, fwd=fwd))
     return rows
 
 def summarize(rows, label):
-    keys = ["any", "v", "1m"] + [f"s{h}" for h in H]
+    keys = ["any", "v", "1m", "s8"] + [f"c{h}" for h in H]
     print(f"  {label}: {len(rows)} legs, depth med {statistics.median(r['depth'] for r in rows):.2f}% ({statistics.median(r['depth_atr'] for r in rows):.1f} ATR), "
           f"dur med {statistics.median(r['dur'] for r in rows):.0f}s, speed med {statistics.median(r['speed'] for r in rows):.2f}%/min, "
           f"|v| extreme med {statistics.median(abs(r['vext']) for r in rows):.2f} sigma (legs with |v|<1: {sum(1 for r in rows if abs(r['vext']) < 1) / len(rows) * 100:.0f}%), "
@@ -120,11 +121,11 @@ def run(files, sym, sig, k, quiet, day):
     for s, label in ((1, "DIPS (bottoms; long add)"), (-1, "POPS (tops; long trim / short add)")):
         rows = legs(secs, sigs, k, s, strat, day)
         if not quiet:
-            print(f"--- {label}: extreme time, depth, duration, speed, v extreme | first firing: latency, distance, units let through (* = one within half a step) | v | 1m | s8 | s30 | s60 | s120 | bounce")
+            print(f"--- {label}: extreme time, depth, duration, speed, v extreme | first firing: latency, distance, units let through (* = one within half a step) | v | 1m | s8 | c8 | c30 | c60 | c120 | bounce")
             for r in rows:
                 d = r["det"]
                 print(f"{time.strftime('%m-%d %H:%M:%S', time.gmtime(r['t']))} {r['px']:.4f} {r['depth']:5.2f}% {r['depth_atr']:4.1f}A {r['dur']:5.0f}s {r['speed']:5.2f}%/m v{r['vext']:+5.2f} | "
-                      f"{g(d['v'])} | {g(d['1m'])} | {g(d['s8'])} | {g(d['s30'])} | {g(d['s60'])} | {g(d['s120'])} | {r['fwd'] if r['fwd'] is None else round(r['fwd'], 2)}")
+                      f"{g(d['v'])} | {g(d['1m'])} | {g(d['s8'])} | {g(d['c8'])} | {g(d['c30'])} | {g(d['c60'])} | {g(d['c120'])} | {r['fwd'] if r['fwd'] is None else round(r['fwd'], 2)}")
         summarize(rows, label)
     print(f"--- {len(secs)} seconds, {len(sigs)} signals, legs >= {k} x ATR")
 

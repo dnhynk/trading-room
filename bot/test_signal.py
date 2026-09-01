@@ -1,8 +1,34 @@
 """Invariants of bot/signal.py (pure).  python -m unittest bot.test_signal -v"""
 import unittest
-from bot.signal import Strategy, apply_fill, pos_stats, zigzag, sim_match, book_params
+from bot.signal import Strategy, apply_fill, pos_stats, zigzag, sim_match, sim_book, book_params
 
 class FillModel(unittest.TestCase):
+    def test_cancellations_at_our_level_drain_the_queue_ahead_of_us(self):
+        w = dict(px=3.0, qty=70, filled=0.0, queue=100.0, S=100.0, seen=0.0, t=1)      # placed behind 100 on the bid
+        sim_book([(w, True)], [[3.0, 40.0], [2.999, 500.0]], [[3.001, 5.0]])            # 60 gone with no print: cancelled, uniformly over the level
+        self.assertAlmostEqual(w["queue"], 40.0)
+        out = sim_match([("A", w, True)], 3.0, 45.0, "sell", 0.1, t=5)                   # 45 hit the bid: 40 ahead of us, 5 for us
+        self.assertEqual([(k, f) for k, _, f in out], [("A", 5.0)]); w["filled"] += 5
+        self.assertAlmostEqual(w["seen"], 45.0)
+        sim_book([(w, True)], [[3.0, 20.0]], [[3.001, 5.0]])                            # the drop 40 -> 20 is what the print took: no cancel, no change
+        self.assertAlmostEqual(w["queue"], 0.0); self.assertEqual(w["seen"], 0.0)
+
+    def test_a_touch_worse_than_our_price_means_nobody_ahead_and_deeper_levels_are_unknown(self):
+        w = dict(px=3.0, qty=70, filled=0.0, queue=100.0, S=100.0, seen=0.0, t=1)
+        sim_book([(w, True)], [[3.010, 9.0], [3.009, 9.0], [3.008, 9.0], [3.007, 9.0], [3.006, 9.0]], [[3.011, 1.0]])   # our bid is below the shown depth
+        self.assertEqual(w["queue"], 100.0)
+        sim_book([(w, True)], [[2.999, 50.0]], [[3.001, 1.0]])                          # best bid under our price: our level emptied
+        self.assertEqual(w["queue"], 0.0)
+        self.assertEqual([f for _, _, f in sim_match([("A", w, True)], 3.0, 1.0, "sell", 0.1, t=5)], [1.0])
+        a = dict(px=3.0, qty=70, filled=0.0, queue=10.0, S=10.0, seen=0.0, t=1)        # an ask: mirror
+        sim_book([(a, False)], [[2.999, 1.0]], [[3.002, 5.0]]); self.assertEqual(a["queue"], 0.0)
+
+    def test_a_print_through_the_price_in_the_first_second_is_a_post_only_cancel_not_a_fill(self):
+        w = dict(px=3.0, qty=50, filled=0.0, queue=10.0, t=100)
+        self.assertEqual(sim_match([("A", w, True)], 2.999, 1.0, "sell", 0.1, t=100.5), [("A", w, None)])   # crossed before it was on the book
+        self.assertEqual([f for _, _, f in sim_match([("A", w, True)], 2.999, 1.0, "sell", 0.1, t=101.0)], [50.0])   # a second later: a fill
+        self.assertEqual([f for _, _, f in sim_match([("A", w, True)], 2.999, 1.0, "sell", 0.1)], [50.0])   # no print time: the old rule (tests)
+
     def test_one_print_is_shared_by_orders_of_two_books_at_the_same_price(self):
         a = dict(px=3.0, qty=70, filled=0.0, queue=10.0, t=1); b = dict(px=3.0, qty=70, filled=0.0, queue=10.0, t=2)   # long add + short trim, both on the bid
         out = sim_match([("A", a, True), ("B", b, True)], 3.0, 15.0, "sell", 0.1)
@@ -303,7 +329,7 @@ class GapReturns(unittest.TestCase):
         out = []
         for _ in range(20): out += feat.feed(book(101, t * 1000 + 500)); t += 1
         self.assertLess(feat.var.v, var0 * 2)                                                         # sigma did not swallow a 1% "1-second" return (x20 without the skip)
-        self.assertFalse(any(x["sig"] in ("DIP_SLOWING", "POP_STALLING") for x in out))              # and no fake fast->slow transition fired
+        self.assertFalse(any(x["sig"] in ("DIP_SLOWING", "POP_STALLING") and x.get("src") == "v" for x in out))   # and no fake fast->slow transition fired
         feat.feed(book(101, (t + 200) * 1000 + 500))                                                  # > 120 s: an outage restarts the normaliser too (RULES)
         self.assertLessEqual(feat.var.n, 1)                                                          # the normaliser restarts: v is silent for vol_hl again
 
@@ -499,12 +525,45 @@ class WarmUp(unittest.TestCase):
         out += feat.feed(book(100, t * 1000 + 500)); t += 1
         out += feat.feed(book(99.5, t * 1000 + 500)); t += 1                                            # -0.5% first return: v = -1 exactly under the old code
         for _ in range(40): out += feat.feed(book(99.5, t * 1000 + 500)); t += 1                         # then flat: the old code fired DIP_SLOWING here
-        self.assertFalse(any(x["sig"] == "DIP_SLOWING" for x in out))
+        self.assertFalse(any(x["sig"] == "DIP_SLOWING" and x.get("src") == "v" for x in out))
         for _ in range(320): out += feat.feed(book(99.5, t * 1000 + 500)); t += 1                        # a half-life of data: the normaliser is mature
         out = []
         out += feat.feed(book(99.0, t * 1000 + 500)); t += 1
         for _ in range(40): out += feat.feed(book(99.0, t * 1000 + 500)); t += 1
         self.assertTrue(any(x["sig"] == "DIP_SLOWING" and x["src"] == "v" for x in out))               # the same shape of move now fires
+
+class ThirdDetector(unittest.TestCase):
+    def test_s8_fires_when_the_push_dies_after_rebuilding_and_respects_depth_and_cooldown(self):
+        from bot.signal import s8_state, s8_step, SIG
+        st = s8_state(); p = dict(SIG, s8_decel=0.3, s8_rebuild=0.5, s8_cool=60)
+        xs = [0.5, 1.0, 2.0, 2.0, 1.5, 0.5, 0.4, 0.3, 1.2, 0.3]
+        self.assertEqual([sec for sec, x in enumerate(xs) if s8_step(st, x, sec, True, p)], [5])   # peak 2.0 at sec 2, died to 0.5 <= 0.6 at sec 5
+        # sec 8 rebuilt the push to 1.2 (>= half of the leg's 2.0) and sec 9 died again, but the 60 s cooldown holds
+        self.assertFalse(s8_step(st, 0.3, 64, True, p)); self.assertTrue(s8_step(st, 0.3, 65, True, p))
+        st = s8_state(); self.assertEqual([sec for sec, x in enumerate(xs) if s8_step(st, x, sec, False, p)], [])   # the depth condition gates it
+
+    def _slide(self, feat):
+        book = lambda m, ts: dict(arg=dict(channel="books15"), data=[dict(bids=[[round(m - 0.01 - i * 0.01, 4), 5] for i in range(5)], asks=[[round(m + 0.01 + i * 0.01, 4), 5] for i in range(5)], ts=str(ts))], ts=ts)
+        out = []; t = 7200
+        for _ in range(40): out += feat.feed(book(100.0, t * 1000 + 500)); t += 1
+        for i in range(60): out += feat.feed(book(round(100.0 - 0.01 * i + (0.02 if i % 2 else 0.0), 4), t * 1000 + 500)); t += 1   # a 0.6% slide with tick noise: v ~ -0.45
+        last = round(100.0 - 0.01 * 59 + 0.02, 4)
+        for _ in range(20): out += feat.feed(book(last, t * 1000 + 500)); t += 1                        # the slide stalls
+        return out
+
+    def test_s8_is_recorded_as_shadow_by_default_and_trades_when_switched_on(self):
+        from bot.signal import Features
+        feat = Features(dict(vol_hl=300)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
+        out = self._slide(feat); s8 = [x for x in out if x["sig"] == "DIP_SLOWING" and x.get("src") == "s8"]
+        self.assertTrue(s8); self.assertTrue(all(x["shadow"] for x in s8))                              # fires at the stall, recorded only
+        self.assertFalse(any(x["sig"] == "DIP_SLOWING" and x.get("src") != "s8" for x in out))          # v (immature normaliser) and 1m (no candles) are silent
+        self.assertIsNone(feat.dip["last"])                                                              # the shared cooldown is untouched: live stays bit-identical
+        st = Strategy(dict(side="long", unit_qty=70, max_notional=1e6)); pos = dict(lots=[], avg=None)
+        self.assertIsNone(st.step(F(mid=99.4, bid=99.39, ask=99.41), [s8[0]], pos)["buy"])              # the Strategy never arms on a shadow signal
+        feat = Features(dict(vol_hl=300, s8_on=1)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
+        out = self._slide(feat); s8 = [x for x in out if x["sig"] == "DIP_SLOWING" and x.get("src") == "s8"]
+        self.assertTrue(s8); self.assertFalse(any(x["shadow"] for x in s8)); self.assertIsNotNone(feat.dip["last"])
+        self.assertEqual(Strategy(dict(side="long", unit_qty=70, max_notional=1e6)).step(F(mid=99.4, bid=99.39, ask=99.41), [s8[0]], dict(lots=[], avg=None))["buy"], (99.39, 70))
 
 class Zigzag(unittest.TestCase):
     def test_straight_move_has_no_swings(self):

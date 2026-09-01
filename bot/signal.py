@@ -22,6 +22,11 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            vp_window=360, vp_bucket_ticks=5, vp_hvn=1.5,
            # 1m-candle rule = the manual watcher's speed_line (bot/watch.py v13, 2026-08-29); emitted with src="1m"
            c1_on=1, c1_dev=0.4, c1_vr=1.5, c1_wick=0.33, c1_roc=0.3, c1_decel=0.35,
+           # third deceleration source (src="s8"; legs.py's candidate as a live detector): the s8_h-second move in ATR units, fired when it
+           # dies to <= s8_decel x its running maximum after the push rebuilt to >= s8_rebuild x the leg's strongest push (s8_cool between
+           # firings, same depth condition as v). s8_on=0 records it only (shadow=True: the Strategy ignores it and the shared cooldown is
+           # untouched, so live is bit-identical; replay/legs/nightly compare v / 1m / s8), 1 lets it arm and trim like the other two
+           s8_on=0, s8_h=8, s8_decel=0.3, s8_rebuild=0.5, s8_cool=60,
            # structure: last confirmed 1m pivot low/high (zigzag rg_theta over stop_lookback candles) for the structural stop
            stop_lookback=180,
            # volume-decay component of a deceleration (10s windows of aggressor volume vs the 10-min average): a spike of >= vd_spike x that
@@ -83,6 +88,21 @@ def book_params(sp, side, tick, n_sides, qstep=None, fee_rt=None):
         for k in SPLIT_KEYS:
             if p.get(k): p[k] = p[k] / n_sides
     return p
+
+def s8_state(): return dict(best=0.0, legmax=0.0, imax=None, cool=-1)
+
+def s8_step(st, x, sec, deep, p):
+    """One second of the third deceleration detector (legs.py's s8 candidate, causal). x = the s8_h-second move in ATR units, positive
+    while the leg advances (falling for a dip, rising for a pop). Tracks the leg's strongest push (legmax) and the push since the last
+    firing (best); fires when that push has rebuilt to >= s8_rebuild x legmax, the speed has since died to <= s8_decel x it, the leg is
+    deep enough (deep = the engine's dip_min_atr condition) and s8_cool has passed since the last firing. Normalised by the leg's own
+    push, not by sigma: a 1%/min slide is 'slow' in sigma units (v ~ 0.5 when sigma is tick noise; 85% of legs never reach |v| = 1)
+    but its own deceleration is unmistakable — legs tables 2026-08-29..31: actionable on 57-60% of dips vs v 10-21% / 1m 7-21%."""
+    st["legmax"] = max(st["legmax"], x)
+    if x > st["best"]: st["best"], st["imax"] = x, sec; return False
+    if st["best"] >= p["s8_rebuild"] * st["legmax"] > 0 and st["imax"] is not None and sec > st["imax"] and sec >= st["cool"] and deep and x <= p["s8_decel"] * st["best"]:
+        st["best"], st["imax"], st["cool"] = 0.0, None, sec + p["s8_cool"]; return True
+    return False
 
 def zigzag(closes, th):
     """Completed swings (signed %) between reversals of at least th (fraction); a straight move has none."""
@@ -191,6 +211,7 @@ class Features:
         self.htf_lows, self.htf_highs = [], []                             # 15m + 1H pivot levels: where a campaign's stop may sit (structural_level)
         self.dip = dict(minv=0.0, lows=[], hold=0, last=None, div=False)   # tracked since the swing high
         self.pop = dict(maxv=0.0, highs=[], hold=0, last=None, div=False)  # tracked since the swing low
+        self.s8 = dict(d=s8_state(), u=s8_state())                         # third detector's leg state, dip side / pop side
         self.brk_until = self.bko_until = 0
         self.gap_sec = None                                                # the second whose close carries a feed gap's return (skipped)
         self.f = {}
@@ -339,6 +360,7 @@ class Features:
         if sec - self.sec > 120:            # outage: every second-level state is stale; rebuild the windows from candles like at start —
             # sigma included (RULES: the v rule is silent for vol_hl after an outage as after a restart; keeping sigma trusted a one-sample v)
             self.var, self.vraw = EMA(self.p["vol_hl"]), EMA(self.p["v_hl"]); self.vh.clear(); self.dip.update(minv=0.0, lows=[], hold=0, div=False); self.pop.update(maxv=0.0, highs=[], hold=0, div=False)
+            self.s8 = dict(d=s8_state(), u=s8_state())
             self.mids.clear(); self.flow.clear(); self.dbid.clear(); self.dask.clear(); self.b = self.s = 0.0; self.pending = []
             for c in self.candles[-(self.mids.maxlen // 60):]: self.mids.extend([c["c"]] * 60)
             for c in self.candles[-(self.flow.maxlen // 60):]: self.flow.extend([(c["v"] / 120, c["v"] / 120)] * 60)
@@ -366,13 +388,13 @@ class Features:
         H, Lo = max(win), min(win)
         atr = self.atr
         d, u = self.dip, self.pop
-        if mid >= H: d.update(minv=ve, lows=[], hold=0, div=False)         # making the swing high: dip tracking restarts
+        if mid >= H: d.update(minv=ve, lows=[], hold=0, div=False); self.s8["d"] = s8_state()   # making the swing high: dip tracking restarts
         else:
             d["minv"] = min(d["minv"], ve)
             if not d["lows"] or mid < d["lows"][-1][0]:
                 d["div"] = bool(d["lows"]) and self.cvd > d["lows"][-1][1]   # lower price low, higher CVD low
                 d["lows"].append((mid, self.cvd))
-        if mid <= Lo: u.update(maxv=ve, highs=[], hold=0, div=False)
+        if mid <= Lo: u.update(maxv=ve, highs=[], hold=0, div=False); self.s8["u"] = s8_state()
         else:
             u["maxv"] = max(u["maxv"], ve)
             if not u["highs"] or mid > u["highs"][-1][0]:
@@ -425,30 +447,49 @@ class Features:
             cond = U >= p["dip_min_atr"] and u["maxv"] >= p["v_fast"] and v <= p["v_slow"] and a < 0
             u["hold"] = u["hold"] + 1 if cond else 0
             if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["maxv"] = ve; out.append(dict(sig="POP_STALLING", src="v"))
+            h = p["s8_h"]
+            if n > h > 0:               # third source: the h-second move in ATR units against the leg's own strongest push (s8_step)
+                x = (allm[-1 - h] - mid) / atr
+                if s8_step(self.s8["d"], x, sec, D >= p["dip_min_atr"], p) and (not p["s8_on"] or dip_ok()):
+                    if p["s8_on"]: d["last"] = (sec, mid)
+                    out.append(dict(sig="DIP_SLOWING", src="s8", shadow=not p["s8_on"]))
+                if s8_step(self.s8["u"], -x, sec, U >= p["dip_min_atr"], p) and (not p["s8_on"] or pop_ok()):
+                    if p["s8_on"]: u["last"] = (sec, mid)
+                    out.append(dict(sig="POP_STALLING", src="s8", shadow=not p["s8_on"]))
             for name in self.pending:   # 1m-candle rule, same cooldown and veto as the velocity rule
                 if name == "DIP_SLOWING" and dip_ok(): d["last"] = (sec, mid); out.append(dict(sig=name, src="1m"))
                 if name == "POP_STALLING" and pop_ok(): u["last"] = (sec, mid); out.append(dict(sig=name, src="1m"))
         else:
             self.f = dict(t=sec, mid=mid, bid=self.bid, ask=self.ask, mark=self.mark, sigma=sigma, atr=None, v=v, a=a, brk=False, bko=False)
         self.pending = []
-        dbl = {"DIP_SLOWING", "POP_STALLING"} <= {o["sig"] for o in out}   # one bar claiming both extremes (climax wick vs rate decay): recorded, not gated
+        dbl = {"DIP_SLOWING", "POP_STALLING"} <= {o["sig"] for o in out if not o.get("shadow")}   # one bar claiming both extremes (climax wick vs rate decay): recorded, not gated
         for o in out: o.update(self.f); o["dbl"] = dbl
         return out
 
 
 # ---- position accounting (pure) -------------------------------------------------
-def sim_match(orders, px, size, side, qstep):
+CROSS_S = 1.0   # a post-only order is not on the book for its first second (REST latency, and the exchange cancels one that would cross on
+                # arrival): a print through its price inside that window is a cancel, not a fill. Live record 2026-08-29..09-02, 861 maker
+                # orders: pierces within 1 s of placement left the order unfilled 4:1; pierces later than 1 s filled it 3:1.
+
+def sim_match(orders, px, size, side, qstep, t=None):
     """Fill model shared by cycle.py (dry) and backtest.py, one print at a time. orders = [(key, w, bid)] with w = dict(px, qty, filled,
-    queue, t) and bid = the order rests on the bid. A print through an order's price fills it whole. At its price only aggressors hitting
-    our side count, and the one print is shared: orders (any book) fill in placement order from what is left after their own queue,
-    the queue ahead of a later order shrinking by what the print already consumed. Returns [(key, w, fill)]."""
+    queue, t, seen) and bid = the order rests on the bid. A print through an order's price fills it whole — unless the order is younger
+    than CROSS_S at the print's time t: then it would have crossed on arrival and the exchange cancelled it (fill None: the caller drops
+    the order; the Strategy re-places at the new touch on its next tick, as live). At its price only aggressors hitting our side count,
+    and the one print is shared: orders (any book) fill in placement order from what is left after their own queue, the queue ahead of a
+    later order shrinking by what the print already consumed. w["seen"] accumulates the level's traded volume between book snapshots
+    for sim_book. Returns [(key, w, fill)]."""
     out, res, ahead = [], size, 0.0
     for key, w, bid in sorted(orders, key=lambda o: o[1].get("t", 0)):
         rem = w["qty"] - w["filled"]
         if rem <= 0: continue
-        if (px < w["px"] if bid else px > w["px"]): fill = rem
+        if (px < w["px"] if bid else px > w["px"]):
+            if t is not None and t < w.get("t", 0) + CROSS_S: out.append((key, w, None)); continue
+            fill = rem
         elif px == w["px"]:
             if side and side != ("sell" if bid else "buy"): continue
+            w["seen"] = w.get("seen", 0.0) + size
             w["queue"] = max(w["queue"] - ahead, 0.0)
             take = min(res, w["queue"]); w["queue"] -= take; res -= take; ahead += take
             if w["queue"] > 0 or res <= 0: continue
@@ -457,6 +498,28 @@ def sim_match(orders, px, size, side, qstep):
         fill = round(fill / qstep) * qstep
         if fill > 0: out.append((key, w, fill))
     return out
+
+def sim_book(orders, bids, asks):
+    """Book snapshot between prints, same resting orders as sim_match (orders = [(w, bid)]): the queue ahead of us also drains by
+    cancellation. A drop of the displayed size at our level that the prints since the last snapshot (w["seen"]) do not explain was
+    cancelled; cancels are taken as uniform over the level, so the part ahead of us shrinks in proportion (w["S"] = the level's size at
+    the last snapshot, set to the queue at placement). A touch worse than our price means nobody rests at ours any more (queue 0); a
+    level outside the shown depth is unknown (no update). Why: on 861 live maker orders (2026-08-29..09-02) the displayed queue at
+    placement turned over 1.4x (trims) to 5x (adds) by cancellation during the order's life, and the print-only model predicted no fill
+    within the live lifetime for half of the orders that filled live (with this rule 8-14%); the trade feed itself is complete (print
+    volume = candle volume, 1.00 per minute), so the queue, not the prints, was wrong."""
+    for w, bid in orders:
+        lvl = bids if bid else asks
+        if not lvl or w["qty"] - w["filled"] <= 0: continue
+        px, best, deep = w["px"], lvl[0][0], lvl[-1][0]
+        if (px > best) if bid else (px < best): S = 0.0
+        elif (px < deep) if bid else (px > deep): continue
+        else: S = next((q for p, q in lvl if p == px), 0.0)
+        S0 = w.get("S")
+        if S0:
+            drop = S0 - S - w.get("seen", 0.0)
+            if drop > 0: w["queue"] = max(w["queue"] - drop * w["queue"] / S0, 0.0)
+        w["S"], w["seen"] = S, 0.0
 
 def pos_stats(pos):
     qty = sum(l[0] for l in pos["lots"])
@@ -563,6 +626,7 @@ class Strategy:
 
     def step(self, f, sigs, pos, working=None):
         p, ev = self.p, []
+        sigs = [x for x in sigs if not x.get("shadow")]      # a recorded-only detector (sig.s8_on=0) never arms or trims
         s = 1 if p["side"] == "long" else -1; tick = p["tick"]
         mid, bid, ask, t, atr = f["mid"], f["bid"], f["ask"], f["t"], f.get("atr")
         qty, avg = pos_stats(pos)

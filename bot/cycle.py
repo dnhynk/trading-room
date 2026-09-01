@@ -30,7 +30,7 @@ import asyncio, glob, json, os, sys, time
 from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
-from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match
+from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match, sim_book
 from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS, strat_for, portfolio, outside_books
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -57,7 +57,7 @@ def quantize_unit(tgt, cur, qstep):
     return u
 
 POSITIVE = dict(strat=("unit_qty", "max_units", "max_notional", "cap_usdt", "pop_min_pct", "tick", "qstep", "buy_ttl_s", "confirm_within_s", "wallet_frac"),
-                sig=("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels", "rg_window", "vp_window", "vp_bucket_ticks", "stop_lookback"))
+                sig=("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels", "rg_window", "vp_window", "vp_bucket_ticks", "stop_lookback", "s8_h"))
 OPTIONAL_NUM = ("stop_structural", "add_confirm", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac", "daily_loss_limit", "fee_rt_pct")   # None or a non-negative number
 # 자본 비례 한도: 고정 키 -> 그 키를 대신하는 지갑 배수. resize·load·apply_params·snapshot이 전부 여기서 읽는다 —
 # 같은 대응을 여러 곳에 적어두면 하나가 뒤처진다(2026-09-01 max_notional이 그렇게 낡았다). 새 한도는 여기만 더한다.
@@ -267,7 +267,7 @@ class Book:
         self.seq += 1; oid = f"{self.OIDP}{role[0]}{int(time.time() * 1000)}{self.seq % 1000:03d}"
         w = dict(oid=oid, order_id=None, px=px, qty=qty, filled=0.0, t=time.time()); self.remember_lot(oid, lot)
         lvl = dict(self.feat.bids if self.rest_on_bid(role) else self.feat.asks)
-        w["queue"] = lvl.get(px, 0.0)                         # contracts already resting at our price (dry: the fill model's queue; live: the record — a miss is a queue that did not drain, not a price that did not come)
+        w["queue"] = w["S"] = lvl.get(px, 0.0); w["seen"] = 0.0   # contracts already resting at our price (dry: the fill model's queue, S/seen for sim_book; live: the record — a miss is a queue that did not drain, not a price that did not come)
         if self.mode != "dry":
             try:
                 sl = None
@@ -281,7 +281,7 @@ class Book:
             except Exception as e:                           # timeout etc.: the exchange may have accepted it — track it and settle by clientOid
                 w["unconfirmed"] = time.time(); self.ev("PLACE_UNCONFIRMED", role=role, px=px, qty=qty, oid=oid, err=f"{type(e).__name__}: {str(e)[:120]}")
         self.work[role] = w; self.replaced[role] = time.time()
-        self.ev("PLACE", role=role, px=px, qty=qty, oid=oid, queue=w.get("queue"))
+        self.ev("PLACE", role=role, px=px, qty=qty, oid=oid, queue=w.get("queue"), mid=self.feat.mid)   # mid = arrival price (slippage / impact measurement joins FILL by oid)
 
     async def taker(self, qty, lot=None):
         """Reduce by qty at market (the speed-based trim that a maker order did not fill in time); lot = the lot it reduces (core cut)."""
@@ -289,11 +289,11 @@ class Book:
         oid = f"{self.OIDP}m{int(time.time() * 1000)}"; self.taker_t = time.time(); self.remember_lot(oid, lot)
         if self.mode == "dry":
             px = self.feat.bid if self.s > 0 else self.feat.ask
-            self.ev("TAKER", qty=qty, px=px, oid=oid)
+            self.ev("TAKER", qty=qty, px=px, oid=oid, mid=self.feat.mid)
             await self.on_fill("trim", qty, px, qty * px * self.cy.taker, oid, "taker", lot=lot); return
         try:
             await self.cy.rest(self.cy.b.market_order, self.symbol, "buy" if self.s > 0 else "sell", self.fq(qty), trade_side="close", client_oid=oid)
-            self.ev("TAKER", qty=qty, oid=oid)
+            self.ev("TAKER", qty=qty, oid=oid, mid=self.feat.mid)
         except BitgetError as e: self.ev("REJECT", role="taker", qty=qty, err=str(e)[:160])
         except Exception as e:                                # timeout: it may have executed — no second market order until its state is known (settle_orders)
             self.market_pending = dict(oid=oid, t=time.time(), qty=qty); self.ev("TAKER_UNCONFIRMED", qty=qty, oid=oid, err=f"{type(e).__name__}: {str(e)[:120]}")
@@ -478,7 +478,8 @@ class Book:
             if w["filled"] >= w["qty"] - self.cy.qstep / 2: self.work[role] = None
         q, avg = pos_stats(self.pos)
         self.ev("FILL", role=role, qty=qty, px=px, fee=rnd(fee), pnl=rnd(pnl), scope=scope, pos_qty=rnd(q), avg=rnd(avg), realized=rnd(self.realized), oid=oid,
-                lot="core" if lot == 0 else None)   # a de-risk cut under units reduces the core lot, not the LIFO unit (bot.cycles follows this)
+                lot="core" if lot == 0 else None,   # a de-risk cut under units reduces the core lot, not the LIFO unit (bot.cycles follows this)
+                mid=self.feat.mid)                  # mid at the fill: with PLACE/TAKER.mid (arrival) this is the slippage and impact record (NEXT 6)
         await self.tick([])          # re-place the opposite side at once
 
     async def on_stop_hit(self, px, qty=None, fee=None, oid=None):
@@ -761,6 +762,7 @@ class Cycle:
             if arg.get("instId") != self.symbol: return
             if ch == "trade" and j.get("action") != "snapshot" and self.mode == "dry": await self.sim_trades(data)
             sigs = self.feat.feed(j)
+            if ch == "books15" and self.mode == "dry": self.sim_book()
             if sigs or self.feat.f.get("t") != self.last_t:
                 self.last_t = self.feat.f.get("t")
                 for x in sigs:
@@ -771,11 +773,17 @@ class Cycle:
             await self.private(ch, data)
 
     async def sim_trades(self, data):
-        """Dry fills: one print is shared by every resting order of every book at that price (placement order), never consumed twice."""
+        """Dry fills: one print is shared by every resting order of every book at that price (placement order), never consumed twice.
+        A print through the price of an order younger than CROSS_S is the exchange's post-only cancel, not a fill (sim_match)."""
         for t in data:
             orders = [((bk, role), w, bk.rest_on_bid(role)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])]
-            for (bk, role), w, fill in sim_match(orders, float(t["price"]), float(t["size"]), t.get("side"), self.qstep):
+            for (bk, role), w, fill in sim_match(orders, float(t["price"]), float(t["size"]), t.get("side"), self.qstep, t=time.time()):
+                if fill is None: bk.work[role] = None; bk.ev("CANCEL", role=role, px=w["px"], filled=w["filled"], oid=w["oid"], why="crossed"); continue
                 await bk.on_fill(role, fill, w["px"], fill * w["px"] * self.maker, w["oid"], "sim")
+
+    def sim_book(self):
+        """Dry: a book snapshot drains the queue ahead of resting orders by the cancellations it shows (sim_book in signal.py)."""
+        sim_book([(w, bk.rest_on_bid(role)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])], self.feat.bids, self.feat.asks)
 
     async def private(self, ch, data):
         if ch == "account":

@@ -165,7 +165,9 @@ def main():
         except Exception as e: log(f"scan failed: {type(e).__name__}: {e}"); rows = None
         if rows:
             os.makedirs(LOGS, exist_ok=True)
-            write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], edge=edge, rows=rows))
+            rec = dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], edge=edge, rows=rows)
+            write_json(os.path.join(LOGS, "scan.json"), rec)
+            with open(os.path.join(LOGS, "scan-history.jsonl"), "a", encoding="utf-8") as f: f.write(json.dumps(rec) + "\n")   # every scan's estimator rows (p_up, trials_h, edge...) kept, so the symbol x day pairing with the live ledger (NEXT 6, 8) can be built later; scan.json is overwritten
             now = time.time(); today = time.strftime("%Y%m%d", time.gmtime(now))
             st = read_json(os.path.join(LOGS, "select-state.json"), {})
             if st.get("day") != today: st["day"], st["opens"] = today, 0

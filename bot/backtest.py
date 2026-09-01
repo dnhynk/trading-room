@@ -15,9 +15,11 @@ recording, fetched once from the public REST history and cached under data/cache
 no candle snapshot at all (only the recorder's first file does, ~8h), so without the seed ATR15 and the structural stop would be
 missing for hours. Without network the run falls back to the recording alone (a warning on stderr). The daily trend is not
 refreshed hourly as live.
-Fill model = cycle.py dry mode: a resting order fills when a trade prints through its price, or at its price once the queue that
-was ahead of it at placement has been consumed by aggressors hitting our side; takers fill at the touch. Keep sim_trades /
-reconcile in step with bot/cycle.py. Daily stop count and the daily loss limit roll over at UTC midnight like the live engine.
+Fill model = cycle.py dry mode (signal.sim_match / sim_book): a resting order fills when a trade prints through its price — except in
+the second it was placed, where such a print is the exchange's post-only cancel —, or at its price once the queue ahead of it has
+drained, by aggressors hitting our side and by the cancellations each second's book reveals (the displayed queue turns over 1.4-5x by
+cancellation during an order's life, live record 2026-09-02); takers fill at the touch. Keep sim_trades / sim_book / reconcile in
+step with bot/cycle.py. Daily stop count and the daily loss limit roll over at UTC midnight like the live engine.
 Sizing = live's: the strat is `ws.strat_for(params, sym)` (the book's wallet_frac / sides), the quantity step comes from the symbol's
 contract (cached under data/cache/contract-*.json), and when params size by equity (unit_frac ...) the fixed unit / cap / daily limit /
 notional are derived once from --equity (default: the latest logs/state-*.json equity) at the tape's first mid — the engine cannot
@@ -28,7 +30,7 @@ Output: realized pnl net of fees, open pnl at the end, cycles (trim fills), adds
 and the sizing the run used."""
 import gzip, json, os, pickle, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot.signal import Features, Strategy, STRAT, SPLIT_KEYS, apply_fill, pos_stats, book_params, sim_match
+from bot.signal import Features, Strategy, STRAT, SPLIT_KEYS, apply_fill, pos_stats, book_params, sim_match, sim_book
 from bot.ws import load_params, load_states, strat_for
 from bot.bitget import Bitget
 
@@ -177,9 +179,9 @@ class Engine:
     def on_fill(self, bk, role, qty, px, fee, oid, lot=None):
         n0 = len(bk.pos["lots"])
         pnl = apply_fill(bk.pos, bk.s, role == "buy", qty, px, oid=oid, fee=fee, lot=lot); bk.realized += pnl; bk.day_realized += pnl; bk.strat.on_fill(role, qty)
-        if role == "buy": bk.adds += 1
-        else: bk.cycles += max(n0 - len(bk.pos["lots"]), 0)        # a cycle = a lot bought and sold out, however many fills the selling took
         w = bk.work[role]
+        if role == "buy": bk.adds += 0 if (w and w["oid"] == oid and w["filled"] > 0) else 1   # an add = an order that filled, not each partial print (recon compares with live clientOids)
+        else: bk.cycles += max(n0 - len(bk.pos["lots"]), 0)        # a cycle = a lot bought and sold out, however many fills the selling took
         if w and w["oid"] == oid:
             w["filled"] += qty
             if w["filled"] >= w["qty"] - self.qstep / 2: bk.work[role] = None
@@ -247,17 +249,26 @@ class Engine:
             if w and (want is None or t - bk.replaced[role] >= 1.0): bk.work[role] = None; bk.replaced[role] = t; w = None
             if want is not None and w is None:
                 lvl = dict(self.feat.bids if (role == "buy") == (bk.s > 0) else self.feat.asks); bk.seq += 1
-                bk.work[role] = dict(oid=f"{OID}{bk.side[0]}{role[0]}{bk.seq}", px=want[0], qty=want[1], filled=0.0, queue=lvl.get(want[0], 0.0), t=t,
+                bk.work[role] = dict(oid=f"{OID}{bk.side[0]}{role[0]}{bk.seq}", px=want[0], qty=want[1], filled=0.0, queue=lvl.get(want[0], 0.0),
+                                     t=self.feat.sec,          # placed at the start of this second (N): N's prints may cancel it (crossed), not fill it (sim_match CROSS_S)
+                                     S=lvl.get(want[0], 0.0), seen=0.0,   # the level's size at placement and the prints seen since (sim_book: cancellations drain the queue)
                                      lot=want[3] if role == "trim" and len(want) > 3 else None); bk.replaced[role] = t
         qty, _ = pos_stats(bk.pos)
         bk.stop = d["stop"] if qty else None
 
-    def sim_trades(self, trades):
-        """One print is shared by every resting order of every book at that price (sim_match, as cycle.py dry mode)."""
+    def sim_trades(self, trades, sec):
+        """One print is shared by every resting order of every book at that price (sim_match, as cycle.py dry mode). A print through
+        the price of an order placed this second is the exchange's post-only cancel (fill None): the order is dropped and the Strategy
+        re-places at the new touch on its next tick, as live."""
         for px, size, side in trades:
             orders = [((bk, role), w, (role == "buy") == (bk.s > 0)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])]
-            for (bk, role), w, fill in sim_match(orders, px, size, side, self.qstep):
+            for (bk, role), w, fill in sim_match(orders, px, size, side, self.qstep, t=sec):
+                if fill is None: bk.work[role] = None; self.events.append((sec, "CANCEL", bk.side, role, w["px"], "crossed")); continue
                 self.on_fill(bk, role, fill, w["px"], fill * w["px"] * MAKER, w["oid"], lot=w.get("lot"))
+
+    def sim_book(self, bids, asks):
+        """The second's book snapshot drains the queue ahead of resting orders by the cancellations it shows (sim_book in signal.py)."""
+        sim_book([(w, (role == "buy") == (bk.s > 0)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])], bids, asks)
 
     def run(self, seconds):
         """Per condensed second N, in live order: the first message of N closes N-1 -> the tick decides on N-1's features with N-1's
@@ -277,9 +288,11 @@ class Engine:
             if self.follow: self.follow_step(sec)
             if sigs or self.feat.f.get("t") != self.last_t: self.last_t = self.feat.f.get("t"); self.tick(sigs)
             if trades:
-                self.sim_trades(trades)
+                self.sim_trades(trades, sec)
                 self.feat.feed(dict(arg={**arg, "channel": "trade"}, action="update", data=[dict(price=str(p), size=str(q), side=s) for p, q, s in trades], ts=ts))
-            if bids and asks: self.feat.feed(dict(arg={**arg, "channel": "books15"}, data=[dict(bids=bids, asks=asks, ts=str(ts))], ts=ts))
+            if bids and asks:
+                self.sim_book(bids, asks)                                # N's book: what the level lost beyond N's prints was cancelled
+                self.feat.feed(dict(arg={**arg, "channel": "books15"}, data=[dict(bids=bids, asks=asks, ts=str(ts))], ts=ts))
             if rows and not fed_rows: self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts))
             if mark: self.feat.feed(dict(arg={**arg, "channel": "ticker"}, data=[dict(markPrice=str(mark))], ts=ts))
             f = self.feat.f; eq = 0.0; held = False
