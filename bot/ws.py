@@ -37,6 +37,13 @@ def portfolio(params):
     b = list((params or {}).get("books") or {})
     return b or [((params or {}).get("strat") or {}).get("symbol")]
 
+def outside_books(params, symbol):
+    """`books`가 있는데 그 심볼이 없으면 포트폴리오 밖 계약이다 — 아무 엔진도 소유하지 않고 지갑 몫도 없다
+    (`wallet_frac`이 공통 기본값 1.0으로 떨어져 지갑 전액으로 사이징한다). 엔진은 시작을 거부하고 감시견은 다시 올리지 않는다.
+    `books`가 없으면 예전 단일 엔진이라 판정하지 않는다."""
+    books = (params or {}).get("books") or {}
+    return bool(books) and symbol not in books
+
 def load_states():
     """엔진마다 logs/state-<SYMBOL>.json 을 쓴다(동시 기록자가 한 파일을 덮어쓰지 않도록). {심볼: 스냅샷}.
     하나도 없으면 예전 단일 logs/state.json 으로 물러선다 — 전환 직후 한 번만 해당된다."""

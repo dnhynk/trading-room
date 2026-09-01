@@ -13,6 +13,14 @@ def tail(path, pos):
             f.seek(pos); lines = f.readlines(); return lines, f.tell()
     except FileNotFoundError: return [], pos
 
+def closed(sym, side=None, realized=None):
+    """청산 직후 한 줄: 그 종목의 방향별 누적 실현손익(UTC 자정 리셋). 종목이 여럿이라 어느 책이 벌었는지 체결 줄만으론 안 보인다."""
+    from bot.ws import load_states
+    bs = ((load_states().get(sym) or {}).get("books") or {})
+    r = {sd: (b.get("realized") or 0.0) for sd, b in bs.items()}
+    if side and realized is not None: r[side] = realized     # 방금 온 체결이 state 저장(5초)보다 빠르다
+    return f"{sym} today " + " / ".join(f"{sd} {v:+.2f}" for sd, v in sorted(r.items())) + f" = {sum(r.values()):+.2f}"
+
 def summary():
     from bot.ws import load_states
     sts = load_states()                                  # 엔진마다 state-<SYMBOL>.json — 포트폴리오면 여럿이다
@@ -48,6 +56,8 @@ while True:
         try: j = json.loads(l)
         except ValueError: continue
         if j.get("ev") in SHOW: print(l.strip()[:300], flush=True)
+        if j.get("symbol") and (j.get("pos_qty") == 0 or (j.get("ev") == "STOP_HIT" and not j.get("partial"))):
+            print("CLOSE " + closed(j["symbol"], j.get("side"), j.get("realized")), flush=True)
     for f in glob.glob(os.path.join(LOGS, "cycle*.log")):   # 새 엔진이 뜨면 그 로그도 자동으로 따라붙는다
         lines, sup[f] = tail(f, sup.get(f, 0))
         for l in lines:

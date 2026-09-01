@@ -134,6 +134,26 @@ class Trims(unittest.TestCase):
         self.assertEqual(r["events"][-1][0], "PULL_TRIM"); self.assertEqual(r["events"][-1][1]["mode"], "retrace"); self.assertEqual(r["trim"][1], 70)
         r = st.step(F(t=104, mid=3.014, bid=3.013, ask=3.015), [], pos); self.assertEqual(r["trim"][2], "taker")   # slipping further: taker at once
 
+    def test_derisk_does_not_take_the_retrace_exit_below_the_gate(self):
+        """RULES derisk: 부분 손절은 **약반등 정체**에서. 되돌림 고점 출구는 게이트 위에서만 — 그 아래에는 고점이 없다.
+        옛 코드는 derisk 게이트(−derisk_pct)를 되돌림 조건에도 써서, 래치가 켜지는 순간 진입가 아래에서 즉시 팔았다."""
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, derisk_pct=3.0, derisk_core_frac=0.5,
+                           pop_min_pct=0.4, step_add_pct=0.5, step_add_atr=0.0))
+        pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(t=100, mid=3.0), [], pos)
+        st.step(F(t=101, mid=3.02, bid=3.019, ask=3.021), [], pos)                       # 고점 +0.67% (게이트 0.4% 위)
+        r = st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [], pos)                   # −1%: 0.5 ATR 넘게 되돌렸고 derisk 무장
+        self.assertTrue(st.derisk_armed); self.assertIsNone(r["trim"])                    # 되돌림만으로는 손실에서 안 판다
+        r = st.step(F(t=103, mid=2.99, bid=2.989, ask=2.991), [dict(sig="POP_STALLING")], pos)
+        self.assertIsNotNone(r["trim"])                                                   # 약반등 정체가 오면 판다(코어 절반)
+        self.assertEqual(r["events"][-1][1]["path"], "stall"); self.assertEqual(r["events"][-1][1]["mode"], "derisk")
+
+    def test_a_normal_retrace_still_labels_its_path(self):
+        st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(t=100, mid=3.0), [], pos); st.step(F(t=101, mid=3.03, bid=3.029, ask=3.031), [], pos)
+        r = st.step(F(t=103, mid=3.019, bid=3.018, ask=3.02), [], pos)
+        self.assertEqual(r["events"][-1][1]["path"], "retrace"); self.assertEqual(r["events"][-1][1]["mode"], "retrace")
+
     def test_retrace_needs_the_peak_above_the_gate(self):
         st = Strategy(dict(side="long", unit_qty=70)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         st.step(F(t=100, mid=3.0), [], pos); st.step(F(t=101, mid=3.008, bid=3.007, ask=3.009), [], pos)      # peak only +0.27% < 0.4% gate

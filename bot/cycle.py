@@ -10,10 +10,13 @@ one entry order resting at the touch while armed, one LIFO trim, one position st
 private `fill` channel (live; every push is a "snapshot", deduped by tradeId) or from public trades crossing our price / exhausting
 the queue ahead of us (dry); each fill re-runs the step immediately, so the opposite side is re-placed at once.
 logs/: state.json (atomic snapshot, every 5s and on change; per-side under "books"), events.jsonl (everything), alerts.jsonl (HALT,
-STOP_HIT, DAILY_LOSS, WS_DOWN/WS_UP, EXTERNAL_FILL, STOP_FAILED, MARGIN_LOCKED, REGIME_CHANGE, SIDE_HINT, PARAMS_INVALID,
+STOP_HIT, DAILY_LOSS, WS_DOWN/WS_UP, EXTERNAL_FILL, STOP_FAILED, STOP_MODIFY_FAIL, STOP_THROUGH, EMERGENCY_CLOSE, MARGIN_LOCKED,
+REGIME_CHANGE, SIDE_HINT, PARAMS_INVALID,
 PARAMS_DEFERRED, STATE_DISCARDED, EMERGENCY_CANCEL_UNCONFIRMED, TAKER_UNCONFIRMED, ERROR, EXIT) for the agent's Monitor. Control files
 in the repo root: STOP (cancel our orders, exit; supervisor stays down while it exists), PAUSE (no new entries while present; trims and
-stops stay), RESUME (clears HALTs; deleted once applied). A symbol/sides/mode or signal-window change while a live book holds a
+stops stay), RESUME (clears HALTs; deleted once applied). `books[sym].wind_down` is the same as PAUSE for one symbol — bot/select.py
+sets it on a book that lost its eligibility, and drops the key once this engine reports flat, which exits the engine too.
+A symbol/sides/mode or signal-window change while a live book holds a
 position or an order is deferred (PARAMS_DEFERRED) until every book is flat; a mode switch discards the previous mode's book state.
 Live mode owns each (symbol, side) exclusively: a position size that differs from our lots for 10s -> HALT (UNOWNED_POSITION when we
 hold nothing, else EXTERNAL_FILL). A close fill the book did not order is a stop hit only when its clientOid is one of our stop plan
@@ -28,13 +31,13 @@ from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
 from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match
-from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS, strat_for, portfolio
+from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS, strat_for, portfolio, outside_books
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 STATE, EVENTS, ALERTS = (os.path.join(LOGS, f) for f in ("state.json", "events.jsonl", "alerts.jsonl"))
 PUB_CH = ("trade", "books15", "candle1m", "ticker")
-ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", "STOP_FAILED", "STOP_MODIFY_FAIL", "MARGIN_LOCKED", "REGIME_CHANGE", "SIDE_HINT", "PARAMS_INVALID",
+ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", "STOP_FAILED", "STOP_MODIFY_FAIL", "STOP_THROUGH", "EMERGENCY_CLOSE", "MARGIN_LOCKED", "REGIME_CHANGE", "SIDE_HINT", "PARAMS_INVALID",
          "PARAMS_DEFERRED", "STATE_DISCARDED", "EMERGENCY_CANCEL_UNCONFIRMED", "TAKER_UNCONFIRMED", "ERROR", "EXIT"}
 QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS", "STOP_LIQ_GUARD"}   # events.jsonl only, not stdout
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
@@ -42,6 +45,16 @@ SLIP = 0.0005          # dry-mode stop-out slippage
 
 
 def rnd(x): return round(x, 6) if isinstance(x, float) else x
+
+def quantize_unit(tgt, cur, qstep):
+    """Round a unit target to whole exchange steps, with a half-step dead zone around the unit we already hold.
+    Plain rounding flaps when one qstep is a large fraction of the unit: ETHUSDT 2026-09-01 sat at 5.5 steps
+    (target 0.0547, qstep 0.01) and SIZING rewrote 0.05 / 0.06 / 0.05 / 0.06 every minute — a 20% swing in unit size
+    and a Monitor line each time. The dead zone (3/4 of a step either way, so half a step wide once rounding is
+    accounted for) is a mechanism constant, not a tunable: anything in (0.5, 1.0) removes the oscillation."""
+    u = max(round(tgt / qstep) * qstep, qstep)
+    if cur and abs(tgt - cur) < 0.75 * qstep: return cur
+    return u
 
 POSITIVE = dict(strat=("unit_qty", "max_units", "max_notional", "cap_usdt", "pop_min_pct", "tick", "qstep", "buy_ttl_s", "confirm_within_s", "wallet_frac"),
                 sig=("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels", "rg_window", "vp_window", "vp_bucket_ticks", "stop_lookback"))
@@ -153,7 +166,8 @@ class Book:
     async def tick(self, sigs):
         f = self.feat.f
         if not f.get("atr") or f.get("bid") is None: return
-        self.pos["pause"] = os.path.exists(os.path.join(ROOT, "PAUSE"))
+        self.pos["pause"] = (os.path.exists(os.path.join(ROOT, "PAUSE")) or bool(self.sp.get("wind_down"))   # wind_down = 이 심볼만의 PAUSE (select가 자격 잃은 책을 flat 으로 몬다)
+                             or bool(self.unmatched_close))   # 정체불명 close 를 분류하는 15초 동안은 담지 않는다 — 그 사이 담은 로트를 나중에 손절 수량이 LIFO 로 지운다
         self.pos["avail"], self.pos["lever"] = (self.cy.acct["avail"] if self.mode == "live" else None), self.lever
         dt = self.feat.daily_trend                                   # against the daily trend: smaller units, never a veto
         self.pos["unit_mult"] = self.sp["against_daily_mult"] if dt and dt != ("up" if self.s > 0 else "down") else 1.0
@@ -199,11 +213,10 @@ class Book:
         # 지갑은 계좌 전체다 — 엔진이 여럿이면 각자 자기 몫만 써야 한다(안 나누면 심볼 수만큼 노출이 배가 된다)
         wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
         if self.sp.get("unit_frac"):
-            u = round(wallet * self.sp["unit_frac"] / mid / self.cy.qstep) * self.cy.qstep
+            tgt = wallet * self.sp["unit_frac"] / mid             # 양자화 전 목표
             cur = self.dyn.get("unit_qty")        # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
-            if cur: u = max(min(u, cur * 1.25), cur * 0.75)   # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛)
-            u = max(round(u / self.cy.qstep) * self.cy.qstep, self.cy.qstep)
-            new["unit_qty"] = round(u, self.cy.vp)
+            if cur: tgt = max(min(tgt, cur * 1.25), cur * 0.75)   # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛)
+            new["unit_qty"] = round(quantize_unit(tgt, cur, self.cy.qstep), self.cy.vp)
         if self.sp.get("cap_frac"): new["cap_usdt"] = round(wallet * self.sp["cap_frac"], 2)
         if self.sp.get("daily_loss_frac"): new["daily_loss_limit"] = round(wallet * self.sp["daily_loss_frac"], 2)
         if self.sp.get("notional_frac"): new["max_notional"] = round(wallet * self.sp["notional_frac"], 2)
@@ -482,6 +495,8 @@ class Book:
         if oid in plans or oid in self.stop_oids or oid in self.stop_hit_oids: await self.on_stop_hit(px, qty, fee, oid=oid); return
         self.unmatched_close.append(dict(t=time.time(), qty=qty, px=px, fee=fee, oid=oid, side=r.get("side")))   # classified when the algo push names it, or after 15s
         self.ev("CLOSE_FILL_PENDING", qty=qty, px=px, oid=oid)
+        w = self.work["buy"]         # 그 사이 새 로트가 생기면 장부와 거래소의 로트가 어긋난다(수량은 같아 불일치 감시가 못 잡는다): 대기 담기를 지금 거둔다
+        if w and not w.get("cancel_pending"): self.ev("ENTRY_CANCEL", why="close fill pending", oid=w["oid"]); await self.cancel("buy"); self.strat.arm = None
 
     async def settle_close_fills(self, plan_oid=None):
         """Close fills whose order the book did not know: a stop hit once the algo channel names their order (identity only — never a
@@ -606,6 +621,8 @@ class Cycle:
         self.maker, self.taker = float(c["makerFeeRate"]), float(c["takerFeeRate"])
         self.sp = sp
         os.makedirs(LOGS, exist_ok=True); self.feat = Features()      # defaults first, so an invalid file can still be reported through ev()
+        if outside_books(self.p, self.symbol):        # books 가 진실이다: 그 밖의 계약은 아무도 소유하지 않고 지갑 몫도 없다(주문 하나 내기 전에 나간다)
+            self.ev("EXIT", why=f"{self.symbol} is not in params.books {sorted(self.p['books'])}"); os._exit(0)
         bad = valid_params(sp, self.p.get("sig") or {})
         if bad or any(sd not in ("long", "short") for sd in self.sides) or len(set(self.sides)) != len(self.sides) or self.mode not in ("dry", "live"):
             self.ev("EXIT", why=f"invalid params at start: {bad or [self.sides, self.mode]}"); os._exit(1)
@@ -840,8 +857,10 @@ class Cycle:
         if bad or any(sd not in ("long", "short") for sd in sides) or len(set(sides)) != len(sides) or sp.get("mode", "dry") not in ("dry", "live") or not isinstance(sp.get("symbol"), str):
             self.ev("PARAMS_INVALID", msg=f"bad keys {bad or [sides, sp.get('mode'), sp.get('symbol')]}; keeping previous"); return
         new = [sp["symbol"], sides, sp.get("mode", "dry")]
+        gone = outside_books(p, sp["symbol"])   # select removed this book (only ever while it is flat), or this engine was never in it: it is done
         stateful = any(sig.get(k, SIG[k]) != self.feat.p[k] for k in STATEFUL)         # EMAs/deques are built at start
-        restart = ("contract", new) if new != [self.symbol, self.sides, self.mode] else (("sig window", {k: sig.get(k, SIG[k]) for k in STATEFUL}) if stateful else None)
+        restart = (("book removed", sp["symbol"]) if gone else ("contract", new) if new != [self.symbol, self.sides, self.mode]
+                   else (("sig window", {k: sig.get(k, SIG[k]) for k in STATEFUL}) if stateful else None))
         if restart:
             if self.mode == "live" and any(pos_stats(bk.pos)[0] or any(bk.work.values()) for bk in self.books.values()):
                 if self.pending_restart != restart: self.pending_restart = restart; self.ev("PARAMS_DEFERRED", msg=f"{restart[0]} change waits until every book is flat with no working order", new=restart[1])

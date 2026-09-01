@@ -2,8 +2,9 @@
 import asyncio, time, unittest
 from types import SimpleNamespace
 from bot.signal import Features, STRAT, book_params
+from bot.ws import load_params
 from bot import cycle
-from bot.cycle import Book, valid_params
+from bot.cycle import Book, valid_params, quantize_unit
 
 class FakeREST:
     """Records calls; answers like Bitget."""
@@ -24,7 +25,7 @@ class StubCy:
     def __init__(self, mode="live"):
         self.sp = {**STRAT, "symbol": "TESTUSDT"}; self.px_tick, self.qstep, self.pp, self.vp = 0.001, 0.1, 3, 1
         self.sides, self.symbol, self.mode = ["long"], "TESTUSDT", mode
-        self.feat = Features(); self.feat.f = dict(t=100, mid=3.0, bid=2.999, ask=3.001, atr=0.02, mark=3.0)
+        self.feat = Features(); self.feat.f = dict(t=100, mid=3.0, bid=2.999, ask=3.001, atr=0.02, atr15=0.02, mark=3.0, brk=False, bko=False)   # Strategy.step 이 대괄호로 읽는 키까지
         self.maker, self.taker, self.acct = 0.0002, 0.0006, dict(avail=100.0, equity=100.0, upl_all=0.0)
         self.events, self.b, self.day = [], FakeREST(), time.strftime("%Y-%m-%d", time.gmtime())
         self.prv = SimpleNamespace(connected=True)
@@ -66,6 +67,21 @@ class StopFills(unittest.TestCase):
         self.assertIsNone(bk.mismatch_since)
         asyncio.run(bk.on_algo(dict(planType="psl", status="executing", orderId="PLAN9", triggerPrice="2.9")))
         self.assertEqual(bk.pos["lots"], []); self.assertEqual(bk.stops_today, 1); self.assertIn("STOP_HIT", kinds(cy))
+
+    def test_an_unclassified_close_fill_freezes_new_entries_until_it_is_named(self):
+        """분류 대기 15초 안에 담기가 체결되면, 뒤늦게 손절로 판정된 수량이 LIFO 로 그 새 로트를 지우고 옛 로트를 남긴다 —
+        거래소는 새 진입가를 들고 장부는 옛 진입가를 든 채 수량만 같아 불일치 감시도 못 잡는다. 그래서 분류될 때까지 담지 않는다."""
+        cy, bk = book(lots=[[70, 3.0, "a"]], stop=dict(px=2.9, order_id="PLAN1"))
+        bk.work["buy"] = dict(oid="cycL-b1", order_id="L2", px=2.95, qty=70, filled=0.0, t=time.time())
+        asyncio.run(bk.on_private_fill(dict(clientOid="PLAN9", tradeSide="close", side="sell"), 70, 2.89, 0.12))
+        self.assertEqual(kinds(cy)[kinds(cy).index("CLOSE_FILL_PENDING")], "CLOSE_FILL_PENDING")
+        self.assertIn(("cancel", "L2"), cy.b.calls); self.assertIsNone(bk.strat.arm)       # 대기 담기는 지금 거둔다
+        asyncio.run(bk.tick([]))
+        self.assertTrue(bk.pos["pause"])                                                   # 그리고 분류될 때까지 PAUSE 다
+        bk.strat.arm = (10 ** 9, 3.0, 70)
+        self.assertIsNone(bk.strat.step(cy.feat.f, [], bk.pos, {})["buy"])                 # PAUSE 면 arm 이 서 있어도 담기 주문은 없다
+        asyncio.run(bk.on_algo(dict(planType="psl", status="executing", orderId="PLAN9", triggerPrice="2.9")))
+        self.assertEqual(bk.unmatched_close, [])                                          # 이름이 붙으면 풀린다(다음 tick 이 pause 를 되돌린다)
 
 class Cancels(unittest.TestCase):
     def test_taker_waits_until_the_maker_cancel_is_confirmed(self):
@@ -178,6 +194,17 @@ class Params(unittest.TestCase):
         for wallet in (150.0, 728.0, 5000.0):
             self.assertAlmostEqual(wallet * bp["notional_frac"], wallet * bp["unit_frac"] * bp["max_units"], 6)
 
+    def test_an_engine_outside_books_is_not_owned_by_anyone(self):
+        """books 가 진실이라 그 밖의 계약은 소유자도 지갑 몫도 없다(wallet_frac 이 공통 기본값 1.0 = 지갑 전액으로 사이징).
+        엔진은 시작을 거부하고(Cycle.__init__), 감시견은 다시 올리지 않는다(supervise.gone)."""
+        from bot.ws import outside_books, strat_for
+        from bot.supervise import gone
+        p = dict(strat=dict(symbol="AUSDT"), books={"AUSDT": dict(wallet_frac=0.5), "BUSDT": dict(wallet_frac=0.5)})
+        self.assertFalse(outside_books(p, "AUSDT")); self.assertTrue(outside_books(p, "CUSDT"))
+        self.assertFalse(outside_books(dict(strat=dict(symbol="AUSDT")), "CUSDT"))     # books 가 없으면 예전 단일 엔진: 판정하지 않는다
+        self.assertEqual(strat_for(p, "CUSDT").get("wallet_frac"), 1.0)                # 거부하지 않으면 이 값으로 주문이 나간다
+        self.assertTrue(gone("CUSDT") if (load_params() or {}).get("books") and "CUSDT" not in load_params()["books"] else True)
+
     def test_a_portfolio_gives_each_engine_its_own_strat_and_wallet_share(self):
         """params["books"] 가 있으면 심볼마다 엔진 하나. 공통 strat 위에 그 심볼의 몫만 덮고, 지갑은 wallet_frac 으로 나눈다 —
         안 나누면 두 엔진이 각자 계좌 전액으로 사이징해 노출이 심볼 수만큼 배가 된다 (NEXT 8)."""
@@ -218,6 +245,26 @@ class Params(unittest.TestCase):
         bk.load(dict(mode="dry", day=cy.day, books=dict(long=dict(pos=dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", halt="DAILY_LOSS"), realized=-50, stops_today=2, sizing=dict(unit_qty=90)))))
         self.assertEqual(bk.pos["lots"], []); self.assertEqual(bk.realized, 0.0); self.assertEqual(bk.stops_today, 0); self.assertIsNone(bk.pos["halt"]); self.assertEqual(bk.dyn, {})
         self.assertEqual(kinds(cy)[-1], "STATE_DISCARDED")
+
+
+class Sizing(unittest.TestCase):
+    def test_a_coarse_qstep_unit_does_not_flap_at_the_rounding_boundary(self):
+        # ETHUSDT 2026-09-01: 목표 0.0547 에 qstep 0.01 = 5.5 단계. 순수 반올림은 mid 가 조금만 움직여도
+        # 0.05 / 0.06 을 매분 오갔다(유닛 20% 진동 + SIZING 알림 폭주).
+        self.assertAlmostEqual(quantize_unit(0.0547, None, 0.01), 0.05)          # 첫 사이징: 그냥 반올림
+        for tgt in (0.0547, 0.0551, 0.0574):
+            self.assertAlmostEqual(quantize_unit(tgt, 0.05, 0.01), 0.05)         # 죽은 구간 안이면 안 움직인다
+        self.assertAlmostEqual(quantize_unit(0.0576, 0.05, 0.01), 0.06)          # 3/4 단계를 넘으면 움직인다
+        self.assertAlmostEqual(quantize_unit(0.0424, 0.05, 0.01), 0.04)          # 아래쪽도 대칭
+
+    def test_a_fine_qstep_symbol_keeps_its_old_behaviour(self):
+        # ZECUSDT: 유닛 0.156 에 qstep 0.001 = 156 단계. 죽은 구간이 유닛의 0.5% 라 기존 2% 기록 문턱보다 촘촘하다.
+        self.assertAlmostEqual(quantize_unit(0.1565, 0.156, 0.001), 0.156)
+        self.assertAlmostEqual(quantize_unit(0.1571, 0.156, 0.001), 0.157)
+        self.assertAlmostEqual(quantize_unit(0.1580, 0.156, 0.001), 0.158)
+
+    def test_the_unit_is_never_smaller_than_one_step(self):
+        self.assertAlmostEqual(quantize_unit(0.0004, None, 0.01), 0.01)
 
 if __name__ == "__main__":
     unittest.main()

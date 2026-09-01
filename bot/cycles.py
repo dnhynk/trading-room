@@ -40,7 +40,7 @@ def _close(lots, done, side, s, qty, px, fee, t, why):
             exitp = lot["out_val"] / lot["qty0"]
             gross = (exitp - entry) * lot["qty0"] * s
             fees = lot["fee_in"] + lot["fee_out"]
-            done.append(dict(side=side, t0=lot["t0"], t1=lot["t1"], hold=_secs(lot["t0"], lot["t1"]),
+            done.append(dict(symbol=lot["sym"], side=side, t0=lot["t0"], t1=lot["t1"], hold=_secs(lot["t0"], lot["t1"]),
                              qty=lot["qty0"], entry=entry, exit=exitp, gross=gross, fee=fees,
                              net=gross - fees, why=lot["why"], depth=lot["depth"]))
             lots.pop()
@@ -48,32 +48,36 @@ def _close(lots, done, side, s, qty, px, fee, t, why):
 
 
 def build(since=LIVE, only=None, sym=None):
-    books, done, orphan, eng = {}, [], 0.0, {}
+    books, done, orphan, eng, cur = {}, [], 0.0, {}, None
     with open(LOG, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            if '"ev": "FILL"' not in line and '"ev": "STOP_HIT"' not in line:
+            if '"ev": "FILL"' not in line and '"ev": "STOP_HIT"' not in line and '"ev": "START"' not in line:
                 continue
             try:
                 d = json.loads(line)
             except Exception:
                 continue
             ev, t = d.get("ev"), d.get("t", "")
+            if ev == "START":                      # 체결 이벤트에 symbol 이 붙기 전(2026-09-01 17:30 이전) 장부의 귀속처.
+                cur = d.get("symbol") or cur       # START 는 전 기간 symbol 을 담고, 그때는 엔진이 하나였다.
+                continue
             if ev not in ("FILL", "STOP_HIT") or t < since:
                 continue
             side = d.get("side") or "long"
             if only and side != only:
                 continue
-            if sym and d.get("symbol") not in (None, sym):   # 엔진이 여럿이면 심볼로 가른다(옛 이벤트엔 symbol 이 없다)
+            esym = d.get("symbol") or cur          # 태그가 없으면 직전 START 의 심볼. 없는 것을 모든 심볼에 흘리면
+            if sym and esym != sym:                # ZECUSDT 로 필터해도 TRUMPUSDT 장부가 통째로 딸려온다(2026-09-01)
                 continue
             if "realized" in d:
-                eng[side] = d["realized"]          # 엔진이 찍은 누적 실현손익(당일 기준) — 검산용
-            lots = books.setdefault(side, [])
+                eng[f"{esym}/{side}"] = d["realized"]          # 엔진이 찍은 누적 실현손익(당일 기준) — 검산용
+            lots = books.setdefault((esym, side), [])          # 로트 책은 (심볼, 방향)마다 — 안 가르면 한 심볼의 덜기가 다른 심볼의 로트를 LIFO 로 먹는다
             s = 1 if side == "long" else -1
             if ev == "FILL" and d.get("role") == "buy":
                 oid = d.get("oid")
                 lot = next((l for l in lots if l["oid"] == oid), None)
                 if lot is None:
-                    lot = dict(oid=oid, qty=0.0, qty0=0.0, cost0=0.0, fee_in=0.0,
+                    lot = dict(oid=oid, sym=esym, qty=0.0, qty0=0.0, cost0=0.0, fee_in=0.0,
                                out_val=0.0, fee_out=0.0, t0=t, t1=t, why="", depth=len(lots) + 1)
                     lots.append(lot)
                 lot["qty"] += d["qty"]; lot["qty0"] += d["qty"]
@@ -90,9 +94,9 @@ def build(since=LIVE, only=None, sym=None):
 def report(done, books, orphan, eng, top=20, csv=None):
     if csv:
         with open(csv, "w", encoding="utf-8") as fh:
-            fh.write("side,t0,t1,hold_s,qty,entry,exit,gross,fee,net,why,depth\n")
+            fh.write("symbol,side,t0,t1,hold_s,qty,entry,exit,gross,fee,net,why,depth\n")
             for c in done:
-                fh.write(f"{c['side']},{c['t0']},{c['t1']},{c['hold']:.0f},{c['qty']:.1f},"
+                fh.write(f"{c.get('symbol')},{c['side']},{c['t0']},{c['t1']},{c['hold']:.0f},{c['qty']:.1f},"
                          f"{c['entry']:.4f},{c['exit']:.4f},{c['gross']:.4f},{c['fee']:.4f},"
                          f"{c['net']:.4f},{c['why']},{c['depth']}\n")
         print(f"csv -> {csv}")
@@ -122,7 +126,14 @@ def report(done, books, orphan, eng, top=20, csv=None):
             print(f"        이익 사이클 {sum(1 for n in net if n > 0):3d}개 {pos:+8.3f} / "
                   f"손실 사이클 {sum(1 for n in net if n < 0):3d}개 {neg:+8.3f}"
                   f"  (수수료 {fee:.3f} 포함)")
-    left = {k: round(sum(l['qty'] for l in v), 1) for k, v in books.items() if v}
+    g = [(c["gross"] / (c["qty"] * c["entry"]) * 100, c["fee"] / (c["qty"] * c["entry"]) * 100, c["net"]) for c in done if c["qty"] and c["entry"]]
+    if g:      # 엔진 기하 — bot/scan.py EDGE 의 출처. 명목가 대비 %라 종목이 섞여도 더할 수 있다
+        avg = lambda xs: sum(xs) / len(xs) if xs else 0.0
+        W = avg([a for a, _, n in g if n > 0]); L = abs(avg([a for a, _, n in g if n <= 0])); F = avg([b for _, b, _ in g])
+        pw = sum(1 for _, _, n in g if n > 0) / len(g)
+        print(f"\n엔진 기하 (bot/scan.py EDGE 에 넣는 값, n={len(g)}): win_pct {W:.3f}  loss_pct {L:.3f}  fee_pct {F:.4f}"
+              f"  | 손익분기 승률 {(L + F) / (W + L):.3f} vs 실측 {pw:.3f}  → 사이클당 {pw * W - (1 - pw) * L - F:+.4f}%")
+    left = {f"{k[0]}/{k[1]}" if isinstance(k, tuple) else k: round(sum(l['qty'] for l in v), 1) for k, v in books.items() if v}
     print(f"\n미완결 로트 {left or '없음'} | 로트에 못 붙인 청산 수량 {orphan:.1f}")
     print(f"검산: 사이클 순손익 합 {sum(c['net'] for c in done):+.3f} "
           f"(엔진 누적 실현손익은 UTC 일자마다 0으로 리셋되므로 직접 비교 불가; "

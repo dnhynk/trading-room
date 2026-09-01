@@ -7,11 +7,13 @@
   python -m bot.trade limit long|short SIZE PRICE [--close]      # post-only maker order (entry, or --close to reduce)
   python -m bot.trade tp long|short PRICE                        # replace TP with post-only limit close of whole position
   python -m bot.trade cancel all|ORDER_ID                        # cancel pending limit orders
-Every action appends one JSON line to logs/trades.jsonl."""
+Every action appends one JSON line to logs/trades.jsonl.
+--sym 을 안 주면 `params.json` 의 `strat.symbol` 인데, 포트폴리오에서는 그게 books 넷 중 하나일 뿐이다. 엔진이 배타 소유하는
+(심볼, 방향)을 건드리는 명령에는 실행 전에 WARN 을 한 줄 찍는다 — 막지는 않는다(이 파일은 사용자의 손이다)."""
 import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
-from bot.ws import load_params
+from bot.ws import load_params, load_states, portfolio, strat_for
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(ROOT, "logs", "trades.jsonl")
@@ -24,6 +26,23 @@ def log(**kw):
 
 def arg(flag, default=None):
     return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else default
+
+def owned_sides(p, sym):
+    """엔진이 배타 소유하는 그 심볼의 방향들(live 인 books 의 심볼만). 여기 손대면 장부와 거래소가 갈라진다."""
+    if sym not in portfolio(p): return []
+    sp = strat_for(p, sym)
+    return list(sp.get("sides") or [sp.get("side")]) if sp.get("mode", "dry") == "live" else []
+
+def warn_owned(p, sym, hold):
+    """소유 책을 변형하려는 명령에 한 줄 경고. 엔진의 담기/덜기/스탑과 겹치면 EXTERNAL_FILL HALT 나 무보호 구간이 생긴다."""
+    own = owned_sides(p, sym)
+    hit = own if hold is None else ([hold] if hold in own else [])
+    if not hit: return
+    books = ((load_states().get(sym) or {}).get("books") or {})
+    now = ", ".join(f"{sd} qty={((books.get(sd) or {}).get('pos') or {}).get('qty')}" for sd in hit)
+    print(f"WARN {sym} {'/'.join(hit)} 은 엔진이 배타 소유하는 책이다 ({now}) — 여기서 수동으로 청산/주문/스탑을 건드리면 "
+          f"장부와 거래소가 갈라져 EXTERNAL_FILL HALT 나 무보호 구간이 된다. 담기만 멈추려면 PAUSE 파일이나 books[{sym}].wind_down, "
+          f"전부 세우려면 STOP 파일. 그래도 진행한다.", flush=True)
 
 def status(b):
     a = b.account(S); t = b.ticker(S)
@@ -66,7 +85,8 @@ def main():
     cmd = sys.argv[1]; print(f"symbol={S}")
     if cmd == "status": return status(b)
     side = sys.argv[2]; hold = side; order_side = "buy" if side == "long" else "sell"
-    if cmd == "cancel": side = hold = order_side = None
+    if cmd == "cancel": side = hold = order_side = None          # 대상이 방향이 아니라 주문이라 그 심볼의 소유 방향 전부를 경고한다
+    warn_owned(load_params() or {}, S, hold)
     if cmd in ("open", "add"):
         size = sys.argv[3]; sl, tp = arg("--sl"), arg("--tp")
         preset = cmd == "open" and (sl or tp)                   # the entry carries its stop: protected from the first fill, no window for a network error to widen

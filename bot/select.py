@@ -1,21 +1,35 @@
-"""Automatic symbol selection for the engine.  python -m bot.supervise select   (python -m bot.select [--once] [--dry])
-Every select.every_h hours (and at start) the universe is scanned (bot.scan.rank: the concept metrics and the candle-level engine proxy
-over select.days windows) and logs/scan.json is rewritten. A switch happens only when ALL of these hold:
-  - the engine is flat: no lots, no working order, no pull, state.json younger than 60 s;
-  - the best unflagged candidate's concept >= select.ratio x the incumbent's concept; concept is a product of non-negative terms, so
-    the multiplier is always a real hurdle. When the incumbent is flagged (one-way now, pump shape, funding, tick) the ratio is 1.
-    The candle proxy is reported (scan.json, the SELECT event, the recorded set) but never decides: it scores the live symbol
-    negative in 12 of 18 scans, so a proxy gate cannot choose the symbol the engine is profitably trading (RULES 도구 절);
-  - the same candidate has qualified in select.confirm consecutive scans (hysteresis: yesterday's chop does not win a switch);
-  - the incumbent has been held >= select.dwell_h hours (waived when it is flagged) and fewer than select.max_per_day switches today;
-  - the candidate is not in select.exclude (BTC at low capital, CONCEPT).
-The switch rewrites params.json atomically: strat.symbol, strat.side = the candidate's 1H structure side (long when unclear) and
-strat.sides = both sides when the incumbent runs 쌍검 (else [side]),
-record = the new symbol + the top select.record_top unflagged candidates (concept order) + whichever candidate the proxy ranks
-first, all with full channels so the real tick backtest can keep validating the proxy, + BTCUSDT candles. The recorder re-subscribes on the file change; the engine restarts on the symbol change (it is
-flat; its ledger for the new symbol starts fresh). Every scan also refreshes the recorded candidate set (a record-only rewrite: the
-engine reloads without restarting). Events: SELECT (every scan's verdict) in logs/events.jsonl, SYMBOL_SWITCH also in logs/alerts.jsonl.
-State (dwell start, streak, switches today) in logs/select-state.json. --once runs one scan; --dry never writes params or state."""
+"""Basket manager for the engine.  python -m bot.supervise select   (python -m bot.select [--once] [--dry])
+Every select.every_h hours (and at start) `bot.scan.rank` scores the universe, logs/scan.json is rewritten, and `params.json["books"]`
+is brought toward the target basket of `select.n` symbols. One engine per book (bot/supervise.py `cycle`), equal weight
+(`wallet_frac` = 1/n on every book, so the sum never exceeds one wallet even mid-change).
+
+WHAT DECIDES WHAT (2026-09-01, after 4 days of live results were compared against a backtest instead of against each other):
+  - A book LEAVES only on a fact — a hard flag from the scan: 24h volume under the gate, imp% >= fee%, tick, spread, funding, pump
+    shape, one-way now. Never because something else scored higher today. No offline ranker is validated at this sample size: the
+    candle proxy inverted the tick engine's order 4 times out of 4, the tick backtest's own noise is 3x the difference it was asked
+    to measure, and the current score's p_up is measured against live to be low and four times too flat (RULES 도구 절). A rank-based
+    replacement rule is what a 1.5x `concept` hurdle was, and that ranking had no cost term at all.
+  - A book ENTERS on the score, which is only ever used to ORDER the eligible set: the top entry-eligible candidates fill free slots,
+    after `select.confirm` consecutive scans (hysteresis) and within `select.max_per_day` openings a day. The score's own gate is
+    soft — a pessimistic estimator may keep us out of a symbol and must never push us out of one.
+  - RANKING BETWEEN HELD SYMBOLS is live evidence only, and there is not enough of it yet: the exit rule for a symbol that simply
+    earns less than its neighbours is the open item, and its unit is per-symbol live results (NEXT 8), never a backtest.
+Holding n symbols instead of one is what makes that discipline affordable: the wallet splits n ways so imp% falls with sqrt(n), a bad
+pick costs 1/n of the book instead of all of it, and every day produces n paired same-clock observations of the one comparison that
+is allowed — live against live.
+
+WIND-DOWN. A flagged book is not closed at market; 순환매 sells into a stall (CONCEPT). `books[sym]["wind_down"] = 1` stops new
+entries (cycle.py treats it as a per-symbol PAUSE), trims and stops keep working, and the key is removed once that engine reports
+flat — at which point its engine exits by itself (cycle.py: a pinned symbol that left `books` is a contract change) and the slot is
+free. `books` never becomes empty: the last book stays, wound down, rather than falling back to whole-wallet sizing on strat.symbol.
+
+Also written by this job: `strat.symbol` (the highest-ranked held symbol — the default for bot.trade and for an unpinned engine),
+`strat.side` (that symbol's 1H structure, a record; 쌍검 `sides` is preserved), and `record` = every book + the top
+`select.record_top` unflagged candidates + `select.record_extra` (a watchlist, recorded whatever its flags say, never traded here)
++ BTCUSDT candles. Everything else in params.json belongs to the person.
+Events: SELECT (every scan's verdict) in logs/events.jsonl; BOOK_ADD / BOOK_WIND_DOWN / BOOK_DROP also in logs/alerts.jsonl.
+State (add streaks, openings today) in logs/select-state.json. --once runs one scan; --dry scans and decides, and writes only the
+report (logs/scan.json) — never params.json or the state."""
 import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.scan import rank
@@ -23,7 +37,7 @@ from bot.ws import load_params, PARAMS, load_states, portfolio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
-SELECT = dict(every_h=4, ratio=1.5, confirm=2, dwell_h=24, max_per_day=1, record_top=5, min_vol=5e7, days=3, exclude=["BTCUSDT"], record_extra=[])
+SELECT = dict(every_h=4, n=4, confirm=2, max_per_day=2, record_top=5, min_vol=5e7, days=3, exclude=["BTCUSDT"], record_extra=[])
 CHANNELS = ["trade", "books15", "ticker", "candle1m"]
 
 def log(s): print(time.strftime("%Y-%m-%d %H:%M:%S ") + s, flush=True)
@@ -46,94 +60,107 @@ def ev(kind, alert=False, **kw):
         with open(os.path.join(LOGS, "alerts.jsonl"), "a", encoding="utf-8") as f: f.write(line + "\n")
     log(line[:300])
 
-def engine_flat(state, now):
-    """The engine holds nothing and rests nothing, and the snapshot is fresh (an engine that is down is not 'flat').
-    `state` may be one engine's snapshot or {symbol: snapshot} — every engine must be flat before a switch."""
-    try:
-        sts = list(state.values()) if state and "t" not in state else [state]
-        if not sts or not sts[0]: return False
-        for s in sts:
+def flat_of(states, now):
+    """{symbol: True} for each engine that holds nothing, rests nothing and wrote its snapshot within 60 s. An engine that is down is
+    not flat — its position is unobserved, and a book is only removed on an observation."""
+    out = {}
+    for sym, s in (states or {}).items():
+        try:
             age = now - time.mktime(time.strptime(s["t"], "%Y-%m-%d %H:%M:%S"))
             books = s.get("books") or {s.get("side", "?"): s}
-            if not (age < 60 and all(not b["pos"]["lots"] and not b["working"]["buy"] and not b["working"]["trim"] and not b.get("pull") for b in books.values())): return False
-        return True
-    except Exception: return False
+            out[sym] = age < 60 and all(not b["pos"]["lots"] and not b["working"]["buy"] and not b["working"]["trim"] and not b.get("pull")
+                                        for b in books.values())
+        except Exception: out[sym] = False
+    return out
 
-def record_dict(symbol, rows, sel):
-    """The incumbent + the top record_top candidates (concept order) + whichever candidate the proxy ranks first (so the tick
-    backtest keeps a tape for the metric that no longer decides — the proxy stays under validation, RULES 도구 절)."""
-    ok = [r for r in rows if not r["flags"] and r["symbol"] != symbol and r["symbol"] not in sel["exclude"]]
-    rec = {symbol: CHANNELS}
+def record_dict(held, rows, sel):
+    """Full channels for every book plus the top unflagged candidates — a symbol has a tape before it is ever traded, and a symbol we
+    dropped keeps one. `record_extra` is a watchlist: recorded whatever its flags say, never a candidate here."""
+    rec = {s: CHANNELS for s in held}
+    ok = [r for r in rows if not r["flags"] and r["symbol"] not in rec and r["symbol"] not in sel["exclude"]]
     for r in ok[:int(sel["record_top"])]: rec[r["symbol"]] = CHANNELS
-    if ok: rec.setdefault(max(ok, key=lambda r: r["proxy"])["symbol"], CHANNELS)
-    for x in sel.get("record_extra") or []: rec.setdefault(x, CHANNELS)      # watchlist: recorded regardless of flags (evidence, never traded by select)
+    for x in sel.get("record_extra") or []: rec.setdefault(x, CHANNELS)
     rec["BTCUSDT"] = ["candle1m"]
     return rec
 
-def decide(rows, incumbent, sel, st, flat, today, now):
-    """Pure verdict: ('keep'|'wait'|'switch', why, candidate row or None). Mutates st['streak']."""
-    by = {r["symbol"]: r for r in rows}; inc = by.get(incumbent)
-    ok = [r for r in rows if not r["flags"] and r["symbol"] != incumbent and r["symbol"] not in sel["exclude"]]
-    if not ok: st["streak"] = {}; return "keep", "no unflagged candidate", None
-    best = ok[0]
-    if inc is None:                                                  # a switch is a comparison: with no numbers for the symbol being
-        st["streak"] = {}                                            # traded there is nothing to compare, and absence is not evidence
-        return "keep", f"{incumbent} missing from the scan - no comparison", best
-    inc_flagged = bool(inc["flags"])
-    ratio = 1.0 if inc_flagged else sel["ratio"]; inc_proxy, inc_concept = inc["proxy"], inc["concept"]
-    qualifies = best["concept"] > 0 and best["concept"] >= ratio * inc_concept
-    n = st.get("streak", {}).get(best["symbol"], 0) + 1 if qualifies else 0
-    st["streak"] = {best["symbol"]: n} if qualifies else {}
-    head = f"{best['symbol']} concept {best['concept']:.2f} vs {incumbent} {inc_concept:.2f} (proxy {best['proxy']:.2f} vs {inc_proxy:.2f}, reported only)"
-    if not qualifies: return "keep", head + f" (needs concept x{ratio:.1f})", best
-    if n < sel["confirm"]: return "keep", head + f" qualifies {n}/{int(sel['confirm'])}", best
-    if not inc_flagged and now - st.get("since", 0) < sel["dwell_h"] * 3600: return "keep", head + f" confirmed; dwell {(now - st.get('since', 0)) / 3600:.1f}h < {sel['dwell_h']}h", best
-    if st.get("switch_day") == today and st.get("switches", 0) >= sel["max_per_day"]: return "keep", head + " confirmed; already switched today", best
-    if not flat: return "wait", head + " confirmed; engine not flat", best
-    return "switch", head + (" (incumbent flagged)" if inc_flagged else ""), best
+def plan(rows, held, sel, st, today):
+    """Pure verdict: (wind, adds, why). `wind` = [(symbol, why)] holdings that must leave, `adds` = symbols to open now, in order and
+    at most the number of free slots. Mutates st['streak'] (the add hysteresis).
+    A holding missing from the scan is kept: absence is not evidence. A holding with a flag leaves whatever its rank — that
+    asymmetry is the whole point (2026-09-01: the incumbent was exempted from the volume gate and traded 12 more hours at
+    -0.140%/cycle)."""
+    by = {r["symbol"]: r for r in rows}
+    n = max(int(sel["n"]), 1); why = []; wind = []
+    for s in held:
+        r = by.get(s)
+        if r is None: why.append(f"{s} not in the scan: kept")
+        elif r["flags"]: wind.append((s, " ".join(r["flags"])))
+    free = n - len(held)
+    cand = [r for r in rows if not r["flags"] and r.get("entry") and r["symbol"] not in held and r["symbol"] not in sel["exclude"]]
+    top = [r["symbol"] for r in cand[:max(free, 0)]]
+    st["streak"] = {s: st.get("streak", {}).get(s, 0) + 1 for s in top}          # a streak survives only while the symbol stays in the top slots
+    left = int(sel["max_per_day"]) - (st.get("opens", 0) if st.get("day") == today else 0)
+    adds = [s for s in top if st["streak"][s] >= int(sel["confirm"])][:max(left, 0)]
+    if free <= 0: why.append(f"basket full {len(held)}/{n}")
+    elif not cand: why.append(f"{free} free slot(s), no entry-eligible candidate")
+    else: why.append(f"{free} free slot(s); " + ", ".join(f"{r['symbol']} {r['edge']:+.3f} ({st['streak'].get(r['symbol'], 0)}/{int(sel['confirm'])})" for r in cand[:4]))
+    if adds and left <= 0: why.append(f"{sel['max_per_day']} openings already today")
+    return wind, adds, "; ".join(why)
 
-def switch(p, best, rows, sel):
-    sp = p["strat"]; side = best.get("side") if best.get("side") in ("long", "short") else "long"
-    dual = len(sp.get("sides") or []) > 1                                    # 쌍검 stays 쌍검 across a switch (user decision 2026-08-30); the structure side is the record only
-    sp["symbol"], sp["side"], sp["sides"] = best["symbol"], side, (["long", "short"] if dual else [side])
-    p["record"] = record_dict(best["symbol"], rows, sel)
-    write_json(PARAMS, p, indent=2)
-    return side
+def apply(p, rows, wind, adds, flats, sel):
+    """Bring params.json to the planned basket. Returns [(action, symbol, detail)] — nothing is written by this function."""
+    by = {r["symbol"]: r for r in rows}; n = max(int(sel["n"]), 1); acts = []
+    sp = p.setdefault("strat", {})
+    books = p.get("books")
+    if not books: books = {sp.get("symbol"): {}} if sp.get("symbol") else {}      # first run in basket mode: the running symbol becomes book one
+    for s, w in wind:
+        if not books.get(s, {}).get("wind_down"): books.setdefault(s, {})["wind_down"] = 1; acts.append(("wind", s, w))
+    for s in [s for s in books if books[s].get("wind_down") and flats.get(s)]:
+        if len(books) > 1 or adds: del books[s]; acts.append(("drop", s, "flat"))   # never ends empty: the last book stays, wound down, unless a replacement opens now
+    for s in adds:
+        if len(books) < n and s not in books: books[s] = {}; acts.append(("add", s, f"edge {by[s]['edge']:+.3f} p_up {by[s]['p_up']:.2f} imp {by[s]['impact']:.4f}"))
+    for s in books: books[s]["wallet_frac"] = round(1.0 / n, 6)                   # 1/n, not 1/len(books): the sum stays <= 1 while a slot is empty
+    if books: p["books"] = books                                                  # an empty books would send ws.portfolio() back to whole-wallet strat.symbol
+    held = list(books)
+    if sp.get("symbol") not in held and held:                                     # the default symbol for bot.trade and for an unpinned engine
+        first = next((r["symbol"] for r in rows if r["symbol"] in held), held[0])
+        sp["symbol"] = first
+        if (by.get(first) or {}).get("side") in ("long", "short"): sp["side"] = by[first]["side"]
+    p["record"] = record_dict(held, rows, sel)
+    return acts
 
 def main():
     once, dry = "--once" in sys.argv, "--dry" in sys.argv
     while True:
         p = load_params() or {}; sel = {**SELECT, **(p.get("select") or {})}
-        incumbent = (p.get("strat") or {}).get("symbol")
-        t0 = time.time()
-        state = load_states()                                  # 엔진마다 state-<SYMBOL>.json (포트폴리오면 여럿)
+        held = [s for s in portfolio(p) if s]
+        t0 = time.time(); states = load_states()
+        eq = next((((s.get("acct") or {}).get("equity")) for s in states.values() if (s.get("acct") or {}).get("equity")), None)
         try: rows = rank(min_vol=sel["min_vol"], days=int(sel["days"]), exclude=sel["exclude"], log=log,
-                         always=(incumbent,) if incumbent else (),    # the traded symbol is measured even below the volume gate
-                         equity=((list(state.values())[0].get("acct") if state else None) or {}).get("equity"))   # 보고용 impact 를 실제 지갑에 맞춘다
+                         always=tuple(held),               # a held symbol is always measured, and never exempted from a gate by it
+                         equity=eq, n_books=int(sel["n"]), edge=sel.get("edge"))
         except Exception as e: log(f"scan failed: {type(e).__name__}: {e}"); rows = None
-        if rows and incumbent and len(portfolio(p)) > 1:
-            write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], rows=rows))
-            ev("SELECT", action="keep", why=f"portfolio of {len(portfolio(p))} symbols: select does not own strat.symbol; allocation is a human decision (NEXT 8)",
-               incumbent=incumbent, flat=None, took_s=int(time.time() - t0),
-               top=[[r["symbol"], round(r["proxy"], 2), round(r["concept"], 2), r["side"], round(r.get("impact", 0.0), 4)] for r in rows[:5]])
-        elif rows and incumbent:
+        if rows:
             os.makedirs(LOGS, exist_ok=True)
             write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], rows=rows))
             now = time.time(); today = time.strftime("%Y%m%d", time.gmtime(now))
             st = read_json(os.path.join(LOGS, "select-state.json"), {})
-            if st.get("symbol") != incumbent: st.update(symbol=incumbent, since=now, streak={})   # the dwell clock starts when a symbol is first seen
-            flat = engine_flat(state, now)
-            action, why, best = decide(rows, incumbent, sel, st, flat, today, now)
-            ev("SELECT", action=action, why=why, incumbent=incumbent, flat=flat, took_s=int(time.time() - t0),
-               top=[[r["symbol"], round(r["proxy"], 2), round(r["concept"], 2), r["side"], round(r.get("impact", 0.0), 4)] for r in rows[:5]])
-            if action == "switch" and not dry:
-                side = switch(p, best, rows, sel)
-                st.update(symbol=best["symbol"], since=now, switch_day=today, switches=(st.get("switches", 0) + 1) if st.get("switch_day") == today else 1, streak={})
-                ev("SYMBOL_SWITCH", alert=True, frm=incumbent, to=best["symbol"], side=side, proxy=round(best["proxy"], 2), concept=round(best["concept"], 2), why=why)
-            elif not dry:
-                rec = record_dict(incumbent, rows, sel)
-                if rec != p.get("record"): p["record"] = rec; write_json(PARAMS, p, indent=2); ev("RECORD_SET", symbols=list(rec))
-            if not dry: write_json(os.path.join(LOGS, "select-state.json"), st)
+            if st.get("day") != today: st["day"], st["opens"] = today, 0
+            flats = flat_of(states, now)
+            wind, adds, why = plan(rows, held, sel, st, today)
+            ev("SELECT", n=int(sel["n"]), held=held, flat=flats, wind=[s for s, _ in wind], adds=adds, why=why, took_s=int(time.time() - t0),
+               top=[[r["symbol"], round(r["edge"], 3), round(r["p_up"], 2), round(r["trials_h"], 2), round(r["impact"], 4), bool(r.get("entry")), r["side"]]
+                    for r in rows[:6]])
+            if not dry:
+                before, rec0 = json.dumps(p, sort_keys=True), set(p.get("record") or {})
+                acts = apply(p, rows, wind, adds, flats, sel)
+                if json.dumps(p, sort_keys=True) != before: write_json(PARAMS, p, indent=2)
+                for kind, sym, detail in acts:
+                    if kind == "add": st["opens"] = st.get("opens", 0) + 1; st["streak"] = {}
+                    ev({"add": "BOOK_ADD", "wind": "BOOK_WIND_DOWN", "drop": "BOOK_DROP"}[kind], alert=True, symbol=sym, why=detail,
+                       books=list(p.get("books") or {}))
+                if not acts and set(p.get("record") or {}) != rec0: ev("RECORD_SET", symbols=list(p.get("record") or {}))
+                write_json(os.path.join(LOGS, "select-state.json"), st)
         if once: break
         time.sleep(max(60, sel["every_h"] * 3600 - (time.time() - t0)))
 

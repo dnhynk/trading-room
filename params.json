@@ -1,24 +1,6 @@
 {
   "record": {
-    "TRUMPUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "SUIUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
     "ZECUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "DOGEUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -30,7 +12,43 @@
       "ticker",
       "candle1m"
     ],
-    "XRPUSDT": [
+    "ETHUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "XAGUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SPCXUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "DOGEUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SOLUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "XAUUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SUIUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -47,7 +65,7 @@
     ]
   },
   "strat": {
-    "symbol": "TRUMPUSDT",
+    "symbol": "HYPEUSDT",
     "side": "long",
     "sides": [
       "long",
@@ -96,11 +114,17 @@
     "derisk_on_against": 0
   },
   "books": {
-    "TRUMPUSDT": {
-      "wallet_frac": 0.5
-    },
     "ZECUSDT": {
-      "wallet_frac": 0.5
+      "wallet_frac": 0.25
+    },
+    "HYPEUSDT": {
+      "wallet_frac": 0.25
+    },
+    "ETHUSDT": {
+      "wallet_frac": 0.25
+    },
+    "XAGUSDT": {
+      "wallet_frac": 0.25
     }
   },
   "sig": {
@@ -142,10 +166,9 @@
   },
   "select": {
     "every_h": 4,
-    "ratio": 1.5,
+    "n": 4,
     "confirm": 2,
-    "dwell_h": 24,
-    "max_per_day": 1,
+    "max_per_day": 2,
     "record_top": 5,
     "min_vol": 50000000,
     "days": 3,

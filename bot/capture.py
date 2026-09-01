@@ -8,12 +8,13 @@ Position timeline from logs/events.jsonl (FILL pos_qty, STOP_HIT, START snapshot
   in_mkt       minutes held / minutes
 A long book that captures up-legs more than down-legs is on the right side of the drift; one that holds through the down-legs
 and sits out the up-legs (adds at decelerations, cut on the way up) is paying for its cycles with the direction's money.
+A short book reads inverted (down held is its favourable side). 쌍검이면 책마다 한 줄이다 — 한 방향만 재면 절반만 보인다.
 This is the measurement behind the "cycle = average adjustment, direction = the money" concept (2026-08-30) — evidence for a
 cycle-scale FAVOR rule (core held with a trailing stop), never a rule by itself."""
 import glob, gzip, json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.signal import zigzag_pivots, wilder_atr
-from bot.ws import load_params
+from bot.ws import load_params, portfolio, strat_for
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
@@ -35,9 +36,10 @@ def candles_of(day, sym):
     rows = [c[k] for k in sorted(c) if k // 86_400_000 == d0]
     return rows[:-1]     # the last row is the candle still open when the recording ended
 
-def timeline(day, sym):
-    """[(epoch_s, qty)] of the live book from events.jsonl, in time order (the first entry is the qty at the start of the day)."""
-    out, qty = [], 0.0
+def timeline(day, sym, side="long"):
+    """[(epoch_s, qty)] of one (symbol, side) book from events.jsonl, in time order (the first entry is the qty at the start of
+    the day). 엔진이 여럿이면 한 파일에 심볼이 섞이므로 심볼과 방향으로 가른다 — 안 가르면 다른 책의 체결이 이 책의 보유량이 된다."""
+    out, qty, cur = [], 0.0, None
     try:
         with open(os.path.join(LOGS, "events.jsonl"), encoding="utf-8") as f: lines = f.readlines()
     except FileNotFoundError: return out
@@ -46,9 +48,11 @@ def timeline(day, sym):
         try: e = json.loads(l)
         except ValueError: continue
         t = time.mktime(time.strptime(e["t"], "%Y-%m-%d %H:%M:%S"))
-        if e.get("side", "long") != "long" and e.get("ev") in ("FILL", "STOP_HIT"): continue
+        if e.get("ev") == "START": cur = e.get("symbol") or cur     # 체결 이벤트에 symbol 이 붙기 전(2026-09-01) 장부의 귀속처: 그때는 엔진이 하나였고 START 는 늘 symbol 을 담았다
+        if (e.get("symbol") or cur) != sym: continue
+        if e.get("side", side) != side: continue          # 포트폴리오 START 만 side 가 없다(책 전체 스냅샷); 단일책 시절 START 는 자기 방향을 담았다
         if e.get("ev") == "START":
-            books = e.get("books") or {}; b = books.get("long") or {}
+            b = (e.get("books") or {}).get(side) or {}
             qty = sum(l[0] for l in (b.get("lots") or e.get("lots") or []))
         elif e.get("ev") == "FILL" and e.get("pos_qty") is not None: qty = float(e["pos_qty"])
         elif e.get("ev") == "STOP_HIT": qty = max(qty - float(e.get("qty") or 0), 0.0)
@@ -89,13 +93,15 @@ def capture(rows, tl, k_atr):
 def main():
     args = sys.argv[1:]
     day = args[args.index("--day") + 1] if "--day" in args else time.strftime("%Y%m%d", time.gmtime())
-    p = load_params() or {}; sym = args[args.index("--sym") + 1] if "--sym" in args else (p.get("strat") or {}).get("symbol", "TRUMPUSDT")
+    p = load_params() or {}; syms = [args[args.index("--sym") + 1]] if "--sym" in args else portfolio(p)   # 포트폴리오면 책마다 한 줄 — 심볼 하나만 재면 나머지 책은 측정되지 않는다
     k = float((p.get("sig") or {}).get("dip_min_atr", 3.0))
-    rows = candles_of(day, sym); tl = timeline(day, sym)
-    c = capture(rows, tl, k)
-    if not c: print(f"capture {day} {sym}: not enough candles ({len(rows)})"); return
-    print(f"capture {day} {sym}: {c['minutes']} min, in_mkt {c['in_mkt']:.2f} | minute moves: up held {c['up_held']:.2f} of {c['up_all']:.1f}%, "
-          f"down held {c['dn_held']:.2f} of {c['dn_all']:.1f}% | legs >= {k:g} ATR: up {c['legs_up']} held {c['legs_up_held']:.2f}, down {c['legs_dn']} held {c['legs_dn_held']:.2f}")
+    for sym in syms:
+        rows = candles_of(day, sym); sp = strat_for(p, sym)
+        for side in (sp.get("sides") or [sp.get("side", "long")]):
+            c = capture(rows, timeline(day, sym, side), k)
+            if not c: print(f"capture {day} {sym} {side}: not enough candles ({len(rows)})"); continue
+            print(f"capture {day} {sym} {side}: {c['minutes']} min, in_mkt {c['in_mkt']:.2f} | minute moves: up held {c['up_held']:.2f} of {c['up_all']:.1f}%, "
+                  f"down held {c['dn_held']:.2f} of {c['dn_all']:.1f}% | legs >= {k:g} ATR: up {c['legs_up']} held {c['legs_up_held']:.2f}, down {c['legs_dn']} held {c['legs_dn_held']:.2f}")
 
 if __name__ == "__main__":
     main()

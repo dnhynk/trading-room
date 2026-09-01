@@ -1,36 +1,64 @@
-"""Symbol selector for 순환매: rank liquid USDT-M perpetuals by two-way opportunity at the engine's own scale and by a candle-level
-replay of the engine itself; flag pump-and-dump shapes over several days — never a single crash day. Report only; bot/select.py switches.
-  python -m bot.scan [--top 15] [--days 3] [--min-vol 50e6] [--json] [--sym TRUMPUSDT,ENAUSDT]
-Universe: contracts with symbolStatus normal and 24h quote volume >= --min-vol (a gate, not a multiplier). Windows: --days windows of
-24h of closed 1m candles (public REST history), most recent first. Per window:
-  legs/h   zigzag legs of >= sig.dip_min_atr x ATR(1m) per hour       how often the engine's deceleration depth is offered
-  leg%     median leg size (%)                                        what one cycle can harvest (must clear the fee floor)
-  bounce   median fraction of a leg retraced within 30 min after it   two-way-ness: a one-way tape retraces little
-  ER       |net| / path over the window                               drift dominance (one-way = high)
-  concept  legs/h x leg% x bounce x (1 - ER)                          a monotone product, no fitted weights
-  proxy    the engine replayed on the candles: bot.signal.candle_rule (the live 1m rule), the step ladder, gap_rebuy, the unit/core
-           trim gates with relaxation, the retrace top, the 15m/1H structural stop with the money cap, 3 stops/day -> halt; fills at
-           the close, maker fee on adds, taker on trims; no v rule, no de-risk. Net pnl in % of one unit's notional per window.
-Ranking value = the median over windows (a typical day, not yesterday). Symbols are ranked by concept; the proxy is reported but
-neither orders the table nor gates a switch — its cross-symbol ordering is unvalidated against the tick engine and is biased against
-the symbols that cycle most, because it charges taker on every trim (RULES 도구 절).
-Flags (listed apart, never ranked): tick% > 0.05, spread > 10 bp, |funding| >= 0.1% per 8h, pump shape on >= 2 windows (the hour
-carrying the most volume >= 35% of the window while moving the price >= 4%), a pump (an UP move of >= +25% in a window or >= +40%
-over the windows, however two-way the swings on the way — 작전 코인 is 순환매 지옥, user 2026-08-29; PROMUSDT +54%/day slipped
-through a bounce-based rule on 2026-08-30), ER >= 0.35 in the latest window (one-way right now; re-judged next scan). A crash day
-is NOT a flag: the coin that fell 10% in an hour is often the best two-way tape afterwards (user 2026-08-29); its losses are the
-stop's business.
-Also per symbol: the 1H structure side (`side`, the side a switch starts on), funding, OI. --json writes logs/scan.json for select."""
+"""Symbol selector for 순환매: score liquid USDT-M perpetuals in the engine's own money — expected % of one unit's notional per hour,
+net of the toll — and disqualify the ones whose toll eats the edge. Report only; bot/select.py owns the basket.
+  python -m bot.scan [--top 15] [--days 3] [--min-vol 50e6] [--n-books 4] [--json] [--sym TRUMPUSDT,ENAUSDT]
+Universe: contracts with symbolStatus normal and 24h quote volume >= --min-vol. Windows: --days windows of 24h of closed 1m candles
+(public REST history), most recent first. The value of every column is the median over windows (a typical day, not yesterday).
+
+THE SCORE.  edge%/h = trials/h x (mean outcome - fee% - imp%).  Every term is % of one unit's notional, so the toll and the
+opportunity subtract in the same unit. What the old `concept` got wrong (measured 2026-09-01) is that it had no cost term at all and
+ranked on the one quantity our P&L barely contains:
+  - what we capture per cycle is set by OUR trim gates, not by the tape's leg size. Median gross per lot cycle: TRUMPUSDT 0.233%
+    over 209 cycles (0.260 / 0.141 / 0.250 / 0.212 by day) vs ZECUSDT 0.295% over 15 — while their leg% differed by 35%.
+  - what varies is the win rate and the loss tail. Across TRUMP's volume collapse (53M -> 25M at 09-01 09:55) mean gross win fell
+    0.393 -> 0.284, mean gross loss grew 0.511 -> 0.718, cycles/h fell 4.21 -> 2.15 and realized edge went +0.100 -> -0.159 %/cycle,
+    while `concept` stayed #1. ZEC ran in the same hours at +0.115 against TRUMP's -0.073, so it was the symbol and not the market
+    (n = 15 vs 14 — the right kind of comparison, not yet a large one).
+  trials/h, outcome  a triple-barrier count (`trials`): every bot.signal.candle_rule firing opens a trial resolved by +win_pct,
+                     -loss_pct or the hold horizon. win_pct/loss_pct are the engine's own measured geometry (bot.cycles summary),
+                     so the tape is asked what it offers without simulating a single fill.
+  fee%               measured round-trip fee per cycle, 0.048%.
+  imp%               sigma_daily x sqrt(unit notional / 24h volume) at the REAL per-book unit (unit_frac x equity / n_books / sides).
+                     Break-even win rate `need` = (loss + fee + imp) / (win + loss) = 0.665 + imp / 0.929 at the measured
+                     geometry: every 0.009% of imp% costs one point of win rate.
+Reported, never ranked: `concept` = legs/h x leg% x bounce x (1 - ER) and its parts, kept so the two rankings stay comparable on live
+results. Its factors carry little cross-section (2026-09-01, 19 symbols: 1-ER in [0.95, 1.00], bounce in [0.73, 1.00], leg% ~ 5.3 x
+atr%), so it reduces to frequency x volatility — and volatility is also what raises imp%.
+
+WHAT THE SCORE IS NOT (measured 2026-09-01, and the reason it only ranks): `trials` resolves at fixed barriers, the engine does
+not. `gate_relax` walks a lot's trim gate down on every stall that misses it, so near misses are booked as small wins — which is
+exactly why live cycles are 70% winners at a mean gross win of 0.360 against a mean gross loss of 0.569. The estimator cannot
+reproduce that: on TRUMPUSDT's own three days (09-01 / 08-31 / 08-30) its p_up reads 0.59 / 0.62 / 0.59 while the live win rate on
+those days was 0.65 / 0.72 / 0.64 — the level is low and the day-to-day spread is a third of the live one. So the score orders the
+eligible set and nothing more.
+Its one gate is soft: `entry` (one trial pays the toll, out% > fee% + imp%) may block an add and never forces an exit, because a
+pessimistic estimator is allowed to make us careful and not to make us sell.
+
+HARD DISQUALIFICATION (flags; never a candidate, and a flagged holding is wound down — bot/select.py): imp% >= fee% (our own
+footprint costs more than the exchange), 24h volume < --min-vol (a heuristic backstop, 50M: the derived gate is imp% >= fee% and at
+this equity it does not bind — our unit is ~5 ppm of ADV where that gate needs ~50), tick% > 0.05, spread > 10 bp, |funding| >= 0.1%
+per 8h, pump shape on >= 2 windows (the hour carrying the most volume >= 35% of the window while moving the price >= 4%),
+a pump (an UP move of >= +25% in a window or
+>= +40% over the windows, however two-way the swings on the way — 작전 코인 is 순환매 지옥, user 2026-08-30; PROMUSDT +54%/day
+slipped through a bounce-based rule on 2026-08-30), ER >= 0.35 in the latest window (one-way right now; re-judged next scan). A
+crash day is NOT a flag: the coin that fell 10% in an hour is often the best two-way tape afterwards (user 2026-08-29); its losses
+are the stop's business. `rank(always=...)` measures a symbol below the volume gate but never exempts it — measurement is not
+eligibility (2026-09-01: the incumbent was exempted from the gate and traded 13 more hours at -0.159%/cycle).
+Also per symbol: the 1H structure side (`side`, the side a book starts on), funding, OI. --json writes logs/scan.json for select."""
 import json, os, statistics, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import Bitget, PRODUCT
-from bot.signal import (STRAT, SIG, zigzag_pivots, wilder_atr, structure_side, pivot_levels, structural_level, candle_features, candle_rule,
-                        apply_fill, pos_stats)
-from bot.ws import load_params
+from bot.signal import STRAT, SIG, zigzag_pivots, wilder_atr, structure_side, candle_features, candle_rule
+from bot.ws import load_params, load_states, portfolio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WIN = 1440; MAKER, TAKER, SLIP = 0.0002, 0.0006, 0.0005
-TRIM_FEE = 0.0004      # live trims are maker first, taker after 10 s: about half and half on 2026-08-29, so the average fee
+WIN = 1440
+# The engine's own geometry, measured from the live ledger (the bot.cycles summary prints all three; re-read them after any change
+# to the trim gates or the stop, and whenever a month of cycles has accumulated). They are the barriers of `trials` and its payoffs.
+# 2026-09-01, 224 completed lot cycles (TRUMPUSDT 209 + ZECUSDT 15): mean GROSS win 0.360%, mean gross loss 0.569%, round-trip fee
+# 0.048% of notional -> break-even win rate (loss + fee) / (win + loss) = 0.665, live 0.701. Gross, not net: the fee is subtracted
+# once, in the score. Pooling across symbols assumes this geometry is symbol-invariant — that is the hypothesis these constants
+# encode, and TRUMPUSDT is 93% of the sample, so it is barely tested (NEXT 6).
+EDGE = dict(win_pct=0.360, loss_pct=0.569, fee_pct=0.048, hold_min=120)   # hold_min: live median hold is 13 min, 120 covers the tail (measured timeout share 0-8%)
 
 def arg(flag, default):
     return type(default)(sys.argv[sys.argv.index(flag) + 1]) if flag in sys.argv else default
@@ -70,93 +98,54 @@ def two_way(c, k):
     return dict(legs_h=len(sizes) / hrs, leg=leg, bounce=bounce, er=er, er4=er4, atr_pct=atr / px * 100, net=net / cl[0] * 100,
                 pump=top_share >= 0.35 and top_move >= 4, concept=len(sizes) / hrs * leg * bounce * (1 - er))
 
-def proxy(c, c15, sp, sg, bounds):
-    """The engine replayed on closed 1m candles (module docstring). One unit = 1.0 of notional at its entry (contracts = 1/price), so
-    pnl comes out in fractions of a unit (x100 = % of a unit). Returns {window index: dict(pnl, cycles, adds, stops, dd, inmkt)} for
-    bounds = [(start_ms, end_ms), ...] (most recent first)."""
-    p = {**STRAT, **sp}; q = {**SIG, **sg}
-    cap = p["cap_frac"] / p["unit_frac"] if p.get("unit_frac") and p.get("cap_frac") else 0.2       # the money cap as a fraction of one unit's notional
-    pos = dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None)
-    stop = struct = peak = None; cool = 0; day = halt_day = None; stops_day = fail = 0; last_lot = None; realized = 0.0
-    vr_hist, bars15, htf, atr15, last15 = [], {}, [], None, None; seeded = {v["ts"]: v for v in c15}
-    res, eq_peak = {}, 0.0
+def trials(c, sg, win, loss, hold_min, bounds):
+    """Triple-barrier count of what the tape offers this engine, per window of closed 1m candles. Every bot.signal.candle_rule firing
+    opens a trial at that close — DIP_SLOWING a long, POP_STALLING a short (쌍검 runs both) — resolved by whichever comes first: the
+    win barrier (+win% from entry, on the candle high for a long), the loss barrier (-loss%, on the low), or the hold horizon, where
+    the outcome is the return at expiry clipped into [-loss, +win]. Both barriers inside one candle counts adverse: the order inside a
+    bar is not observable and the conservative reading is the one that does not invent edge.
+    win/loss are the engine's own measured per-cycle geometry, so this asks the tape a question about OUR round trip without
+    simulating a fill — the fill model is what made the old candle proxy invert the ranking 4 times out of 4 (RULES 도구 절), and no
+    coarser statistic can be built out of it: `bounce` saturates (0.73..1.00 over 19 symbols) because it asks whether the tape
+    retraced at all, not whether it retraced +win before it went -loss.
+    A trial needs a full `hold_min` of candles ahead of it, so `bars` counts only the bars that could have opened one — the rate is
+    n / (bars / 60) and stays honest at the edge of the tape.
+    Returns {window index: dict(n, up, dn, to, out, bars)} for bounds = [(start_ms, end_ms), ...] (most recent first)."""
+    q = {**SIG, **sg}; n = len(c); vr_hist = []; res = {}
     def window(t):
         for j, (a, z) in enumerate(bounds):
             if a <= t < z: return j
         return None
     for i, x in enumerate(c):
-        t, px = x["ts"], x["c"]; j = window(t)
-        if j is not None and j not in res: res[j] = dict(pnl=0.0, cycles=0, adds=0, stops=0, dd=0.0, inmkt=0, n=0); eq_peak = realized + sum((px - l[1]) * l[0] for l in pos["lots"])
-        d = t // 86_400_000
-        if d != day: day, stops_day, halt_day = d, 0, None
-        k15 = t // 900_000; b15 = bars15.setdefault(k15, dict(ts=k15 * 900_000, o=x["o"], h=x["h"], l=x["l"], c=x["c"]))
-        b15["h"], b15["l"], b15["c"] = max(b15["h"], x["h"]), min(b15["l"], x["l"]), x["c"]
-        if k15 != last15:                                   # the 15m/1H structure the stop rests on, refreshed when a 15m bar closes
-            last15 = k15
-            closed = sorted({**seeded, **{v["ts"]: v for kk, v in bars15.items() if kk < k15}}.values(), key=lambda v: v["ts"])[-400:]
-            atr15 = wilder_atr(closed); b1h = bars_1h(closed)[:-1]
-            l15, _ = pivot_levels(closed, atr15); l1h, _ = pivot_levels(b1h, wilder_atr(b1h) if len(b1h) >= 20 else None)
-            htf = sorted(set(l15 + l1h))
-        atr = wilder_atr(c[max(0, i - 99):i + 1])
-        if i < 30 or not atr: continue
+        if i < 30: continue
         cl = c[i - 30:i + 1]; cf = candle_features(cl); vr_hist = (vr_hist + [cf["vr"]])[-3:]
+        j = window(x["ts"])
+        if j is None or i + hold_min >= n: continue
+        r = res.setdefault(j, dict(n=0, up=0, dn=0, to=0, out=0.0, bars=0)); r["bars"] += 1
         sigs = candle_rule(cl, cf, vr_hist, q) if q["c1_on"] else []
-        qty, avg = pos_stats(pos)
-        if qty and stop is not None and x["l"] <= stop:      # the stop on the candle's low
-            fill = stop * (1 - SLIP); pnl = apply_fill(pos, 1, False, qty, fill, fee=qty * fill * TAKER); realized += pnl
-            stops_day += 1; cool = t + p["stop_cooldown_s"] * 1000; stop = struct = peak = None
-            if j is not None: res[j]["pnl"] += pnl; res[j]["stops"] += 1
-            if stops_day >= p["max_stops_day"]: halt_day = d
-            qty, avg = pos_stats(pos)
-        step = max(p["step_add_pct"], p["step_add_atr"] * atr15 / px * 100) if atr15 and p["step_add_atr"] > 0 else p["step_add_pct"]
-        if qty:                                              # trims: the LIFO lot on a stall or the retrace top, everything at full_exit
-            lq, lpx, lid = pos["lots"][-1]; is_core = len(pos["lots"]) <= int(p["core_units"]); ref = avg if is_core else lpx
-            if lid != last_lot: fail, last_lot = 0, lid
-            g_norm = p["pop_min_pct"] if is_core else p["unit_min_pct"]; floor = 0.0 if is_core else p["gate_floor_unit_pct"]
-            g = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** fail
-            dev, dev_lot = (px / avg - 1) * 100, (px / ref - 1) * 100
-            peak = x["h"] if peak is None else max(peak, x["h"])
-            retrace = p["trim_retrace_atr"] > 0 and (peak / ref - 1) * 100 >= g and peak - px >= p["trim_retrace_atr"] * atr
-            if "POP_STALLING" in sigs and dev_lot < g and p["gate_relax"] > 0: fail += 1
-            if ("POP_STALLING" in sigs or retrace) and dev_lot >= g:
-                sell = qty if dev >= p["full_exit_pct"] else lq; n0 = len(pos["lots"])
-                pnl = apply_fill(pos, 1, False, sell, px, fee=sell * px * TRIM_FEE); realized += pnl; peak = None
-                if j is not None: res[j]["pnl"] += pnl; res[j]["cycles"] += n0 - len(pos["lots"])
-                qty, avg = pos_stats(pos)
-                if not qty: stop = struct = None
-        if "DIP_SLOWING" in sigs and t >= cool and halt_day is None and len(pos["lots"]) < p["max_units"]:   # add on a deceleration
-            ok = (not qty or (pos["last"] == "buy" and px <= pos["last_buy_px"] * (1 - step / 100))
-                  or (pos["last"] == "trim" and px <= pos["last_trim_px"] * (1 - p["gap_rebuy_pct"] / 100)))
-            u = 1.0 / px
-            if ok and qty and stop is not None and ((avg * qty + px * u) / (qty + u) - stop) * (qty + u) > cap: ok = False   # the cap is an add budget
-            if ok:
-                pnl = apply_fill(pos, 1, True, u, px, oid=f"b{i}", fee=u * px * MAKER); realized += pnl; peak = None
-                if j is not None: res[j]["pnl"] += pnl; res[j]["adds"] += 1
-                qty, avg = pos_stats(pos)
-        if qty:                                              # the stop: structure leaving ladder room - buffer, else the money cap; never loosened; trails
-            cap_px = avg - cap / qty
-            lvl = structural_level(dict(htf_lows=htf, atr15=atr15), 1, pos["last_buy_px"] or px, p, len(pos["lots"])) if p["stop_structural_on"] else None
-            if lvl and atr15:
-                cand = lvl - p["stop_buffer_atr"] * atr15
-                if struct is None and stop is None: struct = cand if cand < px else None
-                elif struct is not None and p["stop_trail"] and px > cand > struct: struct = cand
-            new = cap_px if struct is None else max(struct, cap_px)
-            if stop is None and new >= px: new = cap_px if cap_px < px else None
-            if new is None:                                  # no valid stop level: the position ends now
-                pnl = apply_fill(pos, 1, False, qty, px, fee=qty * px * TAKER); realized += pnl; stops_day += 1; stop = struct = peak = None
-                if j is not None: res[j]["pnl"] += pnl; res[j]["stops"] += 1
-            else: stop = new if stop is None else max(stop, new)
-        else: stop = struct = None
-        qty, avg = pos_stats(pos)
-        if j is not None:
-            eq = realized + sum((px - l[1]) * l[0] for l in pos["lots"]); eq_peak = max(eq_peak, eq)
-            res[j]["dd"] = max(res[j]["dd"], eq_peak - eq); res[j]["n"] += 1; res[j]["inmkt"] += 1 if qty else 0
-    for r in res.values():
-        r["pnl"] = round(r["pnl"] * 100, 3); r["dd"] = round(r["dd"] * 100, 3); r["inmkt"] = round(r["inmkt"] / max(r["n"], 1), 3)
+        for s in ([1] if "DIP_SLOWING" in sigs else []) + ([-1] if "POP_STALLING" in sigs else []):
+            p0 = x["c"]; up = p0 * (1 + s * win / 100); dn = p0 * (1 - s * loss / 100); out = None
+            for y in c[i + 1:i + hold_min + 1]:
+                if (y["l"] <= dn) if s > 0 else (y["h"] >= dn): out = -loss; break        # adverse first when a bar holds both
+                if (y["h"] >= up) if s > 0 else (y["l"] <= up): out = win; break
+            if out is None: out = max(-loss, min(win, s * (c[i + hold_min]["c"] / p0 - 1) * 100)); r["to"] += 1
+            else: r["up" if out > 0 else "dn"] += 1
+            r["n"] += 1; r["out"] += out
     return res
 
-def flags_of(x, wins, net_total):
+def edge_of(t, fee, imp):
+    """One window's score: % of one unit's notional per hour, net of the toll. No trial is no edge, not a missing number."""
+    if not t or not t["n"] or not t["bars"]: return 0.0
+    return t["n"] / (t["bars"] / 60) * (t["out"] / t["n"] - fee - imp)
+
+def flags_of(x, wins, net_total, min_vol=0.0, fee=0.0):
+    """Hard disqualification, never ranking: a flagged symbol is not a candidate and a flagged holding is wound down (bot/select.py).
+    Only facts that hold whatever the score says go here — our footprint, the contract, the tape's shape. The score's own verdict
+    (`entry`) is a soft gate that blocks an add and never forces an exit: the estimator is measured to be pessimistic against this
+    engine, so it is allowed to make us more careful and never to make us sell."""
     f = []
+    if fee and x.get("impact", 0.0) >= fee: f.append(f"imp{x['impact']:.4f}%")                   # our own footprint costs more than the exchange
+    if min_vol and x.get("qv", 0.0) < min_vol: f.append(f"vol{x['qv'] / 1e6:.0f}M")              # backstop under the uncalibrated square-root law
     if x["tick_pct"] > 0.05: f.append(f"tick{x['tick_pct']:.2f}%")
     if x["spread_bp"] > 10: f.append(f"spr{x['spread_bp']:.0f}bp")
     if abs(x["fund"]) >= 0.1: f.append(f"fund{x['fund']:+.2f}%")
@@ -166,13 +155,19 @@ def flags_of(x, wins, net_total):
     if wins and wins[0] and wins[0]["er"] >= 0.35: f.append(f"ER{wins[0]['er']:.2f}")
     return f
 
-def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equity=None):
-    """Scan the universe; returns rows sorted: unflagged by concept (desc) first, then flagged by volume. Public REST only.
-    `always` = symbols kept even when they fail the volume gate (bot/select.py passes the incumbent: a switch is a comparison, so
-    the symbol being traded must always carry numbers — 2026-09-01, TRUMPUSDT fell under the gate and vanished from the table)."""
+def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equity=None, n_books=1, edge=None):
+    """Scan the universe; returns rows sorted: unflagged by edge (desc) first, then flagged by volume. Public REST only.
+    `always` = symbols measured even when they fail the volume gate (bot/select.py passes the held books: a basket verdict needs
+    numbers for the symbols being traded, and absence is not evidence). They are measured, never exempted — the volume flag is
+    raised all the same, so an `always` symbol under the gate is disqualified like any other. The old code exempted the incumbent
+    from the gate instead, and it stayed in the book for 12 more hours at -0.140%/cycle (2026-09-01).
+    `n_books` = the target basket size: imp% is charged against the real per-book unit, unit_frac x equity / n_books / sides.
+    `edge` overrides the measured engine geometry in EDGE (win_pct, loss_pct, fee_pct, hold_min)."""
+    e = {**EDGE, **(edge or {})}
     b = Bitget("", "", ""); p = load_params() or {}; sp = {**STRAT, **(p.get("strat") or {})}; sg = {**SIG, **(p.get("sig") or {})}
     n_sides = max(len(sp.get("sides") or [sp.get("side")]), 1)                 # budgets are split per book (signal.SPLIT_KEYS)
-    unit_usdt = sp["unit_frac"] * equity / n_sides if sp.get("unit_frac") and equity else 0.0
+    n_books = max(int(n_books or 1), 1)
+    unit_usdt = sp["unit_frac"] * equity / n_books / n_sides if sp.get("unit_frac") and equity else 0.0
     contracts = {c["symbol"]: c for c in b.get("/api/v2/mix/market/contracts", auth=False, productType=PRODUCT) if c.get("symbolStatus") == "normal"}
     tickers = b.get("/api/v2/mix/market/tickers", auth=False, productType=PRODUCT)
     cand = []
@@ -187,56 +182,71 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equit
                          oi=float(t.get("holdingAmount") or 0) * px, tick_pct=tick / px * 100, spread_bp=(ask - bid) / px * 1e4))
     cand.sort(key=lambda x: -x["qv"])
     below = [x["symbol"] for x in cand if x["qv"] < min_vol]
-    log(f"{len(cand)} symbols (24h volume >= {min_vol:.0f}{'; under the gate but kept: ' + ','.join(below) if below else ''}); "
+    log(f"{len(cand)} symbols (24h volume >= {min_vol:.0f}{'; under the gate, measured but disqualified: ' + ','.join(below) if below else ''}); "
         f"pulling {days} days of 1m candles ...")
     rows = []
     for x in cand:
         try:
             c1 = fetch_1m(b, x["symbol"], days * WIN)
             c15 = b.history_candles(x["symbol"], "15m", c1[0]["ts"], 200) if c1 else []
-        except Exception as e: log(f"  {x['symbol']}: candles failed {e}"); continue
+        except Exception as ex: log(f"  {x['symbol']}: candles failed {ex}"); continue
         nw = len(c1) // WIN
         if nw < 1: log(f"  {x['symbol']}: only {len(c1)} candles"); continue
         n = len(c1); bounds = [(c1[n - WIN * (j + 1)]["ts"], c1[n - WIN * j]["ts"] if j else c1[-1]["ts"] + 60_000) for j in range(nw)]
         wins = [two_way(c1[n - WIN * (j + 1):n - WIN * j], sg["dip_min_atr"]) for j in range(nw)]
-        pr = proxy(c1, c15, sp, sg, bounds); prs = [pr.get(j) for j in range(nw)]
         med = lambda xs: statistics.median(xs) if xs else 0.0
-        x.update(wins=wins, proxies=prs, concept=med([w["concept"] for w in wins if w]), proxy=med([r["pnl"] for r in prs if r]),
-                 cyc_d=med([r["cycles"] for r in prs if r]), stops_d=med([r["stops"] for r in prs if r]), dd=max([r["dd"] for r in prs if r] or [0.0]),
+        x.update(wins=wins, concept=med([w["concept"] for w in wins if w]),
                  legs_h=med([w["legs_h"] for w in wins if w]), leg=med([w["leg"] for w in wins if w]), bounce=med([w["bounce"] for w in wins if w]),
                  er=wins[0]["er"] if wins and wins[0] else 0.0, atr_pct=wins[0]["atr_pct"] if wins and wins[0] else 0.0)
-        # our own footprint, reported only (never ranks or gates): square-root impact sigma_daily x sqrt(unit notional / 24h volume).
-        # Compare against the measured round-trip fee (0.048% of notional, RULES 도구 절). Calibration is open — the law is written for
-        # institutional participation and our unit is ~20 ppm of ADV, so this reads as an upper bound; the tick backtest (which fills
-        # against recorded book depth) is what can calibrate it. NEXT 6.
+        # Our own footprint: square-root impact sigma_daily x sqrt(unit notional / 24h volume), no fitted constant. It is subtracted
+        # from the score in the same unit as the fee, and >= the fee disqualifies. The law is written for institutional participation
+        # and our unit is ~20 ppm of ADV, so this reads as an upper bound; the tick backtest is what can calibrate it (NEXT 6).
         rr = [a["c"] / q["c"] - 1 for q, a in zip(c1[-WIN:], c1[-WIN + 1:]) if q["c"]]
         sig_d = statistics.pstdev(rr) * (1440 ** 0.5) * 100 if len(rr) > 60 else 0.0
-        x["unit_usdt"] = un = unit_usdt or sp["unit_qty"] * x["px"] / n_sides
+        x["unit_usdt"] = un = unit_usdt or sp["unit_qty"] * x["px"] / n_books / n_sides
         x["impact"] = sig_d * (un / x["qv"]) ** 0.5 if x["qv"] else 0.0
+        tr = trials(c1, sg, e["win_pct"], e["loss_pct"], int(e["hold_min"]), bounds); got = [t for t in (tr.get(j) for j in range(nw)) if t]
+        eds = [edge_of(t, e["fee_pct"], x["impact"]) for t in got]
+        tot_n = sum(t["n"] for t in got); res = sum(t["up"] + t["dn"] for t in got)
+        x.update(edge=med(eds), edge_sd=statistics.pstdev(eds) if len(eds) > 1 else 0.0, edges=[round(v, 4) for v in eds],
+                 trials_h=med([t["n"] / (t["bars"] / 60) for t in got if t["bars"]]), n_trials=tot_n,
+                 p_up=sum(t["up"] for t in got) / res if res else 0.0, timeout=sum(t["to"] for t in got) / tot_n if tot_n else 0.0,
+                 out=sum(t["out"] for t in got) / tot_n if tot_n else 0.0,
+                 need=(e["loss_pct"] + e["fee_pct"] + x["impact"]) / (e["win_pct"] + e["loss_pct"]))     # break-even win rate
+        x["entry"] = x["out"] - e["fee_pct"] - x["impact"] > 0     # soft: one trial has to pay the toll before we open a book on it
         bars15 = {}
         for v in c1:
             k = v["ts"] // 900_000; r = bars15.setdefault(k, dict(ts=k * 900_000, o=v["o"], h=v["h"], l=v["l"], c=v["c"]))
             r["h"], r["l"], r["c"] = max(r["h"], v["h"]), min(r["l"], v["l"]), v["c"]
         s15 = sorted({**{v["ts"]: v for v in c15}, **bars15}.values(), key=lambda v: v["ts"])[:-1]; b1h = bars_1h(s15)[:-1]
         x["side"] = (structure_side(b1h, wilder_atr(b1h)) if len(b1h) >= 20 else structure_side(s15, wilder_atr(s15))) or "-"
-        x["flags"] = flags_of(x, wins, (c1[-1]["c"] / c1[0]["c"] - 1) * 100)
+        x["flags"] = flags_of(x, wins, (c1[-1]["c"] / c1[0]["c"] - 1) * 100, min_vol, e["fee_pct"])
         rows.append(x)
-    ok = sorted([r for r in rows if not r["flags"]], key=lambda r: -r["concept"])
+    ok = sorted([r for r in rows if not r["flags"]], key=lambda r: (not r.get("entry"), -r["edge"]))   # entry-eligible first, then by score
     bad = sorted([r for r in rows if r["flags"]], key=lambda r: -r["qv"])
     return ok + bad
 
-def table(rows, top):
-    hdr = f"{'symbol':<12}{'proxy%/d':>9}{'concept':>8}{'legs/h':>7}{'leg%':>6}{'bounce':>7}{'ER':>6}{'atr%':>6}{'imp%':>7}{'cyc/d':>6}{'stop/d':>7}{'dd%':>6}{'vol24h':>8}{'fund%':>7}  side  flags"
-    print(hdr)
+def table(rows, top, e=None):
+    e = {**EDGE, **(e or {})}
+    print(f"{'symbol':<12}{'edge%/h':>9}{'+-sd':>7}{'p_up':>6}{'need':>6}{'tr/h':>6}{'out%':>7}{'imp%':>8}{'concept':>8}"
+          f"{'legs/h':>7}{'atr%':>6}{'bounce':>7}{'ER':>6}{'vol24h':>8}{'fund%':>7}  side   in  flags")
     for r in rows[:top] + [r for r in rows if r["flags"]][:top]:
-        print(f"{r['symbol']:<12}{r['proxy']:9.2f}{r['concept']:8.2f}{r['legs_h']:7.2f}{r['leg']:6.2f}{r['bounce']:7.2f}{r['er']:6.2f}{r['atr_pct']:6.2f}"
-              f"{r.get('impact', 0.0):7.4f}{r['cyc_d']:6.1f}{r['stops_d']:7.1f}{r['dd']:6.2f}{r['qv'] / 1e6:7.0f}M{r['fund']:+7.3f}  {r['side']:<5} {' '.join(r['flags'])}")
-    if rows: print(f"  imp% = sigma_daily x sqrt(unit {rows[0].get('unit_usdt', 0):.0f} USDT / 24h volume); live round-trip fee is 0.048% of notional")
+        print(f"{r['symbol']:<12}{r.get('edge', 0.0):9.3f}{r.get('edge_sd', 0.0):7.3f}{r.get('p_up', 0.0):6.2f}{r.get('need', 0.0):6.2f}"
+              f"{r.get('trials_h', 0.0):6.2f}{r.get('out', 0.0):+7.3f}{r.get('impact', 0.0):8.4f}{r['concept']:8.2f}"
+              f"{r['legs_h']:7.2f}{r['atr_pct']:6.2f}{r['bounce']:7.2f}{r['er']:6.2f}{r['qv'] / 1e6:7.0f}M{r['fund']:+7.3f}  {r['side']:<5} "
+              f"{'ok' if r.get('entry') else '- ':>3}  {' '.join(r['flags'])}")
+    if rows: print(f"  edge%/h = tr/h x (out% - fee {e['fee_pct']:.3f} - imp%), barriers win {e['win_pct']:.3f} / loss {e['loss_pct']:.3f} / hold {int(e['hold_min'])}m, "
+                   f"unit {rows[0].get('unit_usdt', 0):.0f} USDT.  `in` = may be added (out% pays the toll); `need` = break-even p_up")
 
 def main():
-    top, days, min_vol = arg("--top", 15), arg("--days", 3), arg("--min-vol", 50e6)
+    # equity and basket size come from the live state and params, or the table's imp% (and the flags that read it) describes a
+    # position size nobody holds — the manual run and the nightly report have to charge the same footprint select charges.
+    p = load_params() or {}; states = load_states()
+    eq = next((((s.get("acct") or {}).get("equity")) for s in states.values() if (s.get("acct") or {}).get("equity")), None)
+    top, days, min_vol = arg("--top", 15), arg("--days", 3), arg("--min-vol", 5e7)
+    nb = arg("--n-books", int((p.get("select") or {}).get("n") or len(p.get("books") or {}) or 1))   # the TARGET basket, so the table's flags match select's
     syms = arg("--sym", "").split(",") if "--sym" in sys.argv else None
-    t0 = time.time(); rows = rank(min_vol, days, syms)
+    t0 = time.time(); rows = rank(min_vol, days, syms, equity=eq, n_books=nb, always=tuple(portfolio(p)) if p else ())
     table(rows, top); print(f"--- {len(rows)} symbols, {days} windows of 24h, {time.time() - t0:.0f}s")
     if "--json" in sys.argv:
         os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)

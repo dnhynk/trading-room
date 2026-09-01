@@ -47,5 +47,44 @@ class Capture(unittest.TestCase):
         self.assertLess(c["up_held"], 0.05); self.assertGreater(c["dn_held"], 0.9); self.assertAlmostEqual(c["in_mkt"], 0.5, 1)
         self.assertTrue(held_at(tl, 1_700_000_000 + 90 * 60)); self.assertFalse(held_at(tl, 1_700_000_000 + 30 * 60))
 
+class SymbolAttribution(unittest.TestCase):
+    """엔진이 여럿이면 events.jsonl 에 심볼이 섞인다 — 심볼(과 방향)로 가르지 않는 분석 도구는 다른 책의 장부를 재게 된다.
+    symbol 태그가 없던 시절(2026-09-01 이전)의 이벤트는 직전 START 의 엔진 것이다(그때는 엔진이 하나였다)."""
+    LINES = [
+        '{"t": "2026-08-31 10:00:00", "ev": "START", "symbol": "TRUMPUSDT", "side": "long", "tick": 0.001, "qstep": 0.1, "lots": []}',
+        '{"t": "2026-08-31 10:01:00", "ev": "FILL", "side": "long", "role": "buy", "qty": 70, "px": 3.0, "pnl": 0.0, "oid": "cycL-b1", "pos_qty": 70}',
+        '{"t": "2026-08-31 10:02:00", "ev": "SIZING", "side": "long", "unit_qty": 70, "cap_usdt": 20}',
+        '{"t": "2026-09-01 20:00:00", "ev": "START", "symbol": "ZECUSDT", "sides": ["long", "short"], "tick": 0.01, "qstep": 0.001, "books": {"long": {"lots": []}, "short": {"lots": []}}}',
+        '{"t": "2026-09-01 20:01:00", "ev": "SIZING", "symbol": "ZECUSDT", "side": "long", "unit_qty": 0.3, "cap_usdt": 13}',
+        '{"t": "2026-09-01 20:02:00", "ev": "FILL", "symbol": "ZECUSDT", "side": "short", "role": "buy", "qty": 0.3, "px": 850.0, "pnl": 0.0, "oid": "cycS-b1", "pos_qty": 0.3}',
+        '{"t": "2026-09-01 20:03:00", "ev": "FILL", "symbol": "TRUMPUSDT", "side": "long", "role": "trim", "qty": 70, "px": 3.1, "pnl": 7.0, "oid": "cycL-t1", "pos_qty": 0}',
+    ]
+
+    def setUp(self):
+        import tempfile, os
+        from bot import capture, recon
+        self.dir = tempfile.mkdtemp(); self.path = os.path.join(self.dir, "events.jsonl")
+        with open(self.path, "w", encoding="utf-8") as f: f.write(chr(10).join(self.LINES) + chr(10))
+        self.old = capture.LOGS, recon.LOG
+        capture.LOGS, recon.LOG = self.dir, self.path
+
+    def tearDown(self):
+        from bot import capture, recon
+        capture.LOGS, recon.LOG = self.old
+
+    def test_the_capture_timeline_takes_only_its_own_symbol_and_side(self):
+        from bot.capture import timeline
+        self.assertEqual([q for _, q in timeline("20260901", "TRUMPUSDT", "long")], [0.0, 70.0, 0.0])   # 태그 없는 옛 체결은 직전 START(TRUMP) 것이다
+        self.assertEqual([q for _, q in timeline("20260901", "ZECUSDT", "short")], [0.0, 0.3])          # ZEC 의 short 책만
+        self.assertEqual([q for _, q in timeline("20260901", "ZECUSDT", "long")], [0.0])                # 같은 심볼의 다른 방향도 아니다
+
+    def test_recon_sizes_and_qstep_come_from_that_symbols_own_events(self):
+        from bot.recon import load_events, sizes, qstep_of, live
+        evs = load_events(); z = 10 ** 11
+        self.assertEqual(sizes(evs, z, {"long"}, "ZECUSDT")["unit_qty"], 0.3)      # 방향만 키로 쓰면 TRUMP 의 70 이 덮어쓴다
+        self.assertEqual(sizes(evs, z, {"long"}, "TRUMPUSDT")["unit_qty"], 70)
+        self.assertEqual((qstep_of(evs, z, "ZECUSDT"), qstep_of(evs, z, "TRUMPUSDT")), (0.001, 0.1))   # 백테스트 유닛 양자화
+        self.assertEqual(live(evs, 0, z, "TRUMPUSDT")[0], 7.0)                     # 실현손익도 자기 심볼만
+
 if __name__ == "__main__":
     unittest.main()

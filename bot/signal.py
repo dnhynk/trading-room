@@ -32,6 +32,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_rest_pct=0,
              trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then >= this x ATR back -> pull at once (wick protection, 0 disables)
              wallet_frac=1.0,   # 이 엔진이 쓰는 지갑의 몫. 심볼 하나면 1.0, 포트폴리오면 심볼마다 나눠 합이 1.0 (params["books"][symbol])
+             wind_down=False,   # 이 심볼만의 PAUSE: 담기 중단, 덜기·스탑은 그대로. select가 자격 잃은 책을 flat 으로 몰 때 켠다(정체에서 팔지 시장가로 던지지 않는다)
              unit_frac=0.0, cap_frac=0.0, daily_loss_frac=0.0, notional_frac=0.0,   # >0: unit notional / cap / daily limit / position notional cap as
              # multiples of wallet equity (cycle.py resizes when flat). CONCEPT: "한 포지션에 거는 돈과 하루 손실에는 상한이 있고, 그 상한은 자본에 비례한다"
              # — every limit here has to scale or it goes stale as the wallet compounds (2026-09-01: a fixed max_notional 900 fell below one
@@ -631,6 +632,11 @@ class Strategy:
                 g_avg = p["pop_min_pct"] * (p["favor_pop_mult"] if favor else 1.0) * (1 - p["gate_relax"]) ** self.fail_n
                 if dev >= g_avg: ref, dev_lot, gate = avg, dev, g_avg
             self.gate_eff = gate
+            # 되돌림 고점 출구가 쓰는 가격 문턱: derisk 의 −derisk_pct 완화는 쓰지 않는다. 그 완화 아래에서는 "고점"이 평단을 한 번
+            # 스친 것이 되고, 되돌림 조건(0.5 ATR)은 진입가 아래 트레일링 스탑으로 퇴화한다 — 래치가 켜지는 순간 이미 참이라 즉시
+            # 발화한다(2026-09-01 live: derisk 체결 10건 중 6건이 최유리점에서 0.49~0.92% 반대쪽, dev 가 arming 문턱 −step 바로
+            # 아래에 몰렸다). CONCEPT "순환매의 매도는 언제나 정체에서" · RULES derisk "약반등 정체에서 덞".
+            gate_top = g_rel if (derisk and is_core) else gate
             core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if (favor or (derisk and dev_lot < g_rel)) and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells, FAVOR or not; de-risk only shapes the weak bounce
             sellable = max(qty - core, 0.0)
             if derisk and sellable <= 0:                                                # only the core left: cut part of it near breakeven ...
@@ -644,7 +650,7 @@ class Strategy:
             if qty != self.last_qty or self.peak is None: self.peak = mid
             elif s * (mid - self.peak) > 0: self.peak = mid
             retrace_top = (p["trim_retrace_atr"] > 0 and atr and s * (self.peak / ref - 1) * 100 >= g_rel
-                           and s * (self.peak - mid) >= p["trim_retrace_atr"] * atr and dev_lot >= gate)
+                           and s * (self.peak - mid) >= p["trim_retrace_atr"] * atr and dev_lot >= gate_top)
             if (trim_sig in names or retrace_top) and dev_lot >= gate and not self.pull and sellable >= qs - 1e-9:
                 sell = sellable if dev >= p["full_exit_pct"] else min(lot_qty, sellable)
                 sell = min(qty, round(round(sell / qs) * qs, 9))                                  # whole exchange steps: a half of 76.1 is 38.0, never 38.05 (live 21:37: the 0.05 remainder was rejected every 5s and the zombie pull blocked every later trim)
@@ -652,6 +658,7 @@ class Strategy:
                 self.pull = dict(t=t, qty=sell, target=qty - sell, gate=gate, ref=ref, px0=touch_out)
                 ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=ref, qty=sell, all=sell >= qty - 1e-9, px=touch_out,
                                              mode="derisk" if derisk else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),
+                                             path="stall" if trim_sig in names else "retrace",   # mode 는 발효 중인 게이트, path 는 발화 경로 — derisk 게이트 아래의 되돌림 출구가 mode=derisk 로 찍혀 둘을 못 가른다
                                              peak=self.peak)))
             if self.pull:
                 if s * (mid / self.pull["ref"] - 1) * 100 < self.pull["gate"] - tick / self.pull["ref"] * 100:   # one tick of hysteresis: a wiggle at the gate must not cancel and re-queue the maker (2026-08-30 03:17: six pull/drop flips in 41 s lost the queue)

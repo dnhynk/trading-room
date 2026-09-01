@@ -22,10 +22,14 @@ def main():
     rep("PASS" if b.hedge else "FAIL", f"position mode: {a.get('posMode')}")
     rep("INFO", f"equity {float(a['accountEquity']):.2f} available {float(a['available']):.2f} lever long/short {a.get('isolatedLongLever')}/{a.get('isolatedShortLever')}")
     if len(syms) > 1:
+        # select 은 wallet_frac 을 1/len(books) 가 아니라 1/select.n 으로 쓴다 — 슬롯이 비어 있는 동안 합이 1보다 작은 것은
+        # 설계된 과도기다(자본을 덜 쓸 뿐 위험하지 않다). 위험한 것은 초과뿐이라 그것만 FAIL 이다.
+        n = int((p.get("select") or {}).get("n") or len(syms))
         wf = {s: strat_for(p, s).get("wallet_frac", 1.0) for s in syms}
         tot = sum(wf.values())
-        rep("PASS" if abs(tot - 1.0) < 1e-9 else "FAIL", f"portfolio {len(syms)} symbols, wallet_frac {wf} sums to {tot:.3f}"
-            + ("" if abs(tot - 1.0) < 1e-9 else " -> the wallet is over/under-committed"))
+        rep("FAIL" if tot > 1.0 + 1e-9 else "PASS", f"portfolio {len(syms)}/{n} symbols, wallet_frac {wf} sums to {tot:.3f}"
+            + (" -> the wallet is OVER-committed" if tot > 1.0 + 1e-9 else
+               f" (empty slots: {n - len(syms)}, so {1 - tot:.0%} of the wallet is idle by design)" if tot < 1.0 - 1e-9 else ""))
     all_pos = b.positions()
     for sym in syms:                                    # 심볼마다: 파라미터·계약·상태·거래소 대조·대기 주문
         sp = strat_for(p, sym); sides = list(sp.get("sides") or [sp["side"]])

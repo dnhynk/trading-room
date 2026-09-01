@@ -8,8 +8,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 
 def run_cmd(args, timeout=3600):
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}   # 자식도 UTF-8 로 쓰게: 부모는 UTF-8 로 읽고 리포트 파일도 UTF-8 인데, 콘솔 기본값(cp949)은 한글 도구의 '—' 하나로 죽는다
     try:
-        r = subprocess.run([sys.executable, "-m"] + args, cwd=ROOT, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        r = subprocess.run([sys.executable, "-m"] + args, cwd=ROOT, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace", env=env)
         return (r.stdout or "") + (("\nSTDERR:\n" + r.stderr) if r.returncode else "")
     except Exception as e: return f"failed: {e}"
 
@@ -26,7 +27,7 @@ def report(day):
         out.append("\n## direction capture (live book from events.jsonl x the day's candles; up/dn held = share of minute moves and of legs that happened while holding)\n")
         out.append(run_cmd(["bot.capture", "--day", day]))
         out.append("\n## recon (백테스트 캘리브레이션: 경계 이벤트 없는 구간만 골라 같은 사이즈로 돌린 백테스트와 실매매 장부를 대조 — 아래 backtest 기반 수치는 전부 이 오차를 진다)\n")
-        out.append(run_cmd(["bot.recon", "--day", day], timeout=1800))
+        out.append(run_cmd(["bot.recon", "--day", day], timeout=3600))   # books 의 심볼마다 구간별 백테스트를 돌린다
         out.append("\n## sides (the day's tape as long / short / dual; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
         for sides in ("long", "short", "long,short"):
             out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sides", sides]).strip().split("\n") or [""])[-1])
