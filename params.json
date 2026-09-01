@@ -100,8 +100,7 @@
       "wallet_frac": 0.5
     },
     "ZECUSDT": {
-      "wallet_frac": 0.5,
-      "mode": "dry"
+      "wallet_frac": 0.5
     }
   },
   "sig": {
