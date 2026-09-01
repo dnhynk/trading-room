@@ -1,5 +1,5 @@
 """Invariants of the symbol selector (bot/scan.py metrics and engine proxy, bot/select.py verdicts).  python -m unittest bot.test_select"""
-import math, unittest
+import math, time, unittest
 from bot.scan import two_way, proxy, flags_of, WIN
 from bot.select import decide, record_dict, SELECT
 
@@ -59,6 +59,19 @@ class Verdict(unittest.TestCase):
         a, why, b = decide(self.rows(), "A", sel, st4, True, "d", now); self.assertEqual(a, "keep"); self.assertIn("today", why)    # one switch a day
         rows = self.rows(); rows[1]["flags"] = ["ER0.40"]
         a, why, b = decide(rows, "A", sel, dict(since=now - 3600, streak={"B": 1}), True, "d", now); self.assertEqual(a, "switch")   # a flagged incumbent waives dwell and ratio
+
+    def test_every_engine_must_be_flat_before_a_switch(self):
+        """포트폴리오에선 엔진이 여럿이고 state-<SYMBOL>.json 도 여럿이다. 하나라도 물려 있으면 전환은 없다."""
+        from bot.select import engine_flat
+        now = 1_700_000_000
+        def snap(lots): return dict(t=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 5)),
+                                    books=dict(long=dict(pos=dict(lots=lots), working=dict(buy=None, trim=None))))
+        self.assertTrue(engine_flat(snap([]), now))                                  # 단일 엔진 스냅샷도 그대로 받는다
+        self.assertTrue(engine_flat({"A": snap([]), "B": snap([])}, now))
+        self.assertFalse(engine_flat({"A": snap([]), "B": snap([[1, 2, "x"]])}, now))   # 한쪽이 물려 있으면 flat 아님
+        stale = snap([]); stale["t"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 600))
+        self.assertFalse(engine_flat({"A": snap([]), "B": stale}, now))               # 죽은 엔진은 flat 이 아니다
+        self.assertFalse(engine_flat({}, now))
 
     def test_the_proxy_neither_elects_nor_vetoes(self):
         """The live symbol's proxy was negative in 12 of 18 scans, so a proxy gate cannot choose the symbol the engine is trading."""

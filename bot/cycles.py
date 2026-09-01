@@ -3,7 +3,7 @@
 한 로트 = 담기 주문 하나(clientOid). 부분 체결은 같은 로트로 합치고, 덜기는 LIFO로 로트를 소진한다
 (엔진의 `pos["lots"]`와 같은 규칙). 로트가 다 팔리면 한 사이클로 확정한다 — RULES의 "사이클 = 로트가 다 팔린 횟수".
 
-    python -m bot.cycles [--from "2026-08-29 18:18"] [--side long|short] [--top 20] [--csv PATH]
+    python -m bot.cycles [--from "2026-08-29 18:18"] [--side long|short] [--symbol SYM] [--top 20] [--csv PATH]
 
 출력: 사이클별 (방향·진입시각·보유시간·수량·진입가·청산가·총손익·수수료·순손익·청산사유·진입 당시 로트 깊이)와
 요약(개수·순손익 합·승률·중앙 보유시간·수수료 총액), 그리고 상위 N% 사이클이 순손익에서 차지하는 비중.
@@ -47,7 +47,7 @@ def _close(lots, done, side, s, qty, px, fee, t, why):
     return orphan
 
 
-def build(since=LIVE, only=None):
+def build(since=LIVE, only=None, sym=None):
     books, done, orphan, eng = {}, [], 0.0, {}
     with open(LOG, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -62,6 +62,8 @@ def build(since=LIVE, only=None):
                 continue
             side = d.get("side") or "long"
             if only and side != only:
+                continue
+            if sym and d.get("symbol") not in (None, sym):   # 엔진이 여럿이면 심볼로 가른다(옛 이벤트엔 symbol 이 없다)
                 continue
             if "realized" in d:
                 eng[side] = d["realized"]          # 엔진이 찍은 누적 실현손익(당일 기준) — 검산용
@@ -128,14 +130,15 @@ def report(done, books, orphan, eng, top=20, csv=None):
 
 
 if __name__ == "__main__":
-    args, since, only, top, csv = sys.argv[1:], LIVE, None, 20, None
+    args, since, only, top, csv, sym = sys.argv[1:], LIVE, None, 20, None, None
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--from": since = args[i + 1]; i += 2
         elif a == "--side": only = args[i + 1]; i += 2
+        elif a == "--symbol": sym = args[i + 1]; i += 2
         elif a == "--top": top = int(args[i + 1]); i += 2
         elif a == "--csv": csv = args[i + 1]; i += 2
         else: print(__doc__); sys.exit(0)
-    done, books, orphan, eng = build(since, only)
+    done, books, orphan, eng = build(since, only, sym)
     report(done, books, orphan, eng, top, csv)

@@ -178,6 +178,23 @@ class Params(unittest.TestCase):
         for wallet in (150.0, 728.0, 5000.0):
             self.assertAlmostEqual(wallet * bp["notional_frac"], wallet * bp["unit_frac"] * bp["max_units"], 6)
 
+    def test_a_portfolio_gives_each_engine_its_own_strat_and_wallet_share(self):
+        """params["books"] 가 있으면 심볼마다 엔진 하나. 공통 strat 위에 그 심볼의 몫만 덮고, 지갑은 wallet_frac 으로 나눈다 —
+        안 나누면 두 엔진이 각자 계좌 전액으로 사이징해 노출이 심볼 수만큼 배가 된다 (NEXT 8)."""
+        from bot.ws import strat_for, portfolio
+        p = dict(strat=dict(symbol="A", sides=["long", "short"], unit_frac=1.5, mode="live"),
+                 books={"A": dict(wallet_frac=0.6), "B": dict(wallet_frac=0.4, sides=["long"])})
+        self.assertEqual(sorted(portfolio(p)), ["A", "B"])
+        a, b = strat_for(p, "A"), strat_for(p, "B")
+        self.assertEqual((a["symbol"], a["wallet_frac"], a["sides"]), ("A", 0.6, ["long", "short"]))
+        self.assertEqual((b["symbol"], b["wallet_frac"], b["sides"]), ("B", 0.4, ["long"]))
+        self.assertEqual(a["unit_frac"], b["unit_frac"])                      # 규칙은 공통이다: 심볼마다 다르면 포트폴리오가 아니라 다른 전략이다
+        self.assertAlmostEqual(a["wallet_frac"] + b["wallet_frac"], 1.0, 9)
+        self.assertEqual(strat_for(dict(strat=dict(symbol="A")))["symbol"], "A")   # books 없으면 지금과 동일
+        self.assertEqual(portfolio(dict(strat=dict(symbol="A"))), ["A"])
+        self.assertEqual(valid_params({**STRAT, "wallet_frac": 0.5, "symbol": "AUSDT"}, {}), [])
+        self.assertEqual(valid_params({**STRAT, "wallet_frac": 0, "symbol": "AUSDT"}, {}), ["wallet_frac"])   # 0 이면 사이즈가 0 이 된다
+
     def test_wrong_types_of_file_only_and_optional_keys_are_rejected(self):
         bad = valid_params({**STRAT, "daily_loss_limit": "40", "stop_structural": "oops", "adopt": "false", "symbol": "TRUMPUSDT"}, {})
         self.assertEqual(bad, ["adopt", "daily_loss_limit", "stop_structural"])

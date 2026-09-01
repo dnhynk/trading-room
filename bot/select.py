@@ -19,7 +19,7 @@ State (dwell start, streak, switches today) in logs/select-state.json. --once ru
 import json, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.scan import rank
-from bot.ws import load_params, PARAMS
+from bot.ws import load_params, PARAMS, load_states, portfolio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
@@ -47,11 +47,16 @@ def ev(kind, alert=False, **kw):
     log(line[:300])
 
 def engine_flat(state, now):
-    """The engine holds nothing and rests nothing, and the snapshot is fresh (an engine that is down is not 'flat')."""
+    """The engine holds nothing and rests nothing, and the snapshot is fresh (an engine that is down is not 'flat').
+    `state` may be one engine's snapshot or {symbol: snapshot} — every engine must be flat before a switch."""
     try:
-        age = now - time.mktime(time.strptime(state["t"], "%Y-%m-%d %H:%M:%S"))
-        books = state.get("books") or {state.get("side", "?"): state}
-        return age < 60 and all(not b["pos"]["lots"] and not b["working"]["buy"] and not b["working"]["trim"] and not b.get("pull") for b in books.values())
+        sts = list(state.values()) if state and "t" not in state else [state]
+        if not sts or not sts[0]: return False
+        for s in sts:
+            age = now - time.mktime(time.strptime(s["t"], "%Y-%m-%d %H:%M:%S"))
+            books = s.get("books") or {s.get("side", "?"): s}
+            if not (age < 60 and all(not b["pos"]["lots"] and not b["working"]["buy"] and not b["working"]["trim"] and not b.get("pull") for b in books.values())): return False
+        return True
     except Exception: return False
 
 def record_dict(symbol, rows, sel):
@@ -101,12 +106,17 @@ def main():
         p = load_params() or {}; sel = {**SELECT, **(p.get("select") or {})}
         incumbent = (p.get("strat") or {}).get("symbol")
         t0 = time.time()
-        state = read_json(os.path.join(LOGS, "state.json"), {})
+        state = load_states()                                  # 엔진마다 state-<SYMBOL>.json (포트폴리오면 여럿)
         try: rows = rank(min_vol=sel["min_vol"], days=int(sel["days"]), exclude=sel["exclude"], log=log,
                          always=(incumbent,) if incumbent else (),    # the traded symbol is measured even below the volume gate
-                         equity=(state.get("acct") or {}).get("equity"))   # sizes the reported impact to the wallet we actually trade
+                         equity=((list(state.values())[0].get("acct") if state else None) or {}).get("equity"))   # 보고용 impact 를 실제 지갑에 맞춘다
         except Exception as e: log(f"scan failed: {type(e).__name__}: {e}"); rows = None
-        if rows and incumbent:
+        if rows and incumbent and len(portfolio(p)) > 1:
+            write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], rows=rows))
+            ev("SELECT", action="keep", why=f"portfolio of {len(portfolio(p))} symbols: select does not own strat.symbol; allocation is a human decision (NEXT 8)",
+               incumbent=incumbent, flat=None, took_s=int(time.time() - t0),
+               top=[[r["symbol"], round(r["proxy"], 2), round(r["concept"], 2), r["side"], round(r.get("impact", 0.0), 4)] for r in rows[:5]])
+        elif rows and incumbent:
             os.makedirs(LOGS, exist_ok=True)
             write_json(os.path.join(LOGS, "scan.json"), dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), days=sel["days"], rows=rows))
             now = time.time(); today = time.strftime("%Y%m%d", time.gmtime(now))

@@ -3,7 +3,7 @@
   python -m bot.ws probe [SYMBOL]   # 20s check: prints login/subscribe acks and the first message of every channel
 Files: data/ws/pub-YYYYMMDD-HH.jsonl (UTC hour; gzipped once the hour closes) and data/ws/prv-YYYYMMDD.jsonl.
 Line = "<recv_ms>\\t<raw message>". Connection lifecycle lines are JSON objects with key "local" (WS_UP/WS_DOWN/WS_STALE)."""
-import asyncio, base64, gzip, hashlib, hmac, json, os, shutil, sys, threading, time
+import asyncio, base64, glob, gzip, hashlib, hmac, json, os, shutil, sys, threading, time
 import websockets
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,6 +22,36 @@ def load_params():
     try:
         with open(PARAMS, encoding="utf-8") as f: return json.load(f)
     except Exception: return None
+
+def strat_for(params, symbol=None):
+    """엔진 하나가 쓰는 strat: 공통 `strat` 위에 `books[symbol]`을 덮는다. `books`가 없으면 지금과 완전히 같다.
+    symbol=None 이면 `strat.symbol`(포트폴리오의 기본 엔진). 심볼별로 다를 수 있는 것은 sides·wallet_frac 같은 것뿐이고
+    나머지는 공통 strat 을 그대로 쓴다 — 심볼마다 규칙을 따로 두면 그건 다른 전략이지 포트폴리오가 아니다."""
+    from bot.signal import STRAT
+    sp = {**STRAT, **((params or {}).get("strat") or {})}
+    sym = symbol or sp.get("symbol")
+    return {**sp, **(((params or {}).get("books") or {}).get(sym) or {}), "symbol": sym}
+
+def portfolio(params):
+    """엔진을 돌릴 심볼들. `books`가 있으면 그 키들, 없으면 `strat.symbol` 하나."""
+    b = list((params or {}).get("books") or {})
+    return b or [((params or {}).get("strat") or {}).get("symbol")]
+
+def load_states():
+    """엔진마다 logs/state-<SYMBOL>.json 을 쓴다(동시 기록자가 한 파일을 덮어쓰지 않도록). {심볼: 스냅샷}.
+    하나도 없으면 예전 단일 logs/state.json 으로 물러선다 — 전환 직후 한 번만 해당된다."""
+    out = {}
+    for p in glob.glob(os.path.join(ROOT, "logs", "state-*.json")):
+        try:
+            with open(p, encoding="utf-8") as f: st = json.load(f)
+            if st.get("symbol"): out[st["symbol"]] = st
+        except Exception: pass
+    if not out:
+        try:
+            with open(os.path.join(ROOT, "logs", "state.json"), encoding="utf-8") as f: st = json.load(f)
+            if st.get("symbol"): out[st["symbol"]] = st
+        except Exception: pass
+    return out
 
 def pub_args(params, extra=()):
     """Subscription args for params["record"] = {symbol: [channel, ...]} plus extra (symbol, channel) pairs."""

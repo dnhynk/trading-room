@@ -13,9 +13,12 @@ def tail(path, pos):
     except FileNotFoundError: return [], pos
 
 def summary():
-    try:
-        with open(os.path.join(LOGS, "state.json"), encoding="utf-8") as f: s = json.load(f)
-    except Exception as e: return f"STATE unreadable: {e}"
+    from bot.ws import load_states
+    sts = load_states()                                  # 엔진마다 state-<SYMBOL>.json — 포트폴리오면 여럿이다
+    if not sts: return "STATE unreadable: no state-*.json"
+    return "\n".join(one(s) for s in sorted(sts.values(), key=lambda x: x.get("symbol", "")))
+
+def one(s):
     f = s.get("f", {}); age = int(time.time() - time.mktime(time.strptime(s["t"], "%Y-%m-%d %H:%M:%S")))
     head = (f"HB {s['symbol']} {s['mode']} age={age}s up={s['up_s']}s ws={s['ws']['pub']}/{s['ws']['prv']} mid={f.get('mid')} "
             f"atr%={round(f['atr'] / f['mid'] * 100, 3) if f.get('atr') and f.get('mid') else None} hint={f.get('side_hint')} sigs={[x['sig'] for x in s.get('signals', [])]} errors={s['errors']}")

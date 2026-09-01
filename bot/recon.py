@@ -73,11 +73,12 @@ def segments(day, evs, min_hours):
     return out
 
 
-def live(evs, a, z):
+def live(evs, a, z, sym):
     """구간의 실매매 장부. 주문 수는 고유 clientOid — 부분 체결이 한 주문을 여러 FILL 로 쪼개기 때문."""
     pnl = fee = 0.0; oid = {"buy": set(), "trim": set()}; stops = 0; sides = set()
     for e in evs:
         if not (a <= e["_e"] < z): continue
+        if e.get("symbol") not in (None, sym): continue      # 엔진이 여럿이면 심볼로 가른다(옛 이벤트엔 symbol 이 없다)
         if e.get("ev") == "FILL":
             pnl += e.get("pnl", 0.0); fee += e.get("fee", 0.0)
             if e.get("role") in oid: oid[e["role"]].add(e.get("oid"))
@@ -112,7 +113,7 @@ def main(day, min_hours=2, quiet=False):
         print("  대조할 구간이 없다 — 재기동·HALT·파라미터 변경이 하루를 다 덮었거나 테이프가 없다."); return
     tot_l = tot_b = 0.0; hrs = 0
     for a, z, files, h0, h1 in segs:
-        pnl, fee, nbuy, ntrim, stops, sides = live(evs, a, z)
+        pnl, fee, nbuy, ntrim, stops, sides = live(evs, a, z, sym)
         sides = sides or set(sp.get("sides") or ["long"])
         ov = dict(unit_frac=0.0, cap_frac=0.0, daily_loss_frac=0.0, notional_frac=0.0, **sizes(evs, z, sides))
         try:

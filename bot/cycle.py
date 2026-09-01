@@ -23,12 +23,12 @@ are placed only while the private feed is up (all five channels acknowledged); a
 whose response was lost stay tracked until the exchange settles them (limit: by clientOid; market: no second one until known).
 An existing stop is never moved against the position; a stop the market has already passed (40917) or a position without a valid
 stop level is market-closed (after the resting orders are confirmed gone) and booked as a stop hit; one stop order counts once."""
-import asyncio, json, os, sys, time
+import asyncio, glob, json, os, sys, time
 from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
 from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match
-from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS
+from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS, strat_for, portfolio
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
@@ -43,7 +43,7 @@ SLIP = 0.0005          # dry-mode stop-out slippage
 
 def rnd(x): return round(x, 6) if isinstance(x, float) else x
 
-POSITIVE = dict(strat=("unit_qty", "max_units", "max_notional", "cap_usdt", "pop_min_pct", "tick", "qstep", "buy_ttl_s", "confirm_within_s"),
+POSITIVE = dict(strat=("unit_qty", "max_units", "max_notional", "cap_usdt", "pop_min_pct", "tick", "qstep", "buy_ttl_s", "confirm_within_s", "wallet_frac"),
                 sig=("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels", "rg_window", "vp_window", "vp_bucket_ticks", "stop_lookback"))
 OPTIONAL_NUM = ("stop_structural", "add_confirm", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac", "daily_loss_limit")   # None or a non-negative number
 # 자본 비례 한도: 고정 키 -> 그 키를 대신하는 지갑 배수. resize·load·apply_params·snapshot이 전부 여기서 읽는다 —
@@ -196,7 +196,8 @@ class Book:
         if not any(self.sp.get(k) for k in SIZED.values()) or self.cy.acct["equity"] is None: return
         qty, _ = pos_stats(self.pos); mid = self.feat.f.get("mid")
         if qty or not mid: return
-        wallet = self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0); new = {}
+        # 지갑은 계좌 전체다 — 엔진이 여럿이면 각자 자기 몫만 써야 한다(안 나누면 심볼 수만큼 노출이 배가 된다)
+        wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
         if self.sp.get("unit_frac"):
             u = round(wallet * self.sp["unit_frac"] / mid / self.cy.qstep) * self.cy.qstep
             cur = self.sp["unit_qty"]; u = max(min(u, cur * 1.25), cur * 0.75); u = max(round(u / self.cy.qstep) * self.cy.qstep, self.cy.qstep)
@@ -589,10 +590,12 @@ class Book:
 
 
 class Cycle:
-    def __init__(self):
+    def __init__(self, symbol=None):
+        self.want = symbol                                            # CLI 로 못박은 심볼: params 의 strat.symbol 이 바뀌어도 이 엔진은 안 따라간다
         self.p = load_params() or {}; self.pmtime = os.path.getmtime(PARAMS)
-        sp = {**STRAT, **self.p.get("strat", {})}
+        sp = strat_for(self.p, symbol)
         self.symbol, self.mode = sp["symbol"], sp.get("mode", "dry")
+        self.state = os.path.join(LOGS, f"state-{self.symbol}.json")   # 엔진마다 자기 파일 — 두 엔진이 한 파일을 덮어쓰지 않는다
         self.sides = list(sp.get("sides") or [sp["side"]])
         self.b = from_env(); self.b.sync_time(); self.b.refresh_mode(self.symbol)
         c = self.b.contract(self.symbol)
@@ -619,14 +622,26 @@ class Cycle:
 
     # ---- persistence / logging ----------------------------------------------
     def load_state(self):
-        try:
-            with open(STATE, encoding="utf-8") as f: st = json.load(f)
-        except Exception: return
-        if st.get("symbol") != self.symbol:
-            if any((b.get("pos") or {}).get("lots") for b in (st.get("books") or {}).values()) and st.get("mode") == "live" and self.mode == "live":
-                for bk in self.books.values(): bk.pos["halt"] = "OLD_POSITION"   # live lots on another contract: the agent must flatten/adopt before switching
-            return
-        for bk in self.books.values(): bk.load(st)
+        """자기 심볼의 스냅샷을 싣고, 포트폴리오 밖 심볼에 live 물량이 남아 있으면 멈춘다.
+        state-<심볼>.json 이 아직 없으면 예전 단일 state.json 에서 한 번 물려받는다(전환 직후 1회)."""
+        st = None
+        for path in (self.state, STATE):
+            try:
+                with open(path, encoding="utf-8") as f: cand = json.load(f)
+            except Exception: continue
+            if cand.get("symbol") == self.symbol: st = cand; break
+        mine = set(portfolio(self.p)) | {self.symbol}
+        for path in glob.glob(os.path.join(LOGS, "state-*.json")):    # 다른 계약에 남은 live 물량: 사람이 정리하거나 인수해야 한다.
+            # 옛 단일 state.json 은 여기서 보지 않는다 — 이관 뒤 남는 낡은 파일이 영원히 OLD_POSITION 을 걸게 된다
+            try:
+                with open(path, encoding="utf-8") as f: other = json.load(f)
+            except Exception: continue
+            if other.get("symbol") in mine or other.get("mode") != "live" or self.mode != "live": continue
+            if any((b.get("pos") or {}).get("lots") for b in (other.get("books") or {}).values()):
+                for bk in self.books.values(): bk.pos["halt"] = "OLD_POSITION"
+                self.ev("HALT", why="OLD_POSITION", symbol_left=other.get("symbol")); break
+        if st:
+            for bk in self.books.values(): bk.load(st)
 
     def write_state(self):
         f = self.feat.f; first = self.books[self.sides[0]].snapshot()
@@ -634,12 +649,13 @@ class Cycle:
                   up_s=int(time.time() - self.t0), ws=dict(pub=self.pub.connected, prv=self.prv.connected, sec=f.get("t")),
                   books={sd: bk.snapshot() for sd, bk in self.books.items()}, acct=self.acct, f={k: rnd(v) for k, v in f.items()},
                   signals=list(self.sigs), params=dict(strat=self.sp, sig=self.feat.p), errors=self.errors, **first)   # first side also flat, for older readers
-        tmp = STATE + ".tmp"
+        tmp = self.state + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh: json.dump(st, fh)
-        os.replace(tmp, STATE); self.dirty = False
+        os.replace(tmp, self.state); self.dirty = False
 
     def ev(self, kind, **kw):
-        line = json.dumps(dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), sec=self.feat.f.get("t"), ev=kind, **kw), ensure_ascii=False)
+        line = json.dumps(dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), sec=self.feat.f.get("t"), ev=kind,
+                               symbol=getattr(self, "symbol", None), **kw), ensure_ascii=False)   # 엔진이 여럿이면 심볼 없이는 로그를 갈라 읽을 수 없다
         with open(EVENTS, "a", encoding="utf-8") as fh: fh.write(line + "\n")
         if kind in ALERT:
             with open(ALERTS, "a", encoding="utf-8") as fh: fh.write(line + "\n")
@@ -816,7 +832,7 @@ class Cycle:
         if m == self.pmtime: return
         self.pmtime = m; p = load_params()
         if p is None: self.ev("PARAMS_INVALID", msg="unreadable json; keeping previous"); return
-        sp = {**STRAT, **p.get("strat", {})}; sides = list(sp.get("sides") or [sp["side"]]); sig = p.get("sig") or {}
+        sp = strat_for(p, self.want); sides = list(sp.get("sides") or [sp["side"]]); sig = p.get("sig") or {}
         bad = valid_params(sp, sig)
         if bad or any(sd not in ("long", "short") for sd in sides) or len(set(sides)) != len(sides) or sp.get("mode", "dry") not in ("dry", "live") or not isinstance(sp.get("symbol"), str):
             self.ev("PARAMS_INVALID", msg=f"bad keys {bad or [sides, sp.get('mode'), sp.get('symbol')]}; keeping previous"); return
@@ -887,4 +903,4 @@ class Cycle:
 
 
 if __name__ == "__main__":
-    asyncio.run(Cycle().run())
+    asyncio.run(Cycle(sys.argv[1] if len(sys.argv) > 1 else None).run())   # 심볼을 주면 그 심볼에 못박힌다(포트폴리오); 없으면 strat.symbol

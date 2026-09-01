@@ -130,7 +130,17 @@
 **왜 (사용자 결정 2026-09-01)**: 지금 우선순위는 수익이 아니라 스크립트 고도화다. 그런데 종목 질문은 백테스트로 풀리지 않는다 — 도구의 잡음이 재려는 효과의 3배(측정 규약)이고 창을 쪼갠 TRUMP−ZEC는 `t = 0.49`다. 두 종목을 **동시에 live로** 돌리면 같은 지갑·같은 코드·같은 시각의 **짝지어진 관측**이 매일 쌓이고, 스캐너(`concept`·`proxy`)와 전환 규칙을 백테스트가 아니라 실매매로 검증할 수 있게 된다. 종목이 늘수록 라벨이 늘어난다. 최종 형태가 "한 종목 갈아타기"일지 "포트폴리오 유지"일지는 그 데이터가 정한다 — 지금 정할 필요가 없고, 정할 근거도 없다.
 
 - **관측 하나**: 독립 창 7개에서 TRUMP과 ZEC의 창별 손익 상관이 **r = −0.83**(n=7). 사실이면 분산 감소가 크다. 다만 같은 표본에서 ZEC의 평균은 음수이므로 **수익 근거로 팔면 안 된다** — 근거는 정보 가치다. 반사이즈로 나누면 1로트 캠페인(전체의 70%)의 손익도 같이 반이 된다.
-- **막는 것 (2026-09-01 코드에서 확인)**:
+- **구현 완료 (2026-09-01, 활성화만 남음)**: 다섯 개를 다 넣었고 `params.books`가 없으면 **동작이 지금과 완전히 동일**하다(기준 테이프 −3.30 / +2.42 불변, 테스트 77).
+  - `params.books = {심볼: {wallet_frac, sides…}}` — 있으면 그 키들이 포트폴리오. 엔진 하나가 쓰는 strat은 `ws.strat_for(p, sym)` = 공통 `strat` + `books[sym]`. **규칙은 공통이고 심볼마다 다른 건 지갑 몫·방향뿐이다** — 심볼마다 규칙을 따로 두면 그건 포트폴리오가 아니라 다른 전략이다.
+  - `python -m bot.cycle SYMBOL` / `python -m bot.supervise cycle:SYMBOL`(로그·pid는 `cycle-SYMBOL`; Windows가 콜론을 못 쓴다). 심볼을 주면 그 엔진은 `strat.symbol`이 바뀌어도 안 따라간다.
+  - 상태는 `logs/state-<SYMBOL>.json`(엔진마다 자기 파일). `ws.load_states()`가 모아 읽고, 하나도 없으면 예전 `state.json`으로 물러선다(이관 1회). `select`·`preflight`·`watch_cycle`이 전부 이걸 쓴다.
+  - `wallet_frac`(기본 1.0)가 `resize()`의 지갑을 나눈다. **`POSITIVE`에 넣어 0을 막았다** — 0이면 사이즈가 0이 된다.
+  - 이벤트에 `symbol`. `recon`·`cycles`는 심볼로 가르되 **`symbol`이 없는 옛 이벤트는 그대로 받는다**(소급 불가).
+  - `OLD_POSITION`은 "포트폴리오 **밖** 심볼의 state에 live 물량"으로 일반화됐다. 옛 `state.json`은 이 검사에서 제외한다(이관 뒤 남는 낡은 파일이 영원히 halt를 걸지 않도록).
+  - `select`는 `len(portfolio) > 1`이면 **물러선다**(`SELECT keep why="portfolio…"`). 배분기 설계는 별개 결정이라 지어내지 않았다.
+- **활성화 순서 (아직 안 함)**: 포지션 0에서 ①`params.books` 작성 ②**cycle과 select을 같이 재기동**(옛 select은 `state.json`을 읽는데 새 cycle은 안 쓴다 — 따로 재기동하면 select이 죽은 상태를 본다) ③새 심볼 엔진을 `supervise cycle:SYM`으로 추가 ④`preflight`로 두 엔진 확인.
+- **남은 설계 결정**: 배분(wallet_frac을 뭘로 정하나 — 균등? concept 비례?), 심볼별 `daily_loss`와 계좌 전체 한도의 관계, `select`을 배분기로 만들지 계속 세워둘지. 전부 데이터가 쌓인 뒤에.
+- **막는 것이었던 것 (2026-09-01 코드에서 확인, 지금은 해결됨)**:
   1. **`STATE = logs/state.json` 단일 경로** — 두 엔진이 서로 덮어쓴다. 심볼별 파일이나 심볼 키가 필요하고 `select.engine_flat`·`preflight`·`watch_cycle`이 따라온다.
   2. **`events.jsonl`에 symbol이 없다** — Cycle 레벨 `ev()`가 `t/sec/ev`만 쓰고 Book이 `side`를 더한다. 두 엔진의 이벤트가 구분되지 않아 `cycles.py`·`recon.py`·`capture.py`가 전부 잘못 읽는다. Cycle `ev()`에 `symbol=` 한 줄이면 되지만 기존 로그는 소급되지 않는다.
   3. **지갑 분할** — `resize()`가 `acct["equity"]` 전체로 사이징한다. 두 엔진이 각자 전액을 쓰면 의도의 2배가 나간다. 엔진당 지갑 비율이 필요하다(`SIZED` 옆에 붙는 자리).

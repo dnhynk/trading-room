@@ -21,9 +21,10 @@ def main():
     rep("PASS" if b.hedge else "FAIL", f"position mode: {a.get('posMode')}")
     rep("INFO", f"equity {float(a['accountEquity']):.2f} available {float(a['available']):.2f} lever long/short {a.get('isolatedLongLever')}/{a.get('isolatedShortLever')}")
     c = b.contract(sym); rep("PASS" if c.get("symbolStatus") == "normal" else "FAIL", f"contract status {c.get('symbolStatus')} tick={c['priceEndStep']}e-{c['pricePlace']} qstep=1e-{c['volumePlace']}")
-    try:
-        with open(os.path.join(LOGS, "state.json"), encoding="utf-8") as f: st = json.load(f)
-    except Exception as e: st = None; rep("WARN", f"state.json unreadable: {e}")
+    from bot.ws import load_states
+    all_st = load_states(); st = all_st.get(sym)
+    if len(all_st) > 1: rep("INFO", f"engines running: {', '.join(sorted(all_st))} (portfolio)")
+    if st is None: rep("WARN", f"no state for {sym} (state-{sym}.json); engines seen: {sorted(all_st) or 'none'}")
     if st:
         age = time.time() - time.mktime(time.strptime(st["t"], "%Y-%m-%d %H:%M:%S"))
         rep("PASS" if age < 15 else "FAIL", f"engine state age {age:.0f}s, errors={st['errors']}, ws pub/prv={st['ws']['pub']}/{st['ws']['prv']}")

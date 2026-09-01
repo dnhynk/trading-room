@@ -1,4 +1,4 @@
-"""Keeps one job alive.  python -m bot.supervise record|cycle|nightly|sweep|select
+"""Keeps one job alive.  python -m bot.supervise record|cycle|cycle:SYMBOL|nightly|sweep|select
 Runs the job as a child, appends its stdout+stderr to logs/<job>.log, restarts on exit (5s, doubling to 60s; reset after
 a 5-minute healthy run). `cycle` is not (re)started while the STOP file exists. Writes its own pid to logs/<job>.pid."""
 import os, subprocess, sys, time
@@ -8,12 +8,15 @@ JOBS = {"record": [sys.executable, "-u", "-m", "bot.ws", "record"], "cycle": [sy
         "select": [sys.executable, "-u", "-m", "bot.select"]}
 
 def main():
-    job = sys.argv[1]; cmd = JOBS[job]
+    job = sys.argv[1]                                   # cycle:SYMBOL = 그 심볼에 못박힌 엔진(포트폴리오)
+    base, _, sym = job.partition(":")
+    cmd = JOBS[base] + ([sym] if sym else [])
+    job = job.replace(":", "-")                         # 로그·pid 파일명: Windows 는 콜론을 못 쓴다
     os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)
     with open(os.path.join(ROOT, "logs", f"{job}.pid"), "w") as f: f.write(str(os.getpid()))
     backoff = 5
     while True:
-        if job == "cycle" and os.path.exists(os.path.join(ROOT, "STOP")):
+        if base == "cycle" and os.path.exists(os.path.join(ROOT, "STOP")):
             time.sleep(10); continue
         t0 = time.time()
         with open(os.path.join(ROOT, "logs", f"{job}.log"), "a", encoding="utf-8") as log:
