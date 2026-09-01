@@ -157,6 +157,24 @@ class Trims(unittest.TestCase):
         r = st.step(F(t=101, htf_lows=[2.8504]), [], pos); self.assertFalse(any(e[0] == "TRAIL" for e in r["events"]))   # sub-tick creep ignored
         r = st.step(F(t=102, htf_lows=[2.852]), [], pos); self.assertTrue(any(e[0] == "TRAIL" for e in r["events"]))
 
+    def test_a_lot_left_above_the_average_still_exits_on_the_average(self):
+        """사이클이 성공하면 더 싼 로트가 덜리고 avg 는 그대로 남는다(거래소 회계) — 남은 추가 유닛이 평단보다 비싼 자리에 놓이면
+        로트 기준으로는 영원히 못 파는데 포지션은 이익이다. 2026-09-01 live: 로트 [225@2.418, 225@2.387], avg 2.3597, mid 2.3655
+        — 평단 +0.246%(덜면 +1.31 실현)인데 로트 −0.901%라 엔진이 이익 나는 덜기를 거부했다.
+        CONCEPT "먹었던 이익이 본전으로 돌아오게 두지 않는다"; 게이트는 코어와 같은 기하이고 거부 횟수를 같이 쓴다."""
+        def run(fail_n, mid=2.3655):
+            st = Strategy(dict(side="long", unit_qty=225, cap_usdt=54.6, core_units=1, pop_min_pct=0.4,
+                               unit_min_pct=0.15, gate_floor_unit_pct=0.05, gate_relax=0.5, stop_structural_on=0))
+            pos = dict(lots=[[225.0, 2.418, "a"], [225.0, 2.387, "b"]], avg=2.359704, last="trim", last_trim_px=2.336, last_buy_px=2.387)
+            st.fail_n, st.last_qty, st.last_lot = fail_n, 450.0, "b"
+            return st.step(F(mid=mid, bid=mid - 0.0005, ask=mid + 0.0005, atr=0.00409, atr15=0.0145), [dict(sig="POP_STALLING")], pos), st, pos
+        r, st, _ = run(0); self.assertIsNone(r["trim"]); self.assertAlmostEqual(st.gate_eff, 0.15, 6)      # 거부 전에는 로트 기준 그대로
+        r, st, pos = run(3)
+        self.assertIsNotNone(r["trim"]); self.assertAlmostEqual(st.gate_eff, 0.05, 6)                      # 거부가 쌓이면 평단 기준(코어 기하)
+        self.assertAlmostEqual(st.pull["ref"], pos["avg"], 9)                                              # 기준이 로트가 아니라 평단
+        self.assertGreaterEqual((r["trim"][0] - pos["avg"]) * r["trim"][1], 0)                             # 실현 총손익은 음수가 될 수 없다
+        self.assertIsNone(run(3, mid=2.3590)[0]["trim"])                                                   # 평단 아래면 여전히 안 판다
+
     def test_derisk_never_sells_an_added_unit_below_its_price(self):
         st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0)); pos = dict(lots=[[70, 3.041, "a"]], avg=3.041, last="buy", last_buy_px=3.041)
         for t in (100, 101): st.step(F(t=t, mid=2.97, bid=2.969, ask=2.971), [], pos)

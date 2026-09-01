@@ -624,6 +624,12 @@ class Strategy:
             derisk = p["derisk_pct"] > 0 and ((self.regime == "AGAINST" and p["derisk_on_against"]) or self.derisk_armed
                                               or (p["derisk_on_breakdown"] and self.brk_seen) or self.prem_broken)
             gate = -p["derisk_pct"] if (derisk and is_core) else g_rel      # an added unit is only ever sold above its own buy price; the loss is taken on the core vs the average
+            if not is_core and dev_lot < gate:
+                # 평단 기준 출구. 사이클이 한 번 성공하면 더 싼 로트가 덜리고 avg 는 그대로 남으므로(거래소 회계) 남은 추가 유닛이
+                # 평단보다 비싼 자리에 놓인다 — 그때 로트 기준으로는 영원히 못 파는데 포지션은 이익이고, 돈은 평단 회계다.
+                # CONCEPT "먹었던 이익이 본전으로 돌아오게 두지 않는다". 게이트는 코어와 같은 기하(pop_min_pct, 바닥 0, 같은 거부 카운터).
+                g_avg = p["pop_min_pct"] * (p["favor_pop_mult"] if favor else 1.0) * (1 - p["gate_relax"]) ** self.fail_n
+                if dev >= g_avg: ref, dev_lot, gate = avg, dev, g_avg
             self.gate_eff = gate
             core = sum(l[0] for l in pos["lots"][:int(p["core_units"])]) if (favor or (derisk and dev_lot < g_rel)) and dev < p["full_exit_pct"] else 0.0   # no sacred core: at full_exit everything sells, FAVOR or not; de-risk only shapes the weak bounce
             sellable = max(qty - core, 0.0)
