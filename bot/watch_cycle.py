@@ -1,6 +1,7 @@
 """Quiet watcher for the agent's Monitor: prints new logs/alerts.jsonl lines and FILL / RESUME / PARAMS / DAY_CLOSE / ADOPT / STOP_HIT
-events as they happen, plus one summary line per side from logs/state.json every HB seconds. Nothing else."""
-import json, os, sys, time
+events as they happen, plus one summary line per side from every engine's logs/state-<SYMBOL>.json every HB seconds. Nothing else.
+감시견 줄은 logs/cycle*.log 를 전부 따라간다 — 목록을 손으로 적어두면 cycle:SYMBOL 로 띄운 엔진의 재기동이 조용히 빠진다."""
+import glob, json, os, sys, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 HB = int(sys.argv[1]) if len(sys.argv) > 1 else 3600
@@ -30,10 +31,14 @@ def one(s):
                  f"unit={b.get('unit_qty')} cap={b.get('cap_usdt')} stops={b.get('stops_today')}")
     return head
 
-pa = pe = ps = pn = 0
-for name, var in (("alerts.jsonl", "pa"), ("events.jsonl", "pe"), ("cycle.log", "ps"), ("nightly.log", "pn")):
+pa = pe = pn = 0
+sup = {}                                                  # 엔진마다 로그가 따로다: logs/cycle.log, logs/cycle-SYMBOL.log
+for name, var in (("alerts.jsonl", "pa"), ("events.jsonl", "pe"), ("nightly.log", "pn")):
     try: globals()[var] = os.path.getsize(os.path.join(LOGS, name))
     except OSError: pass
+for f in glob.glob(os.path.join(LOGS, "cycle*.log")):
+    try: sup[f] = os.path.getsize(f)
+    except OSError: sup[f] = 0
 print(summary(), flush=True); last_hb = time.time()
 while True:
     lines, pa = tail(os.path.join(LOGS, "alerts.jsonl"), pa)
@@ -43,9 +48,10 @@ while True:
         try: j = json.loads(l)
         except ValueError: continue
         if j.get("ev") in SHOW: print(l.strip()[:300], flush=True)
-    lines, ps = tail(os.path.join(LOGS, "cycle.log"), ps)
-    for l in lines:
-        if "SUPERVISOR" in l: print("SUP " + l.strip()[:200], flush=True)
+    for f in glob.glob(os.path.join(LOGS, "cycle*.log")):   # 새 엔진이 뜨면 그 로그도 자동으로 따라붙는다
+        lines, sup[f] = tail(f, sup.get(f, 0))
+        for l in lines:
+            if "SUPERVISOR" in l: print(f"SUP [{os.path.basename(f)[:-4]}] " + l.strip()[:200], flush=True)
     lines, pn = tail(os.path.join(LOGS, "nightly.log"), pn)
     for l in lines:
         if " REPORT " in l: print("NIGHTLY " + l.strip()[:200], flush=True)
