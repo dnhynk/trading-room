@@ -46,6 +46,9 @@ def rnd(x): return round(x, 6) if isinstance(x, float) else x
 POSITIVE = dict(strat=("unit_qty", "max_units", "max_notional", "cap_usdt", "pop_min_pct", "tick", "qstep", "buy_ttl_s", "confirm_within_s"),
                 sig=("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels", "rg_window", "vp_window", "vp_bucket_ticks", "stop_lookback"))
 OPTIONAL_NUM = ("stop_structural", "add_confirm", "unit_frac", "cap_frac", "daily_loss_frac", "notional_frac", "daily_loss_limit")   # None or a non-negative number
+# 자본 비례 한도: 고정 키 -> 그 키를 대신하는 지갑 배수. resize·load·apply_params·snapshot이 전부 여기서 읽는다 —
+# 같은 대응을 여러 곳에 적어두면 하나가 뒤처진다(2026-09-01 max_notional이 그렇게 낡았다). 새 한도는 여기만 더한다.
+SIZED = {"unit_qty": "unit_frac", "cap_usdt": "cap_frac", "daily_loss_limit": "daily_loss_frac", "max_notional": "notional_frac"}
 TYPED = {"symbol": lambda v: isinstance(v, str) and v.endswith("USDT"), "side": lambda v: v in ("long", "short"),
          "sides": lambda v: v is None or (isinstance(v, list) and bool(v) and all(x in ("long", "short") for x in v)),
          "mode": lambda v: v in (None, "dry", "live"), "adopt": lambda v: v is None or isinstance(v, bool)}
@@ -131,8 +134,7 @@ class Book:
         if self.pos["lots"] and b.get("stop") and b["stop"].get("order_id") and self.mode == "live": self.stop = b["stop"]   # its fills are recognised at once; resync confirms it
         if b.get("cooldown_until"): self.pos["cooldown_until"] = b["cooldown_until"]              # the post-stop cooldown survives a restart
         if b.get("preset_plan") and self.mode == "live": self.preset_plan = b["preset_plan"]     # the entry's preset stop still to be dropped
-        frac = {"unit_qty": "unit_frac", "cap_usdt": "cap_frac", "daily_loss_limit": "daily_loss_frac", "max_notional": "notional_frac"}
-        self.dyn = {k: v for k, v in (b.get("sizing") or {}).items() if k in frac and self.sp.get(frac[k])}   # equity-scaled sizes survive a restart (a position keeps its budget)
+        self.dyn = {k: v for k, v in (b.get("sizing") or {}).items() if k in SIZED and self.sp.get(SIZED[k])}   # equity-scaled sizes survive a restart (a position keeps its budget)
         if self.dyn: self.sp.update(self.dyn); self.strat.p = self.sp
 
     def snapshot(self):
@@ -143,7 +145,8 @@ class Book:
                     realized=rnd(self.realized), working={r: (w and dict(px=w["px"], qty=w["qty"], filled=w["filled"], oid=w["oid"])) for r, w in self.work.items()},
                     stop=self.stop, struct_stop=self.strat.struct_stop, stops_today=self.stops_today, cooldown_until=self.pos.get("cooldown_until"), preset_plan=self.preset_plan,
                     exch=self.exch, lever=self.lever, sizing=self.dyn, arm=self.strat.arm, pull=self.strat.pull, regime=self.strat.regime,
-                    unit_qty=self.sp["unit_qty"], cap_usdt=self.sp["cap_usdt"], unit_mult=self.pos.get("unit_mult", 1.0),
+                    **{k: self.sp.get(k) for k in SIZED},   # 자본 비례 한도는 전부 실효값으로 — params 절은 파일 값이고 sizing은 덮어쓴 것만 담는다
+                    unit_mult=self.pos.get("unit_mult", 1.0),
                     fail_n=self.strat.fail_n, gate_eff=self.strat.gate_eff, add_confirm=self.sp.get("add_confirm"))
 
     # ---- per-second step --------------------------------------------------------
@@ -178,9 +181,8 @@ class Book:
 
     def apply_params(self, sp):
         """New file params: fractions switched off return their keys to the file's fixed values; dynamic overrides outrank the file."""
-        for k in ("unit_frac", "cap_frac", "daily_loss_frac", "notional_frac"):
-            if not sp.get(k): self.dyn.pop({"unit_frac": "unit_qty", "cap_frac": "cap_usdt", "daily_loss_frac": "daily_loss_limit",
-                                            "notional_frac": "max_notional"}[k], None)
+        for fixed, frac in SIZED.items():
+            if not sp.get(frac): self.dyn.pop(fixed, None)
         self.sp = {**book_params(sp, self.side, self.cy.px_tick, len(self.cy.sides), self.cy.qstep), **self.dyn}
         if self.sp.get("add_confirm") is None: self.sp["add_confirm"] = 1 if len(self.cy.sides) > 1 else 0   # two books: each book's add is the other's trim -> higher bar
         self.strat.p = self.sp
@@ -191,7 +193,7 @@ class Book:
         account equity minus unrealized pnl; recomputed only while flat, at most every 60s, moving the unit at most 25% per step. Fixed
         params are the fallback — a fixed cap next to a scaling unit goes stale as the wallet compounds and starves the book."""
         self.sized_t = time.time()
-        if not any(self.sp.get(k) for k in ("unit_frac", "cap_frac", "daily_loss_frac", "notional_frac")) or self.cy.acct["equity"] is None: return
+        if not any(self.sp.get(k) for k in SIZED.values()) or self.cy.acct["equity"] is None: return
         qty, _ = pos_stats(self.pos); mid = self.feat.f.get("mid")
         if qty or not mid: return
         wallet = self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0); new = {}
