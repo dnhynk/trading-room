@@ -53,8 +53,7 @@ class Verdicts(unittest.TestCase):
 
     def test_a_long_leaves_at_a_confirmed_climax_and_the_same_coin_comes_back_short_without_cooldown(self):
         st = dict(held={"A": dict(side="long", peak=4e7, climax=150.2)}); p = dict(strat=dict(symbol="A", side="long"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1}})
-        v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertIsNone(v["wind"]); self.assertEqual(st["xstreak"], {"A": 1})
-        v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "phase:climax"))
+        v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "phase:climax"))   # exit_confirm 1: leaving is fast
         acts = apply(p, [row("A", "climax")], v, {"A": False}, HUNT, st, 1000.0)             # positioned: winds down, stays
         self.assertEqual([a[:2] for a in acts], [("wind", "A")]); self.assertEqual(p["books"]["A"]["wind_down"], 1)
         self.assertEqual(p["books"]["A"]["exit"], 1)                                          # a phase exit: the engine sells the whole position into the next stall
@@ -74,11 +73,24 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(p2["books"], {"B": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}}); self.assertEqual(p2["strat"]["side"], "short")
 
     def test_an_episode_death_winds_down_gently_without_the_exit_flag(self):
-        st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2)}, xstreak={"A": 1})
+        st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2)})
         p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
-        v = verdict([row("A", "markdown", dead=True)], p["books"], HUNT, st, 1000.0); self.assertIn("dead", v["wind"][1])   # dead = footprints' own-venue volume under a quarter of the peak
+        v = verdict([row("A", "markdown", dead=True)], p["books"], HUNT, st, 1000.0); self.assertIn("dead", v["wind"][1])   # volume gone: illiquid, exit_confirm 1 winds at once
         apply(p, [row("A", "markdown", dead=True)], v, {"A": False}, HUNT, st, 1000.0)
-        self.assertEqual(p["books"]["A"]["wind_down"], 1); self.assertNotIn("exit", p["books"]["A"])
+        self.assertEqual(p["books"]["A"]["wind_down"], 1); self.assertNotIn("exit", p["books"]["A"])                      # gentle: no market dump into thin books
+
+    def test_the_coin_going_quiet_off_its_own_hot_leaves_fast_with_exit_and_a_cooldown(self):
+        st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2, tw_peak=40.0)})   # entered when churn was 40
+        p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
+        v = verdict([row("A", "markdown", twoway24=18.0)], p["books"], HUNT, st, 1000.0)  # above the absolute floor (8) but under half its own peak
+        self.assertTrue(v["wind"][1].startswith("quiet")); self.assertEqual(st["xstreak"], {"A": 1})                     # one scan is enough (exit_confirm 1)
+        acts = apply(p, [row("A", "markdown", twoway24=18.0)], v, {"A": False}, HUNT, st, 1000.0)
+        self.assertEqual(p["books"]["A"]["exit"], 1)                                                                     # leave fast: sell the whole book into the next stall
+        st2 = dict(held={"A": dict(side="short", exit="quiet18/40")}, streak={"B:short": 1})
+        p2 = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1, "exit": 1}})
+        v2 = verdict([row("B", "markdown", twoway24=30.0)], p2["books"], HUNT, st2, 2000.0)
+        apply(p2, [row("B", "markdown", twoway24=30.0)], v2, {"A": True}, HUNT, st2, 2000.0)
+        self.assertGreater((st2.get("cool") or {}).get("A", 0), 2000.0 + 23 * 3600)                                     # a quiet coin cools down: chase a different one, do not re-add it
 
     def test_an_episode_death_starts_the_cooldown(self):
         st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2, exit="dead")}, streak={"B:short": 1})

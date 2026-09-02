@@ -30,7 +30,9 @@ from bot.ws import load_params, PARAMS, load_states
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 HUNT = dict(on=0,                # 1: this job owns params.books (bot.select stopped); 0: report only, never writes params or state
-            every_min=15, confirm=2, long_on=1, short_on=1,
+            every_min=10, confirm=2, exit_confirm=1, long_on=1, short_on=1,   # opening risk waits `confirm` scans; leaving is fast (`exit_confirm`, CONCEPT: the
+            #                                                                   risk-opening side bears the higher bar). Scan often — the churn we eat is minutes-scale
+            quiet_frac=0.5,      # leave when the last-24h two-way path falls under this share of the peak seen while held: the action left THIS coin, chase a hotter one
             min_vol=1e7,         # 24h quote volume floor (fills and footprint at this wallet)
             universe=1e7,        # the volume floor for pulling daily candles
             min_ratio=4.0,       # 24h volume over the median of the prior 7 UTC days: an episode (a fresh listing reads 99)
@@ -77,7 +79,9 @@ def exit_flags(r, held, hunt):
     f = []; side = held.get("side") or "short"; ph = r.get("phase")
     if r["qv"] < hunt["min_vol"]: f.append(f"vol{r['qv'] / 1e6:.0f}M")
     if r.get("dead"): f.append("dead")
-    if (r.get("twoway24") or 0) < hunt["exit_twoway"]: f.append(f"flat{r.get('twoway24')}")
+    tw = r.get("twoway24") or 0.0; tw_peak = held.get("tw_peak") or 0.0
+    if tw < hunt["exit_twoway"]: f.append(f"flat{tw}")                                          # absolute floor: no churn left to trade
+    elif tw_peak >= hunt["min_twoway"] and tw < hunt["quiet_frac"] * tw_peak: f.append(f"quiet{tw:.0f}/{tw_peak:.0f}")   # the coin cooled off its own hot: chase
     if side == "long":
         if ph in ("climax", "markdown", "squeeze"): f.append(f"phase:{ph}")
         if r["fund"] is not None and r["fund"] > hunt["max_fund"]: f.append(f"fund{r['fund']:+.2f}%")
@@ -149,9 +153,10 @@ def verdict(rows, books, hunt, st, now):
         if r and r.get("phase") not in ("unread", "shallow"):        # absent or unread = not evidence: keep
             hs = st.setdefault("held", {}).setdefault(cur, {})
             hs["peak"] = max(hs.get("peak") or 0.0, r.get("qv_shape") or r["qv"]); hs.setdefault("side", (books[cur].get("sides") or ["short"])[0])
+            hs["tw_peak"] = max(hs.get("tw_peak") or 0.0, r.get("twoway24") or 0.0)   # the churn when this coin was hot: leaving reads against it (quiet_frac)
             xf = exit_flags(r, hs, hunt)
             st.setdefault("xstreak", {})[cur] = st.get("xstreak", {}).get(cur, 0) + 1 if xf else 0
-            if xf and st["xstreak"][cur] >= int(hunt["confirm"]): wind = (cur, ",".join(xf)); hs["exit"] = wind[1]
+            if xf and st["xstreak"][cur] >= int(hunt["exit_confirm"]): wind = (cur, ",".join(xf)); hs["exit"] = wind[1]
     cool = st.get("cool") or {}
     def free(r):   # not held, or the leaving book itself on the OTHER side (the lifecycle flip: a long wound down at the climax comes back short)
         bk = books.get(r["symbol"])
@@ -165,7 +170,9 @@ def verdict(rows, books, hunt, st, now):
     if cur and not slot_open and top and top[0] == cur: add = None
     return dict(refuse=None, cur=cur, wind=wind, add=add, top=top)
 
-def _death(why): return any(k in (why or "") for k in ("dead", "vol", "flat"))
+def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol"))   # volume gone: dumping into thin books hurts — leave gently (stalls above cost, or the cap)
+def _leave_coin(why): return _illiquid(why) or any(k in (why or "") for k in ("flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one
+#            everything else (a phase flip: climax / markdown / markup / squeeze / newhigh) is a same-coin side change — no cooldown, exit fast into a stall
 
 def apply(p, rows, v, flats, hunt, st, now, recent=()):
     """Bring params.json to the verdict. One live hunt book at a time: the leaving book is dropped only when it is flat AND a
@@ -178,7 +185,7 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
         s, why = v["wind"]
         if s in books and not books[s].get("wind_down"):
             books[s]["wind_down"] = 1                                       # no more adds; trims and the stop keep working
-            if not _death(why): books[s]["exit"] = 1                        # the phase turned: the engine sells the whole position into the next stall whatever the cost
+            if not _illiquid(why): books[s]["exit"] = 1                     # a phase flip OR the coin gone quiet: the engine sells the whole position into the next stall whatever the cost (leave fast)
             acts.append(("wind", s, why))                                   # (an episode death leaves gently: stalls above cost, or the cap)
     leaving = [s for s in books if books[s].get("wind_down")]; live = [s for s in books if not books[s].get("wind_down")]
     add = v["add"]
@@ -186,7 +193,7 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
         for s in leaving:
             why = (st.get("held", {}).get(s) or {}).get("exit", "")
             del books[s]
-            if _death(why): st.setdefault("cool", {})[s] = now + float(hunt["cooldown_h"]) * 3600
+            if _leave_coin(why): st.setdefault("cool", {})[s] = now + float(hunt["cooldown_h"]) * 3600
             st.get("held", {}).pop(s, None); acts.append(("drop", s, f"flat ({why or 'replaced'})"))
         sym, side = add; r = by[sym]
         books[sym] = {"wallet_frac": 1.0, "sides": [side], "hunt": 1}
