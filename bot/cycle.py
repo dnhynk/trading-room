@@ -939,8 +939,9 @@ class Cycle:
                     try:
                         await self.rest(self.b.set_margin_mode, self.symbol, want_mode)
                         self.ev("MARGIN_MODE_SET", mode=want_mode, was=mode); self.b.margin_mode = mode = want_mode
-                        for bk in self.books.values(): bk.lever = None            # the other mode's leverage: re-read / set below
-                        off = [want + 1] if want else []                         # force the leverage set in the new mode
+                        prev = next((bk.lever for bk in self.books.values() if bk.lever), None)
+                        for bk in self.books.values(): bk.lever = None            # the other mode's leverage: set below, whatever it reads
+                        off = [prev] if want else []                              # the new mode's leverage is set unconditionally (its own field is unknown until the next read)
                     except Exception as e: self.err("set_margin_mode", e)
                 elif time.time() - getattr(self, "mm_alert_t", 0.0) >= 3600:
                     self.mm_alert_t = time.time(); self.ev("MARGIN_MODE_MISMATCH", mode=mode, want=want_mode, lever=off[0] if off else want)
