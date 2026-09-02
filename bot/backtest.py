@@ -266,9 +266,13 @@ class Engine:
                 if fill is None: bk.work[role] = None; self.events.append((sec, "CANCEL", bk.side, role, w["px"], "crossed")); continue
                 self.on_fill(bk, role, fill, w["px"], fill * w["px"] * MAKER, w["oid"], lot=w.get("lot"))
 
-    def sim_book(self, bids, asks):
-        """The second's book snapshot drains the queue ahead of resting orders by the cancellations it shows (sim_book in signal.py)."""
-        sim_book([(w, (role == "buy") == (bk.s > 0)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])], bids, asks)
+    def sim_book(self, bids, asks, sec):
+        """The second's book snapshot: the queue ahead of resting orders drains by the cancellations it shows; an opposite touch at our
+        price cancels an order placed this second (crossed on arrival) or fills an older one (sim_book in signal.py)."""
+        orders = [((bk, role), w, (role == "buy") == (bk.s > 0)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])]
+        for (bk, role), w, fill in sim_book(orders, bids, asks, t=sec, qstep=self.qstep):
+            if fill is None: bk.work[role] = None; self.events.append((sec, "CANCEL", bk.side, role, w["px"], "crossed")); continue
+            self.on_fill(bk, role, fill, w["px"], fill * w["px"] * MAKER, w["oid"], lot=w.get("lot"))
 
     def run(self, seconds):
         """Per condensed second N, in live order: the first message of N closes N-1 -> the tick decides on N-1's features with N-1's
@@ -291,7 +295,7 @@ class Engine:
                 self.sim_trades(trades, sec)
                 self.feat.feed(dict(arg={**arg, "channel": "trade"}, action="update", data=[dict(price=str(p), size=str(q), side=s) for p, q, s in trades], ts=ts))
             if bids and asks:
-                self.sim_book(bids, asks)                                # N's book: what the level lost beyond N's prints was cancelled
+                self.sim_book(bids, asks, sec)                           # N's book: what the level lost beyond N's prints was cancelled; a crossed touch cancels (this second) or fills
                 self.feat.feed(dict(arg={**arg, "channel": "books15"}, data=[dict(bids=bids, asks=asks, ts=str(ts))], ts=ts))
             if rows and not fed_rows: self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts))
             if mark: self.feat.feed(dict(arg={**arg, "channel": "ticker"}, data=[dict(markPrice=str(mark))], ts=ts))

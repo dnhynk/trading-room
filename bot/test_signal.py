@@ -5,23 +5,33 @@ from bot.signal import Strategy, apply_fill, pos_stats, zigzag, sim_match, sim_b
 class FillModel(unittest.TestCase):
     def test_cancellations_at_our_level_drain_the_queue_ahead_of_us(self):
         w = dict(px=3.0, qty=70, filled=0.0, queue=100.0, S=100.0, seen=0.0, t=1)      # placed behind 100 on the bid
-        sim_book([(w, True)], [[3.0, 40.0], [2.999, 500.0]], [[3.001, 5.0]])            # 60 gone with no print: cancelled, uniformly over the level
+        self.assertEqual(sim_book([("A", w, True)], [[3.0, 40.0], [2.999, 500.0]], [[3.001, 5.0]], t=2), [])   # 60 gone with no print: cancelled, uniformly over the level
         self.assertAlmostEqual(w["queue"], 40.0)
         out = sim_match([("A", w, True)], 3.0, 45.0, "sell", 0.1, t=5)                   # 45 hit the bid: 40 ahead of us, 5 for us
         self.assertEqual([(k, f) for k, _, f in out], [("A", 5.0)]); w["filled"] += 5
         self.assertAlmostEqual(w["seen"], 45.0)
-        sim_book([(w, True)], [[3.0, 20.0]], [[3.001, 5.0]])                            # the drop 40 -> 20 is what the print took: no cancel, no change
+        sim_book([("A", w, True)], [[3.0, 20.0]], [[3.001, 5.0]], t=5)                  # the drop 40 -> 20 is what the print took: no cancel, no change
         self.assertAlmostEqual(w["queue"], 0.0); self.assertEqual(w["seen"], 0.0)
 
     def test_a_touch_worse_than_our_price_means_nobody_ahead_and_deeper_levels_are_unknown(self):
         w = dict(px=3.0, qty=70, filled=0.0, queue=100.0, S=100.0, seen=0.0, t=1)
-        sim_book([(w, True)], [[3.010, 9.0], [3.009, 9.0], [3.008, 9.0], [3.007, 9.0], [3.006, 9.0]], [[3.011, 1.0]])   # our bid is below the shown depth
+        sim_book([("A", w, True)], [[3.010, 9.0], [3.009, 9.0], [3.008, 9.0], [3.007, 9.0], [3.006, 9.0]], [[3.011, 1.0]], t=2)   # our bid is below the shown depth
         self.assertEqual(w["queue"], 100.0)
-        sim_book([(w, True)], [[2.999, 50.0]], [[3.001, 1.0]])                          # best bid under our price: our level emptied
+        sim_book([("A", w, True)], [[2.999, 50.0]], [[3.001, 1.0]], t=2)                # best bid under our price: our level emptied
         self.assertEqual(w["queue"], 0.0)
         self.assertEqual([f for _, _, f in sim_match([("A", w, True)], 3.0, 1.0, "sell", 0.1, t=5)], [1.0])
         a = dict(px=3.0, qty=70, filled=0.0, queue=10.0, S=10.0, seen=0.0, t=1)        # an ask: mirror
-        sim_book([(a, False)], [[2.999, 1.0]], [[3.002, 5.0]]); self.assertEqual(a["queue"], 0.0)
+        sim_book([("A", a, False)], [[2.999, 1.0]], [[3.002, 5.0]], t=2); self.assertEqual(a["queue"], 0.0)
+
+    def test_an_opposite_touch_at_our_price_cancels_in_the_placement_second_and_fills_later(self):
+        w = dict(px=3.0, qty=50, filled=0.0, queue=10.0, S=10.0, seen=0.0, t=100)     # a bid placed at second 100
+        self.assertEqual(sim_book([("A", w, True)], [[2.998, 9.0]], [[3.0, 4.0], [3.001, 8.0]], t=100, qstep=0.1), [("A", w, None)])   # the ask came to 3.0 with no print: crossed on arrival
+        w = dict(px=3.0, qty=50, filled=0.0, queue=10.0, S=10.0, seen=3.0, t=100)     # same second, but the level traded: the order was on the book
+        self.assertEqual([(k, f) for k, _, f in sim_book([("A", w, True)], [[2.998, 9.0]], [[3.0, 4.0], [3.001, 8.0]], t=100, qstep=0.1)], [("A", 4.0)])   # the 4 shown at 3.0 match us
+        w = dict(px=3.0, qty=50, filled=0.0, queue=10.0, S=10.0, seen=0.0, t=100)
+        self.assertEqual([(k, f) for k, _, f in sim_book([("A", w, True)], [[2.997, 9.0]], [[2.999, 30.0], [3.0, 30.0]], t=101, qstep=0.1)], [("A", 50.0)])   # a second later, asks through our price: filled whole
+        a = dict(px=3.0, qty=50, filled=0.0, queue=10.0, S=10.0, seen=0.0, t=100)     # an ask: mirror
+        self.assertEqual([(k, f) for k, _, f in sim_book([("A", a, False)], [[3.0, 7.0]], [[3.002, 9.0]], t=101, qstep=0.1)], [("A", 7.0)])
 
     def test_a_print_through_the_price_in_the_first_second_is_a_post_only_cancel_not_a_fill(self):
         w = dict(px=3.0, qty=50, filled=0.0, queue=10.0, t=100)
@@ -391,6 +401,14 @@ class Relax(unittest.TestCase):
         r = st.step(F(t=170, mid=3.0075, bid=3.0065, ask=3.0085), [dict(sig="POP_STALLING")], pos)   # +0.25% >= relaxed 0.2%: sells
         self.assertEqual(r["trim"][1], 70); self.assertIn("PULL_TRIM", [e[0] for e in r["events"]])
 
+    def test_the_core_gate_never_relaxes_below_the_round_trip_fee(self):
+        st = Strategy(dict(side="long", unit_qty=70, fee_rt_pct=0.08)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(t=100), [], pos)
+        for i in range(8): st.step(F(t=101 + i * 70, mid=3.0005, bid=3.0004, ask=3.0006), [dict(sig="POP_STALLING")], pos)   # +0.02%: refused 8 times, the gate walks down ...
+        self.assertAlmostEqual(st.gate_eff, 0.08 + (0.4 - 0.08) * 0.5 ** 7, places=6)                                            # ... toward 0.08%, never to breakeven (the 8th refusal counts after this tick's gate)
+        r = st.step(F(t=700, mid=3.0027, bid=3.0026, ask=3.0028), [dict(sig="POP_STALLING")], pos)                              # +0.09% >= the floor: sells
+        self.assertEqual(r["trim"][1], 70)
+
     def test_partial_trim_keeps_the_lot_refusals_a_new_lifo_lot_resets_them(self):
         st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0, cap_usdt=60)); pos = dict(lots=[[70, 3.05, "a"], [70, 3.0, "b"]], avg=3.025, last="buy", last_buy_px=3.0)
         st.step(F(), [], pos)                                                                          # position seen
@@ -541,6 +559,10 @@ class ThirdDetector(unittest.TestCase):
         # sec 8 rebuilt the push to 1.2 (>= half of the leg's 2.0) and sec 9 died again, but the 60 s cooldown holds
         self.assertFalse(s8_step(st, 0.3, 64, True, p)); self.assertTrue(s8_step(st, 0.3, 65, True, p))
         st = s8_state(); self.assertEqual([sec for sec, x in enumerate(xs) if s8_step(st, x, sec, False, p)], [])   # the depth condition gates it
+        st = s8_state(); p3 = dict(p, s8_hold=3)
+        self.assertEqual([sec for sec, x in enumerate(xs) if s8_step(st, x, sec, True, p3)], [7])                     # dead at 5, 6, 7: the third dead second fires
+        st = s8_state(); conf = {5: False, 6: False, 7: True}
+        self.assertEqual([sec for sec, x in enumerate(xs) if s8_step(st, x, sec, True, p, conf.get(sec, True))], [7])   # no confirmation at 5-6: it waits, does not forget
 
     def _slide(self, feat):
         book = lambda m, ts: dict(arg=dict(channel="books15"), data=[dict(bids=[[round(m - 0.01 - i * 0.01, 4), 5] for i in range(5)], asks=[[round(m + 0.01 + i * 0.01, 4), 5] for i in range(5)], ts=str(ts))], ts=ts)

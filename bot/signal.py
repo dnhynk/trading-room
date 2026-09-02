@@ -27,6 +27,7 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            # firings, same depth condition as v). s8_on=0 records it only (shadow=True: the Strategy ignores it and the shared cooldown is
            # untouched, so live is bit-identical; replay/legs/nightly compare v / 1m / s8), 1 lets it arm and trim like the other two
            s8_on=0, s8_h=8, s8_decel=0.3, s8_rebuild=0.5, s8_cool=60,
+           s8_hold=1, s8_vd=0,     # which pause (NEXT 1): the dead speed must persist s8_hold seconds; s8_vd=1 also needs the leg's aggressor volume to be fading (sell_decay / buy_decay)
            # structure: last confirmed 1m pivot low/high (zigzag rg_theta over stop_lookback candles) for the structural stop
            stop_lookback=180,
            # volume-decay component of a deceleration (10s windows of aggressor volume vs the 10-min average): a spike of >= vd_spike x that
@@ -46,7 +47,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              # multiples of wallet equity (cycle.py resizes when flat). CONCEPT: "한 포지션에 거는 돈과 하루 손실에는 상한이 있고, 그 상한은 자본에 비례한다"
              # — every limit here has to scale or it goes stale as the wallet compounds (2026-09-01: a fixed max_notional 900 fell below one
              # resized unit and skipped most signals). notional_frac = max_units x unit_frac holds exactly one full ladder.
-             gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: breakeven)
+             gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: the round-trip fee, fee_rt_pct)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
              against_regime_mult=0.0,                    # > 0: an AGAINST regime scales the unit by this instead of vetoing adds (a size scale, never a veto)
@@ -89,19 +90,23 @@ def book_params(sp, side, tick, n_sides, qstep=None, fee_rt=None):
             if p.get(k): p[k] = p[k] / n_sides
     return p
 
-def s8_state(): return dict(best=0.0, legmax=0.0, imax=None, cool=-1)
+def s8_state(): return dict(best=0.0, legmax=0.0, imax=None, cool=-1, dead=0)
 
-def s8_step(st, x, sec, deep, p):
+def s8_step(st, x, sec, deep, p, confirm=True):
     """One second of the third deceleration detector (legs.py's s8 candidate, causal). x = the s8_h-second move in ATR units, positive
     while the leg advances (falling for a dip, rising for a pop). Tracks the leg's strongest push (legmax) and the push since the last
-    firing (best); fires when that push has rebuilt to >= s8_rebuild x legmax, the speed has since died to <= s8_decel x it, the leg is
-    deep enough (deep = the engine's dip_min_atr condition) and s8_cool has passed since the last firing. Normalised by the leg's own
-    push, not by sigma: a 1%/min slide is 'slow' in sigma units (v ~ 0.5 when sigma is tick noise; 85% of legs never reach |v| = 1)
-    but its own deceleration is unmistakable — legs tables 2026-08-29..31: actionable on 57-60% of dips vs v 10-21% / 1m 7-21%."""
+    firing (best); fires when that push has rebuilt to >= s8_rebuild x legmax, the speed has since died to <= s8_decel x it for s8_hold
+    consecutive seconds (1 = the first dead second), the leg is deep enough (deep = the engine's dip_min_atr condition), s8_cool has
+    passed since the last firing and confirm holds (the caller's exhaustion evidence, e.g. the aggressor volume that made the leg is
+    fading; True = none required). Normalised by the leg's own push, not by sigma: a 1%/min slide is 'slow' in sigma units (v ~ 0.5
+    when sigma is tick noise; 85% of legs never reach |v| = 1) but its own deceleration is unmistakable — legs tables 2026-08-29..31:
+    actionable on 57-60% of dips vs v 10-21% / 1m 7-21%. Which pause to take is the open question (NEXT 1): hold and confirm are its knobs."""
     st["legmax"] = max(st["legmax"], x)
-    if x > st["best"]: st["best"], st["imax"] = x, sec; return False
-    if st["best"] >= p["s8_rebuild"] * st["legmax"] > 0 and st["imax"] is not None and sec > st["imax"] and sec >= st["cool"] and deep and x <= p["s8_decel"] * st["best"]:
-        st["best"], st["imax"], st["cool"] = 0.0, None, sec + p["s8_cool"]; return True
+    if x > st["best"]: st["best"], st["imax"], st["dead"] = x, sec, 0; return False
+    armed = st["best"] >= p["s8_rebuild"] * st["legmax"] > 0 and st["imax"] is not None and sec > st["imax"] and sec >= st["cool"] and deep
+    st["dead"] = st["dead"] + 1 if armed and x <= p["s8_decel"] * st["best"] else 0
+    if st["dead"] >= p["s8_hold"] and confirm:
+        st["best"], st["imax"], st["cool"], st["dead"] = 0.0, None, sec + p["s8_cool"], 0; return True
     return False
 
 def zigzag(closes, th):
@@ -450,10 +455,10 @@ class Features:
             h = p["s8_h"]
             if n > h > 0:               # third source: the h-second move in ATR units against the leg's own strongest push (s8_step)
                 x = (allm[-1 - h] - mid) / atr
-                if s8_step(self.s8["d"], x, sec, D >= p["dip_min_atr"], p) and (not p["s8_on"] or dip_ok()):
+                if s8_step(self.s8["d"], x, sec, D >= p["dip_min_atr"], p, not p["s8_vd"] or sell_decay) and (not p["s8_on"] or dip_ok()):
                     if p["s8_on"]: d["last"] = (sec, mid)
                     out.append(dict(sig="DIP_SLOWING", src="s8", shadow=not p["s8_on"]))
-                if s8_step(self.s8["u"], -x, sec, U >= p["dip_min_atr"], p) and (not p["s8_on"] or pop_ok()):
+                if s8_step(self.s8["u"], -x, sec, U >= p["dip_min_atr"], p, not p["s8_vd"] or buy_decay) and (not p["s8_on"] or pop_ok()):
                     if p["s8_on"]: u["last"] = (sec, mid)
                     out.append(dict(sig="POP_STALLING", src="s8", shadow=not p["s8_on"]))
             for name in self.pending:   # 1m-candle rule, same cooldown and veto as the velocity rule
@@ -499,19 +504,34 @@ def sim_match(orders, px, size, side, qstep, t=None):
         if fill > 0: out.append((key, w, fill))
     return out
 
-def sim_book(orders, bids, asks):
-    """Book snapshot between prints, same resting orders as sim_match (orders = [(w, bid)]): the queue ahead of us also drains by
-    cancellation. A drop of the displayed size at our level that the prints since the last snapshot (w["seen"]) do not explain was
-    cancelled; cancels are taken as uniform over the level, so the part ahead of us shrinks in proportion (w["S"] = the level's size at
-    the last snapshot, set to the queue at placement). A touch worse than our price means nobody rests at ours any more (queue 0); a
-    level outside the shown depth is unknown (no update). Why: on 861 live maker orders (2026-08-29..09-02) the displayed queue at
-    placement turned over 1.4x (trims) to 5x (adds) by cancellation during the order's life, and the print-only model predicted no fill
-    within the live lifetime for half of the orders that filled live (with this rule 8-14%); the trade feed itself is complete (print
-    volume = candle volume, 1.00 per minute), so the queue, not the prints, was wrong."""
-    for w, bid in orders:
-        lvl = bids if bid else asks
-        if not lvl or w["qty"] - w["filled"] <= 0: continue
-        px, best, deep = w["px"], lvl[0][0], lvl[-1][0]
+def sim_book(orders, bids, asks, t=None, qstep=None):
+    """Book snapshot between prints, same resting orders as sim_match (orders = [(key, w, bid)]). Two things a snapshot tells:
+    (1) The OPPOSITE touch at or through our price (best ask <= our bid) is a marketable quote that would have matched a resting order:
+        in the placement second with no print at our price it is the exchange's post-only cancel instead (the order would have crossed on
+        arrival; live 2026-08-29..09-02: 94 of 95 on-arrival cancels had this, most without any print), later it is a fill at our price of
+        what is shown at or through it (recovers a third of the live fills the print/queue model never predicted). Returned as
+        (key, w, None) / (key, w, qty) for the caller to apply, like sim_match.
+    (2) The queue ahead of us also drains by cancellation: a drop of the displayed size at our level that the prints since the last
+        snapshot (w["seen"]) do not explain was cancelled, taken as uniform over the level, so the part ahead of us shrinks in proportion
+        (w["S"] = the level's size at the last snapshot, set to the queue at placement). A touch worse than our price means nobody rests
+        at ours any more (queue 0); a level outside the shown depth is unknown (no update). Why: on 861 live maker orders the displayed
+        queue at placement turned over 1.4x (trims) to 5x (adds) by cancellation during the order's life, and the print-only model
+        predicted no fill within the live lifetime for half of the orders that filled live (with this rule 8-14%); the trade feed itself
+        is complete (print volume = candle volume, 1.00 per minute), so the queue, not the prints, was wrong."""
+    out = []
+    for key, w, bid in orders:
+        rem = w["qty"] - w["filled"]
+        if rem <= 0: continue
+        px = w["px"]; lvl = bids if bid else asks; opp = asks if bid else bids
+        if opp and ((opp[0][0] <= px) if bid else (opp[0][0] >= px)):
+            w["queue"], w["S"] = 0.0, 0.0                                      # a crossed touch: nobody rests at our price
+            if t is not None and t < w.get("t", 0) + CROSS_S and w.get("seen", 0.0) <= 0: out.append((key, w, None)); continue
+            fill = min(rem, sum(q for p, q in opp if ((p <= px) if bid else (p >= px))))
+            if qstep: fill = round(fill / qstep) * qstep
+            if fill > 0: out.append((key, w, fill))
+            w["seen"] = 0.0; continue
+        if not lvl: continue
+        best, deep = lvl[0][0], lvl[-1][0]
         if (px > best) if bid else (px < best): S = 0.0
         elif (px < deep) if bid else (px > deep): continue
         else: S = next((q for p, q in lvl if p == px), 0.0)
@@ -520,6 +540,7 @@ def sim_book(orders, bids, asks):
             drop = S0 - S - w.get("seen", 0.0)
             if drop > 0: w["queue"] = max(w["queue"] - drop * w["queue"] / S0, 0.0)
         w["S"], w["seen"] = S, 0.0
+    return out
 
 def pos_stats(pos):
     qty = sum(l[0] for l in pos["lots"])
@@ -702,7 +723,8 @@ class Strategy:
             lot_id = pos["lots"][-1][2]
             if qty > self.last_qty or lot_id != self.last_lot: self.fail_n = 0               # a new lot gets a fresh expectation; a partial trim of the same lot keeps its refusals
             self.last_lot = lot_id
-            floor = 0.0 if is_core else max(p["gate_floor_unit_pct"], p.get("fee_rt_pct") or 0.0)   # core: breakeven; added unit: its round trip paid even as a taker (CONCEPT: 그 물량의 왕복은 이익)
+            floor_core = p.get("fee_rt_pct") or 0.0                                          # core (and the average-based exit): the round trip paid even as a taker — a breakeven sale after refusals was a fee-sized loss (user 2026-09-02; was 0)
+            floor = floor_core if is_core else max(p["gate_floor_unit_pct"], floor_core)     # added unit: the same, floored by gate_floor_unit_pct (CONCEPT: 그 물량의 왕복은 이익)
             g_rel = floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n            # the market refusing bounces lowers the bar
             if qty != self.last_qty or dev_lot >= g_rel: self.derisk_armed = self.brk_seen = self.prem_broken = False   # a fill or a full recovery clears the damage evidence (latch, break and premise alike) ...
             elif dev <= -step: self.derisk_armed = True                                    # ... and it can only re-arm on a later tick
@@ -714,8 +736,8 @@ class Strategy:
             if not is_core and dev_lot < gate:
                 # 평단 기준 출구. 사이클이 한 번 성공하면 더 싼 로트가 덜리고 avg 는 그대로 남으므로(거래소 회계) 남은 추가 유닛이
                 # 평단보다 비싼 자리에 놓인다 — 그때 로트 기준으로는 영원히 못 파는데 포지션은 이익이고, 돈은 평단 회계다.
-                # CONCEPT "먹었던 이익이 본전으로 돌아오게 두지 않는다". 게이트는 코어와 같은 기하(pop_min_pct, 바닥 0, 같은 거부 카운터).
-                g_avg = p["pop_min_pct"] * (p["favor_pop_mult"] if favor else 1.0) * (1 - p["gate_relax"]) ** self.fail_n
+                # CONCEPT "먹었던 이익이 본전으로 돌아오게 두지 않는다". 게이트는 코어와 같은 기하(pop_min_pct, 바닥 = 왕복 수수료, 같은 거부 카운터).
+                g_avg = floor_core + (p["pop_min_pct"] * (p["favor_pop_mult"] if favor else 1.0) - floor_core) * (1 - p["gate_relax"]) ** self.fail_n
                 if dev >= g_avg: ref, dev_lot, gate = avg, dev, g_avg
             self.gate_eff = gate
             # 되돌림 고점 출구가 쓰는 가격 문턱: derisk 의 −derisk_pct 완화는 쓰지 않는다. 그 완화 아래에서는 "고점"이 평단을 한 번

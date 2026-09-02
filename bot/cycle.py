@@ -762,7 +762,7 @@ class Cycle:
             if arg.get("instId") != self.symbol: return
             if ch == "trade" and j.get("action") != "snapshot" and self.mode == "dry": await self.sim_trades(data)
             sigs = self.feat.feed(j)
-            if ch == "books15" and self.mode == "dry": self.sim_book()
+            if ch == "books15" and self.mode == "dry": await self.sim_book()
             if sigs or self.feat.f.get("t") != self.last_t:
                 self.last_t = self.feat.f.get("t")
                 for x in sigs:
@@ -781,9 +781,13 @@ class Cycle:
                 if fill is None: bk.work[role] = None; bk.ev("CANCEL", role=role, px=w["px"], filled=w["filled"], oid=w["oid"], why="crossed"); continue
                 await bk.on_fill(role, fill, w["px"], fill * w["px"] * self.maker, w["oid"], "sim")
 
-    def sim_book(self):
-        """Dry: a book snapshot drains the queue ahead of resting orders by the cancellations it shows (sim_book in signal.py)."""
-        sim_book([(w, bk.rest_on_bid(role)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])], self.feat.bids, self.feat.asks)
+    async def sim_book(self):
+        """Dry: a book snapshot drains the queue ahead of resting orders by the cancellations it shows; an opposite touch at our price
+        cancels an order younger than CROSS_S (crossed on arrival) or fills an older one (sim_book in signal.py)."""
+        orders = [((bk, role), w, bk.rest_on_bid(role)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])]
+        for (bk, role), w, fill in sim_book(orders, self.feat.bids, self.feat.asks, t=time.time(), qstep=self.qstep):
+            if fill is None: bk.work[role] = None; bk.ev("CANCEL", role=role, px=w["px"], filled=w["filled"], oid=w["oid"], why="crossed"); continue
+            await bk.on_fill(role, fill, w["px"], fill * w["px"] * self.maker, w["oid"], "sim")
 
     async def private(self, ch, data):
         if ch == "account":

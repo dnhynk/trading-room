@@ -43,6 +43,10 @@ def report(day):
         out.append(run_cmd(["bot.capture", "--day", day]))
         out.append("\n## recon (백테스트 캘리브레이션: 경계 이벤트 없는 구간만 골라 같은 사이즈로 돌린 백테스트와 실매매 장부를 대조 — 아래 backtest 기반 수치는 전부 이 오차를 진다)\n")
         out.append(run_cmd(["bot.recon", "--day", day], timeout=3600))   # books 의 심볼마다 구간별 백테스트를 돌린다
+        out.append("\n## slippage (live fills vs the mid at arrival, by symbol / maker-taker / role: the direct cost observation NEXT 6.5 wants instead of imp%)\n")
+        out.append(run_cmd(["bot.slip", "--day", day]))
+        out.append("\n## estimator vs live (scan-history p_up / trials per hour against the day's live cycles per symbol; NEXT 6.1-2, 8)\n")
+        out.append(run_cmd(["bot.pair", "--day", day]))
         out.append("\n## tuner (report only; every candidate is judged on the whole basket's tapes)\n")
         out.append(run_cmd(["bot.tune", "--days", "7", "--workers", "4"], timeout=7200))
     else: out.append("no recordings for this day\n")

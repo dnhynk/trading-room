@@ -116,6 +116,50 @@ class Ledger(unittest.TestCase):
         self.assertAlmostEqual(sum(l["qty"] for l in books[("AUSDT", "long")]), 35.0)              # ... and 35 of the core lot remain (LIFO would have eaten the unit first)
         self.assertEqual(geometry_of(done)["n"], 1); self.assertIsNone(geometry(since="2026-09-02 00:00", min_n=2))   # too few cycles: the constants stand
 
+class Slippage(unittest.TestCase):
+    """bot.slip joins each fill to the mid its order saw at arrival (PLACE / TAKER .mid) by clientOid; cost is signed by the trade's direction."""
+    LINES = [
+        '{"t": "2026-09-02 10:00:00", "ev": "START", "symbol": "AUSDT", "sides": ["long"], "tick": 0.001, "qstep": 0.1}',
+        '{"t": "2026-09-02 10:01:00", "ev": "PLACE", "symbol": "AUSDT", "side": "long", "role": "buy", "px": 2.999, "qty": 70, "oid": "cycL-b1", "queue": 5.0, "mid": 3.0}',
+        '{"t": "2026-09-02 10:01:03", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "buy", "qty": 70, "px": 2.999, "fee": 0.042, "pnl": -0.042, "scope": "maker", "oid": "cycL-b1", "mid": 2.997}',
+        '{"t": "2026-09-02 10:05:00", "ev": "TAKER", "symbol": "AUSDT", "side": "long", "qty": 70, "oid": "cycL-m1", "mid": 3.02}',
+        '{"t": "2026-09-02 10:05:01", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "trim", "qty": 70, "px": 3.018, "fee": 0.127, "pnl": 1.2, "scope": "taker", "oid": "cycL-m1", "mid": 3.019}',
+        '{"t": "2026-09-02 10:09:00", "ev": "FILL", "symbol": "AUSDT", "side": "long", "role": "trim", "qty": 70, "px": 3.03, "fee": 0.04, "pnl": 2.0, "scope": "maker", "oid": "cycL-t9"}',
+    ]
+
+    def test_cost_is_signed_by_direction_and_fills_without_an_arrival_are_counted_not_guessed(self):
+        import tempfile, os
+        from bot import slip
+        d = tempfile.mkdtemp(); path = os.path.join(d, "events.jsonl")
+        with open(path, "w", encoding="utf-8") as f: f.write(chr(10).join(self.LINES) + chr(10))
+        old = slip.LOG; slip.LOG = path
+        try: rs, missing = slip.rows()
+        finally: slip.LOG = old
+        self.assertEqual(missing, 1); self.assertEqual(len(rs), 2)
+        text = slip.summarize(rs)
+        self.assertIn("maker  buy", text); self.assertIn("taker  trim", text)
+        maker = [l for l in text.splitlines() if "maker" in l][0].split(); taker = [l for l in text.splitlines() if "taker" in l][0].split()
+        self.assertAlmostEqual(float(maker[4]), -3.33, places=1)     # bought at 2.999 vs arrival 3.0: -3.3 bp (the touch is half a spread better than the mid)
+        self.assertAlmostEqual(float(maker[6]), -10.0, places=1)     # the mid fell to 2.997 by the fill: adverse drift for a buyer
+        self.assertAlmostEqual(float(taker[4]), 6.62, places=1)      # sold at 3.018 vs arrival 3.02: paid 6.6 bp
+
+class Pairing(unittest.TestCase):
+    """bot.pair: the day's scan medians per symbol beside the live cycles closed that day."""
+    def test_estimator_and_live_join_on_symbol_and_utc_day(self):
+        import tempfile, os, json
+        from bot import pair
+        d = tempfile.mkdtemp(); path = os.path.join(d, "scan-history.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for t, pu in (("2026-09-02 09:00:00", 0.6), ("2026-09-02 13:00:00", 0.7), ("2026-09-02 17:00:00", 0.8)):   # KST: all on UTC 2026-09-02
+                f.write(json.dumps(dict(t=t, rows=[dict(symbol="AUSDT", p_up=pu, trials_h=2.0, edge=0.1, impact=0.002, entry=True)])) + chr(10))
+        est = pair.estimator(path=path)
+        self.assertEqual(est[("AUSDT", "20260902")]["p_up"], 0.7); self.assertEqual(est[("AUSDT", "20260902")]["scans"], 3)
+        done = [dict(symbol="AUSDT", t0="2026-09-02 12:00:00", t1="2026-09-02 14:00:00", qty=70, entry=3.0, gross=0.5, net=0.4),
+                dict(symbol="AUSDT", t0="2026-09-02 14:00:00", t1="2026-09-02 18:00:00", qty=70, entry=3.0, gross=-0.3, net=-0.35)]
+        lv = pair.live(done)
+        self.assertEqual(lv[("AUSDT", "20260902")]["n"], 2); self.assertAlmostEqual(lv[("AUSDT", "20260902")]["cyc_h"], 2 / 6); self.assertEqual(lv[("AUSDT", "20260902")]["win"], 0.5)
+        self.assertIn("AUSDT", pair.table(est, lv))
+
 class BacktestSizing(unittest.TestCase):
     def test_equity_freezes_the_live_sizes_and_switches_the_fractions_off(self):
         from bot.backtest import size_from_equity
