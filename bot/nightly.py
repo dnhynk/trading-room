@@ -63,6 +63,8 @@ def report(day):
                 out.append(f"--follow {fol}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--follow", fol]).strip().split("\n") or [""])[-1])
             out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")
             out.append(run_cmd(["bot.sweeps"] + warm + files + ["--sym", sym, "--quiet", "--day", day]))
+            out.append("\n## phases (does the lifecycle read pay: forward move / live cycles per phase / order-flow footprints; 세력대항마 stage 2, NEXT 6.13)\n")
+            out.append(run_cmd(["bot.phases", sym, "--day", day] + files, timeout=1800))
         out.append("\n# basket\n")
         out.append("## direction capture (live book from events.jsonl x the day's candles; up/dn held = share of minute moves and of legs that happened while holding)\n")
         out.append(run_cmd(["bot.capture", "--day", day]))
