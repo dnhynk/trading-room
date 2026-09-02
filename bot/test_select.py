@@ -163,6 +163,32 @@ class Evidence(unittest.TestCase):
         self.assertEqual(e["n"], 2); self.assertAlmostEqual(e["mean"], 0.2); self.assertAlmostEqual(e["hours"], 2.0); self.assertAlmostEqual(e["cyc_h"], 1.0)
         self.assertAlmostEqual(e["edge_h"], 0.2); self.assertGreater(e["se"], 0)
 
+    def test_the_window_starts_at_the_symbols_last_contract_change(self):
+        """A margin-mode or leverage change makes the earlier cycles another engine's record (HYPE isolated 20x until 2026-09-02 21:46:
+        seven liquidation-guard stops, -21.6, sat in the 5-day window as its own ledger)."""
+        from bot.select import evidence
+        done = [cyc("AUSDT", "2026-09-02 08:00:00", "2026-09-02 08:30:00", -5.0), cyc("AUSDT", "2026-09-02 09:00:00", "2026-09-02 10:00:00", 1.0)]
+        cut = time.mktime(time.strptime("2026-09-02 08:45:00", "%Y-%m-%d %H:%M:%S"))
+        e = evidence(self.NOW, 5, done, cuts={"AUSDT": cut})["AUSDT"]
+        self.assertEqual(e["n"], 1); self.assertAlmostEqual(e["mean"], 0.1)                        # only the cycle closed after the change
+        self.assertEqual(evidence(self.NOW, 5, done, cuts={"BUSDT": cut})["AUSDT"]["n"], 2)      # another symbol's change is not this one's
+
+    def test_contract_cuts_are_the_engine_made_changes_only(self):
+        import os, tempfile
+        from bot.select import contract_cuts
+        lines = ['{"t": "2026-09-01 23:35:42", "ev": "LEVER", "symbol": "AUSDT", "lever": 20.0, "was": null}',                   # a read at start, not a change
+                 '{"t": "2026-09-02 10:23:24", "ev": "MARGIN_MODE", "symbol": "AUSDT", "mode": "isolated", "was": "crossed"}',    # the client's assumption corrected, not a change
+                 '{"t": "2026-09-02 21:46:00", "ev": "MARGIN_MODE_SET", "symbol": "AUSDT", "mode": "crossed", "was": "isolated"}',
+                 '{"t": "2026-09-02 21:46:00", "ev": "LEVER_SET", "symbol": "AUSDT", "lever": 10.0, "was": 11.0, "mode": "crossed"}',
+                 '{"t": "2026-09-02 21:50:00", "ev": "LEVER_SET", "symbol": "BUSDT", "lever": 10.0, "was": 20.0, "mode": "crossed"',   # a broken line (engines share the file)
+                 '{"t": "2026-09-02 09:00:00", "ev": "LEVER_SET", "symbol": "BUSDT", "lever": 10.0, "was": 20.0, "mode": "crossed"}']
+        path = os.path.join(tempfile.mkdtemp(), "events.jsonl")
+        with open(path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
+        cuts = contract_cuts(path)
+        self.assertEqual(cuts["AUSDT"], time.mktime(time.strptime("2026-09-02 21:46:00", "%Y-%m-%d %H:%M:%S")))
+        self.assertEqual(cuts["BUSDT"], time.mktime(time.strptime("2026-09-02 09:00:00", "%Y-%m-%d %H:%M:%S")))
+        self.assertEqual(contract_cuts(os.path.join(tempfile.mkdtemp(), "none.jsonl")), {})
+
     def test_the_leader_needs_two_measured_books_and_a_gap_outside_the_noise(self):
         from bot.select import leader_of
         sel = dict(SELECT, min_cycles=10, sigma=2.0)
@@ -241,6 +267,21 @@ class Verdict(unittest.TestCase):
         books = {"AUSDT": {}, "BUSDT": {}}; st = {}
         for _ in range(2): v = verdict(rows, books, self.SEL, st, "20260902", {}, self.NOW)
         self.assertEqual(v["adds"], ["XUSDT"])                                                                       # C scores best but would be the third of the AUSDT cluster
+
+    def test_a_book_already_leaving_is_not_a_slot_to_clear(self):
+        """2026-09-02 23:25: ZEC, evicted at 15:25 when n went 4 -> 3 and still winding down, kept counting toward `over`, so 2b tried to
+        clear one more main on every scan until ZEC was flat — HYPE, the only main with min_cycles/2 cycles, left the scan ZEC dropped."""
+        from bot.select import verdict
+        books = {"ZUSDT": {"wind_down": 1, "evicted": 1}, "AUSDT": {}, "BUSDT": {}, "CUSDT": {}, "PUSDT": {"probe": 1}}
+        ev = {"AUSDT": dict(n=40, mean=-0.2, se=0.15, edge_h=-0.3, se_h=0.2)}                     # the only measured main: negative, inside 2 SE
+        v = verdict([row(s) for s in books], books, self.SEL, {}, "20260902", ev, self.NOW)
+        self.assertEqual(v["evict"], []); self.assertIn("basket full 4/3", v["why"])              # three mains stay for n 3; Z holds its slot only against adds
+        rows = [row(s, flags=["vol24M"] if s == "CUSDT" else ()) for s in ("AUSDT", "BUSDT", "CUSDT", "DUSDT")]
+        books = {s: {} for s in ("AUSDT", "BUSDT", "CUSDT", "DUSDT")}                              # n cut to 3 while four are held, one flagged this scan
+        v = verdict(rows, books, self.SEL, {}, "20260902", ev, self.NOW)
+        self.assertEqual([s for s, _ in v["wind"]], ["CUSDT"]); self.assertEqual(v["evict"], [])   # the flagged one is the one leaving
+        v = verdict([row(s) for s in books], books, self.SEL, {}, "20260902", ev, self.NOW)
+        self.assertEqual([s for s, _ in v["evict"]], ["AUSDT"])                                     # none leaving: the weakest measured main does
 
 class ApplyProbe(unittest.TestCase):
     SEL = {**SELECT, "n": 3, "probe": 0.1, "lead": 0.5, "min_cycles": 10, "probe_cooldown_d": 7}

@@ -6,7 +6,8 @@ appended to logs/scan-history.jsonl), and `params.json["books"]` is brought towa
 THE BASKET (2026-09-02, "집중된 바구니"): `select.n` MAIN books plus one PROBE book.
   - Main books share the main pool (1 - select.probe of the wallet), equally by default. When the live ledger says one book leads the
     runner-up by more than `select.sigma` standard errors — edge per hour = mean net %/cycle x cycles/h over the last
-    `select.evidence_days`, both with >= `select.min_cycles` cycles — the leader takes `select.lead` of the pool and the rest split the
+    `select.evidence_days` (from the symbol's last contract change on, MARGIN_MODE_SET / LEVER_SET, when that is later: the cycles
+    before it were another engine's), both with >= `select.min_cycles` cycles — the leader takes `select.lead` of the pool and the rest split the
     remainder. That is the user's concentration instinct applied only where it is measurable: right, it earns most of what a single
     symbol would; wrong, it loses half of that.
   - The probe book runs the top candidate at `select.probe` of the wallet — the same engine, the same rules — so the NEXT symbol earns
@@ -127,19 +128,36 @@ def record_dict(held, rows, sel, recent=()):
     rec["BTCUSDT"] = ["candle1m"]
     return rec
 
-def evidence(now, days, done=None):
-    """Live evidence per symbol from the completed lot cycles closed in the last `days` (bot.cycles): n, mean net %/cycle of the lot's
-    notional and its standard error, cycles per engine-hour (hours = the span of that symbol's cycles in the window, at least one),
-    edge per hour = mean x cycles/h and its SE — the score's own unit (% of one unit's notional per hour), so live books and the
-    scan's candidates are read on one axis, and the comparison the design allows (live against live, same clock) has a number."""
+def contract_cuts(path=None):
+    """{symbol: epoch seconds} of each symbol's last contract change made by its engine — MARGIN_MODE_SET / LEVER_SET in events.jsonl
+    (LEVER / MARGIN_MODE are reads: the client's assumption corrected at start, not a change). The cycles before it were another engine's
+    record (CONCEPT: live is compared with live from the same engine): HYPE ran isolated 20x until 2026-09-02 21:46 and its seven
+    liquidation-guard stops (-21.6) sat in the 5-day window as its own ledger."""
+    out = {}
+    try:
+        with open(path or os.path.join(LOGS, "events.jsonl"), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"MARGIN_MODE_SET"' not in line and '"LEVER_SET"' not in line: continue
+                try: d = json.loads(line); t = _secs(d["t"]); s = d["symbol"]
+                except Exception: continue                                            # a broken line (engines share the file) or an untagged event
+                if d.get("ev") in ("MARGIN_MODE_SET", "LEVER_SET"): out[s] = max(out.get(s, 0.0), t)
+    except FileNotFoundError: pass
+    return out
+
+def evidence(now, days, done=None, cuts=None):
+    """Live evidence per symbol from the completed lot cycles closed in the last `days` (bot.cycles) — a symbol's window starts at its
+    last contract change (`cuts` = contract_cuts()) when that is later: n, mean net %/cycle of the lot's notional and its standard error,
+    cycles per engine-hour (hours = the span of that symbol's cycles in the window, at least one), edge per hour = mean x cycles/h and
+    its SE — the score's own unit (% of one unit's notional per hour), so live books and the scan's candidates are read on one axis, and
+    the comparison the design allows (live against live, same clock, same engine) has a number."""
     if done is None:
         try: done = build()[0]
         except FileNotFoundError: done = []
-    since = now - days * 86400; per = {}
+    since = now - days * 86400; per = {}; cuts = cuts or {}
     for c in done:
         try: t0, t1 = _secs(c["t0"]), _secs(c["t1"])
         except Exception: continue
-        if t1 < since or not c.get("qty") or not c.get("entry"): continue
+        if t1 < max(since, cuts.get(c.get("symbol"), 0.0)) or not c.get("qty") or not c.get("entry"): continue
         per.setdefault(c.get("symbol"), []).append((t0, t1, c["net"] / (c["qty"] * c["entry"]) * 100))
     out = {}
     for sym, xs in per.items():
@@ -199,10 +217,11 @@ def verdict(rows, books, sel, st, today, ev=None, now=None):
         streak[s] = streak.get(s, 0) + 1 if bad else 0
         if bad and streak[s] >= int(sel["confirm"]) and s not in gone: evict.append((s, f"live {e['mean']:+.3f}%/cycle over {e['n']} cycles (se {e['se']:.3f})"))
     for s in [s for s in streak if s not in active]: del streak[s]
-    over = len(mains) - n                                                             # 2b. n reduced below the books held: the weakest measured main books leave (money is never over-allocated meanwhile: shares())
+    staying = [m for m in active if m not in gone and m not in {s for s, _ in evict}]   # main books that keep a slot after this scan
+    over = len(staying) - n                                                           # 2b. n reduced below the books staying: the weakest measured main books leave (money is never over-allocated meanwhile: shares()). A book already leaving — wound down, flagged now, evicted now — is not a slot to clear: counting it evicted one more main on every scan it took to go flat (2026-09-02 23:25: ZEC, evicted 15:25, still counted; HYPE, the only measured main, left the scan ZEC dropped). `free` below is the mirror: a leaving book holds its slot against adds until it is gone
     if over > 0:
-        weak = sorted((ev[m]["edge_h"], m) for m in active if m in ev and ev[m]["n"] >= int(sel["min_cycles"]) / 2 and m not in gone and m not in {s for s, _ in evict})
-        for e_h, m in weak[:over]: evict.append((m, f"n {n} < {len(mains)} books: weakest live edge {e_h:+.4f}%/h"))
+        weak = sorted((ev[m]["edge_h"], m) for m in staying if m in ev and ev[m]["n"] >= int(sel["min_cycles"]) / 2)
+        for e_h, m in weak[:over]: evict.append((m, f"n {n} < {len(staying)} books: weakest live edge {e_h:+.4f}%/h"))
     measured = sorted((ev[m]["edge_h"], ev[m]["se_h"], m) for m in active if m in ev and ev[m]["n"] >= int(sel["min_cycles"]) and m not in gone)
     for s in probes:                                                                  # 3. the probe's verdict
         if books[s].get("wind_down") or s in gone or books[s].get("promote"): continue
@@ -313,13 +332,15 @@ def main():
             if st.get("day") != today: st["day"], st["opens"] = today, 0
             flats = flats_now()                              # after the scan: the verdict needs this minute's state files
             books = p.get("books") or {}
-            try: evd = evidence(now, float(sel["evidence_days"]))
+            cuts = contract_cuts()                           # each symbol's last MARGIN_MODE_SET / LEVER_SET: its evidence starts there
+            try: evd = evidence(now, float(sel["evidence_days"]), cuts=cuts)
             except Exception as e: log(f"evidence failed: {type(e).__name__}: {e}"); evd = {}
             v = verdict(rows, books, sel, st, today, evd, now)
             leader = leader_of([s for s, b in books.items() if not b.get("probe") and not b.get("wind_down")], evd, sel)
             ev("SELECT", n=int(sel["n"]), held=held, flat=flats, wind=[s for s, _ in v["wind"]], evict=[s for s, _ in v["evict"]], adds=v["adds"],
                probe=v["probe"], promote=v["promote"][:2] if v["promote"] else None, probe_end=v["probe_end"][0] if v["probe_end"] else None,
-               leader=leader, evidence={s: evd[s] for s in held if s in evd}, why=v["why"], took_s=int(time.time() - t0), edge=edge,
+               leader=leader, evidence={s: evd[s] for s in held if s in evd}, since={s: time.strftime("%m-%d %H:%M", time.localtime(cuts[s])) for s in held if s in cuts},
+               why=v["why"], took_s=int(time.time() - t0), edge=edge,
                top=[[r["symbol"], round(r["edge"], 3), round(r["p_up"], 2), round(r["trials_h"], 2), round(r["impact"], 4), bool(r.get("entry")), r["side"], r.get("cluster")]
                     for r in rows[:6]])
             if not dry:
