@@ -5,7 +5,7 @@ signal source, volume-decay, CVD divergence, value-area position and regime, the
 and the side-automation counterfactuals; once per basket: bot.capture, (2) bot.recon — what the backtest got wrong against the live ledger
 that day, which every other backtest number in the file inherits, (3) the tuner report over the whole basket (report only, never
 --apply), (4) the symbol scanner. python -m bot.nightly --now runs it once immediately for the previous day (or --day YYYYMMDD)."""
-import glob, os, subprocess, sys, time
+import glob, json, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.ws import load_params, portfolio
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +17,18 @@ def run_cmd(args, timeout=3600):
         r = subprocess.run([sys.executable, "-m"] + args, cwd=ROOT, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace", env=env)
         return (r.stdout or "") + (("\nSTDERR:\n" + r.stderr) if r.returncode else "")
     except Exception as e: return f"failed: {e}"
+
+def _metrics(line):
+    """The metrics dict a backtest run printed on its last line (json + ' (Ns)'), or None when the run failed."""
+    try: return json.loads(line.rsplit(" (", 1)[0])
+    except Exception: return None
+
+def _vs(base, line):
+    """'vs live: total +1.23, stops 1->0, dd 8.9->7.2 | ' — a counterfactual's total / stops / max_dd against the live dual run (NEXT 3: the
+    risk columns next to the pnl, never the pnl alone); empty when either run has no metrics."""
+    m = _metrics(line)
+    if not base or not m: return ""
+    return f"vs live: total {m['total'] - base['total']:+.2f}, stops {base['stops']}->{m['stops']}, dd {base['max_dd']:.1f}->{m['max_dd']:.1f} | "
 
 def report(day):
     allf = sorted(f for f in glob.glob(os.path.join(ROOT, "data", "ws", "pub-*.jsonl*")) if not (f.endswith(".jsonl") and os.path.exists(f + ".gz")))
@@ -32,13 +44,21 @@ def report(day):
             out.append("\n## legs (where the deceleration detectors fire vs the real extremes; speed-model evidence)\n")
             out.append(run_cmd(["bot.legs"] + warm + files + ["--sym", sym, "--quiet", "--day", day]))
             out.append("\n## sides (the day's tape as long / short / dual at live sizing; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
+            base = None
             for sides in ("long", "short", "long,short"):
-                out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", sides]).strip().split("\n") or [""])[-1])
+                line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", sides]).strip().split("\n") or [""])[-1]
+                out.append(f"--sides {sides}: " + line)
+                if sides == "long,short": base = _metrics(line)      # the live dual run the counterfactuals below are read against
             for v in ("0", "1"):   # the current-leg read as a size scale (NEXT 1), both ways whatever params say: the live experiment's readout is on minus off, per symbol per day
                 out.append(f"--sig rg_leg_on={v} (dual): " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short", "--sig", f"rg_leg_on={v}"]).strip().split("\n") or [""])[-1])
-            # the other live experiments of 2026-09-02 (NEXT 3, 5): the counterfactual of each, per symbol per day — live params vs the value it replaced
-            for label, ov in (("derisk on (pct 3, under-units cut)", ["--strat", "derisk_pct=3.0", "--strat", "derisk_under_units=1"]), ("retrace_frac 0.33", ["--strat", "retrace_frac=0.33"])):
-                out.append(f"counterfactual {label} (dual): " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short"] + ov).strip().split("\n") or [""])[-1])
+            # the other live experiments of 2026-09-02 (NEXT 3, 5): the counterfactual of each, per symbol per day — live params vs the value it replaced.
+            # de-risk runs both forms (NEXT 3, 2026-09-03): on0 = the lone-core cut that was live until 09-02 10:19, on1 = the under-units cut of the
+            # 09-02 audit; each line leads with total / stops / max_dd against the live dual run so the revert rule reads the risk columns, not the pnl alone
+            for label, ov in (("derisk on0 (pct 3, lone-core cut)", ["--strat", "derisk_pct=3.0", "--strat", "derisk_under_units=0"]),
+                              ("derisk on1 (pct 3, under-units cut)", ["--strat", "derisk_pct=3.0", "--strat", "derisk_under_units=1"]),
+                              ("retrace_frac 0.33", ["--strat", "retrace_frac=0.33"])):
+                line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short"] + ov).strip().split("\n") or [""])[-1]
+                out.append(f"counterfactual {label} (dual): {_vs(base, line)}" + line)
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break
                 out.append(f"--follow {fol}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--follow", fol]).strip().split("\n") or [""])[-1])
             out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")
