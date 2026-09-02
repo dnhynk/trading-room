@@ -43,6 +43,7 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
 STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_pct=0.5, step_add_atr=0.7, gap_rebuy_pct=0.3,
              step_add_max_pct=0.0,   # > 0: the ladder step never exceeds this % (post-crash ATR15 inflation widened it to 1.24% for hours; NEXT 1); 0 = no cap
              lever=10,               # the leverage the engine sets on its symbol at start / when flat (live; 0 = leave the exchange's setting). Not a size: the margin locked per unit, so the margin gate brakes every book alike
+             margin_mode="crossed",  # the margin mode every book must run in (the exchange keeps it per symbol: HYPE/ZEC joined the basket ISOLATED, HYPE at 20x, and the liquidation guard became their stop — audit 7). Set when flat, alerted while positioned; None = leave it
              pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_rest_pct=0,
              trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then back by >= this x ATR AND >= retrace_frac of the bounce
              retrace_frac=0.33,      # ... (peak - trough since the last fill) -> pull at once. The ATR term alone is a wiggle on a quiet tape (0.5 x ATR1m =

@@ -49,13 +49,24 @@ def kinds(cy): return [k for k, _ in cy.events]
 class LeverageSet(unittest.TestCase):
     """The engine sets params `lever` on its symbol, only while every book is flat: the leverage is the margin each unit locks (the margin
     gate's brake), never a size — a symbol that joins the basket arrives with the exchange's default (HYPEUSDT at 20x, 2026-09-02)."""
-    def _cy(self, lots=(), lever=10, acct_lever=20.0, mode="crossed"):
+    def _cy(self, lots=(), lever=10, acct_lever=20.0, mode="crossed", want_mode="crossed"):
         from bot.cycle import Cycle
-        cy, bk = book(lots=lots); cy.books = {"long": bk}; cy.sp["lever"] = lever; cy.lever_t = 0.0
+        cy, bk = book(lots=lots); cy.books = {"long": bk}; cy.sp["lever"] = lever; cy.sp["margin_mode"] = want_mode; cy.lever_t = 0.0
         cy.b.margin_mode = mode
         cy.b.account = lambda symbol: dict(marginMode=mode, crossedMarginLeverage=str(acct_lever), isolatedLongLever=str(acct_lever), isolatedShortLever=str(acct_lever), available="100")
         cy.b.set_leverage = lambda symbol, lev, hold_side=None: cy.b.calls.append(("lever", lev, hold_side)) or {}
+        cy.b.set_margin_mode = lambda symbol, m: cy.b.calls.append(("margin_mode", m)) or {}
         return cy, bk, Cycle.refresh_lever
+
+    def test_an_isolated_symbol_is_switched_to_the_contract_mode_while_flat_and_alerted_while_positioned(self):
+        cy, bk, refresh = self._cy(mode="isolated")                                       # joined the basket isolated at 20x (HYPE, 2026-09-02)
+        asyncio.run(refresh(cy))
+        self.assertEqual([c for c in cy.b.calls if c[0] in ("margin_mode", "lever")], [("margin_mode", "crossed"), ("lever", 10, None)])   # mode first, then the crossed leverage
+        self.assertIn("MARGIN_MODE_SET", kinds(cy)); self.assertIn("LEVER_SET", kinds(cy)); self.assertEqual(cy.b.margin_mode, "crossed")
+        cy, bk, refresh = self._cy(lots=[[70, 3.0, "a"]], mode="isolated")
+        asyncio.run(refresh(cy))
+        self.assertEqual([c for c in cy.b.calls if c[0] in ("margin_mode", "lever")], []); self.assertIn("MARGIN_MODE_MISMATCH", kinds(cy))   # positioned: the exchange would refuse; alert only
+        asyncio.run(refresh(cy)); self.assertEqual(kinds(cy).count("MARGIN_MODE_MISMATCH"), 1)                                                # once an hour, not every 5 minutes
 
     def test_a_flat_book_is_brought_to_the_configured_leverage(self):
         cy, bk, refresh = self._cy()
@@ -68,8 +79,8 @@ class LeverageSet(unittest.TestCase):
         self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], []); self.assertNotIn("LEVER_SET", kinds(cy)); self.assertEqual(bk.lever, 20.0)   # read, not set
         cy, bk, refresh = self._cy(lever=0)
         asyncio.run(refresh(cy)); self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [])
-        cy, bk, refresh = self._cy(mode="isolated")
-        asyncio.run(refresh(cy)); self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [("lever", 10, "long")])   # isolated: per side
+        cy, bk, refresh = self._cy(mode="isolated", want_mode="isolated")
+        asyncio.run(refresh(cy)); self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [("lever", 10, "long")])   # isolated by contract: leverage per side
 
 class StopFills(unittest.TestCase):
     def test_stop_fill_is_recognised_by_its_plan_order_identity_before_any_algo_push(self):

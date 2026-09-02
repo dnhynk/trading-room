@@ -37,6 +37,11 @@ def main():
         bad = valid_params(sp, p.get("sig") or {})
         rep("FAIL" if bad else "PASS", f"[{sym}] params validation: {bad or 'ok'}")
         c = b.contract(sym); rep("PASS" if c.get("symbolStatus") == "normal" else "FAIL", f"[{sym}] contract {c.get('symbolStatus')} tick={c['priceEndStep']}e-{c['pricePlace']} qstep=1e-{c['volumePlace']}")
+        acc = b.account(sym); mm = acc.get("marginMode"); want_mm = sp.get("margin_mode"); want_lv = float(sp.get("lever") or 0)
+        lv = float((acc.get("crossedMarginLeverage") if mm == "crossed" else acc.get("isolatedLongLever")) or 0)
+        rep("FAIL" if want_mm and mm != want_mm else "PASS", f"[{sym}] margin mode {mm} (params {want_mm}); leverage {lv:g} (params {want_lv:g})"
+            + (" -> ISOLATED: the liquidation guard, not the money cap, would be the stop (audit 7); the engine switches it when the book is flat" if want_mm and mm != want_mm else "")
+            + (" -> leverage differs: the engine sets it when flat" if want_lv and abs(lv - want_lv) > 1e-9 else ""))
         st = all_st.get(sym)
         if st is None: rep("FAIL", f"[{sym}] no state (state-{sym}.json); engines seen: {sorted(all_st) or 'none'}")
         else:

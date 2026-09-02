@@ -37,7 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 STATE, EVENTS, ALERTS = (os.path.join(LOGS, f) for f in ("state.json", "events.jsonl", "alerts.jsonl"))
 PUB_CH = ("trade", "books15", "candle1m", "ticker")
-ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", "STOP_FAILED", "STOP_MODIFY_FAIL", "STOP_THROUGH", "EMERGENCY_CLOSE", "MARGIN_LOCKED", "REGIME_CHANGE", "SIDE_HINT", "PARAMS_INVALID",
+ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", "STOP_FAILED", "STOP_MODIFY_FAIL", "STOP_THROUGH", "EMERGENCY_CLOSE", "MARGIN_LOCKED", "MARGIN_MODE_MISMATCH", "REGIME_CHANGE", "SIDE_HINT","PARAMS_INVALID",
          "PARAMS_DEFERRED", "STATE_DISCARDED", "EMERGENCY_CANCEL_UNCONFIRMED", "TAKER_UNCONFIRMED", "ERROR", "EXIT"}
 QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS", "STOP_LIQ_GUARD"}   # events.jsonl only, not stdout
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
@@ -64,7 +64,8 @@ OPTIONAL_NUM = ("stop_structural", "add_confirm", "unit_frac", "cap_frac", "dail
 SIZED = {"unit_qty": "unit_frac", "cap_usdt": "cap_frac", "daily_loss_limit": "daily_loss_frac", "max_notional": "notional_frac"}
 TYPED = {"symbol": lambda v: isinstance(v, str) and v.endswith("USDT"), "side": lambda v: v in ("long", "short"),
          "sides": lambda v: v is None or (isinstance(v, list) and bool(v) and all(x in ("long", "short") for x in v)),
-         "mode": lambda v: v in (None, "dry", "live"), "adopt": lambda v: v is None or isinstance(v, bool)}
+         "mode": lambda v: v in (None, "dry", "live"), "adopt": lambda v: v is None or isinstance(v, bool),
+         "margin_mode": lambda v: v in (None, "crossed", "isolated")}
 STATEFUL = ("vol_hl", "v_hl", "a_lag", "swing_s", "brk_lookback", "depth_levels")   # signal windows built at start: a change restarts the process
 
 def valid_params(sp, sig):
@@ -927,9 +928,23 @@ class Cycle:
             # the leverage is not a size (units are notional from the wallet share) but the margin each position locks, i.e. how loosely the
             # margin gate lets the basket pile up — one number for every book, or the brake differs by symbol. A symbol that joins the basket
             # arrives with the exchange's default (HYPEUSDT came at 20x, 2026-09-02), so the engine sets params `lever` itself, only while flat
-            want = float(self.sp.get("lever") or 0)
+            want = float(self.sp.get("lever") or 0); want_mode = self.sp.get("margin_mode")
             off = [bk.lever for bk in self.books.values() if bk.lever and abs(bk.lever - want) > 1e-9]
-            if want and off and self.mode == "live" and all(not bk.pos["lots"] and not bk.work["buy"] and not bk.work["trim"] for bk in self.books.values()):
+            flat = all(not bk.pos["lots"] and not bk.work["buy"] and not bk.work["trim"] for bk in self.books.values())
+            # the margin mode is a contract too (the exchange keeps it per symbol): in isolated mode the liquidation price is the position's
+            # own and the liquidation guard, not the money cap, becomes the stop (HYPE 20x isolated: stop at -3% instead of the cap's -10%,
+            # two stop-outs -21.6 on 2026-09-02 — audit 7). Switched only while flat (the exchange refuses otherwise); alerted while positioned
+            if want_mode and mode != want_mode and self.mode == "live":
+                if flat:
+                    try:
+                        await self.rest(self.b.set_margin_mode, self.symbol, want_mode)
+                        self.ev("MARGIN_MODE_SET", mode=want_mode, was=mode); self.b.margin_mode = mode = want_mode
+                        for bk in self.books.values(): bk.lever = None            # the other mode's leverage: re-read / set below
+                        off = [want + 1] if want else []                         # force the leverage set in the new mode
+                    except Exception as e: self.err("set_margin_mode", e)
+                elif time.time() - getattr(self, "mm_alert_t", 0.0) >= 3600:
+                    self.mm_alert_t = time.time(); self.ev("MARGIN_MODE_MISMATCH", mode=mode, want=want_mode, lever=off[0] if off else want)
+            if want and off and self.mode == "live" and flat:
                 try:
                     if mode == "crossed": await self.rest(self.b.set_leverage, self.symbol, int(want))
                     else:
