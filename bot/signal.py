@@ -41,6 +41,7 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            # fade, POP needs buying to fade); 0 = logged only
            vd_spike=2.0, vd_decay=0.5, vd_gate=0)
 STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_pct=0.5, step_add_atr=0.7, gap_rebuy_pct=0.3,
+             step_add_max_pct=0.0,   # > 0: the ladder step never exceeds this % (post-crash ATR15 inflation widened it to 1.24% for hours; NEXT 1); 0 = no cap
              pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_rest_pct=0,
              trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then back by >= this x ATR AND >= retrace_frac of the bounce
              retrace_frac=0.33,      # ... (peak - trough since the last fill) -> pull at once. The ATR term alone is a wiggle on a quiet tape (0.5 x ATR1m =
@@ -152,12 +153,19 @@ def pivot_levels(bars, atr, k=2.0, min_pct=1.0):
     if piv and piv[-1][1] == "L": highs.append(max(b["h"] for b in bars[piv[-1][0] + 1:] or bars[-1:]))
     return lows, highs
 
+def add_step(p, f, ref):
+    """The ladder step (% of price): step_add_atr x ATR15 floored by step_add_pct and, when step_add_max_pct > 0, capped by it — ATR15
+    inflates x1.5 for ~6 h after a crash (2026-08-29: 2.0% -> 3.1%, back under the pre-crash level only at 14:00 UTC) and the step
+    widened from 0.5% to 1.24% for those hours, so the ladder that the post-crash bounces were meant for never filled (NEXT 1)."""
+    step = max(p["step_add_pct"], p["step_add_atr"] * f["atr15"] / ref * 100) if f.get("atr15") and p["step_add_atr"] > 0 else p["step_add_pct"]
+    return min(step, p["step_add_max_pct"]) if p.get("step_add_max_pct") else step
+
 def structural_level(f, s, ref, p, n_lots=1):
     """The campaign's premise level for the stop: the nearest confirmed 15m/1H pivot low (high for a short) that still leaves room for
     the remaining add ladder — (max_units - n_lots) adds at least one step apart below (above) ref, the last buy. None when no level
     qualifies: then the money cap alone is the stop. A level inside the ladder would stop the campaign before it could defend itself."""
     lvls = f.get("htf_lows" if s > 0 else "htf_highs") or []
-    step = max(p["step_add_pct"], p["step_add_atr"] * f["atr15"] / ref * 100) if f.get("atr15") and p["step_add_atr"] > 0 else p["step_add_pct"]
+    step = add_step(p, f, ref)
     room = max(p["max_units"] - n_lots, 0) * step / 100
     ok = [x for x in lvls if s * (ref - x) > 0 and s * (ref - x) / ref >= room]
     return (max(ok) if s > 0 else min(ok)) if ok else None
@@ -674,7 +682,7 @@ class Strategy:
         self._regime(f, s, ev)
         favor = self.regime == "FAVOR"
         # minimum distance of an add below the last buy: ATR-relative (step_add_atr x ATR15), floored by step_add_pct
-        step = max(p["step_add_pct"], p["step_add_atr"] * f["atr15"] / mid * 100) if f.get("atr15") and p["step_add_atr"] > 0 else p["step_add_pct"]
+        step = add_step(p, f, mid)
         buy_sig, trim_sig = ("DIP_SLOWING", "POP_STALLING") if s > 0 else ("POP_STALLING", "DIP_SLOWING")
         touch_in, touch_out = (bid, ask) if s > 0 else (ask, bid)
         names = {x["sig"] for x in sigs}

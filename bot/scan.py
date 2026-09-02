@@ -122,7 +122,8 @@ def trials(c, sg, win, loss, hold_min, bounds):
         cl = c[i - 30:i + 1]; cf = candle_features(cl); vr_hist = (vr_hist + [cf["vr"]])[-3:]
         j = window(x["ts"])
         if j is None or i + hold_min >= n: continue
-        r = res.setdefault(j, dict(n=0, up=0, dn=0, to=0, out=0.0, bars=0)); r["bars"] += 1
+        r = res.setdefault(j, dict(n=0, up=0, dn=0, to=0, out=0.0, bars=0, n_h=[0] * 24, bars_h=[0] * 24)); r["bars"] += 1
+        hod = (x["ts"] // 3_600_000) % 24; r["bars_h"][hod] += 1                       # by UTC hour of day: tokenised stocks / metals trade in sessions (NEXT 8)
         sigs = candle_rule(cl, cf, vr_hist, q) if q["c1_on"] else []
         for s in ([1] if "DIP_SLOWING" in sigs else []) + ([-1] if "POP_STALLING" in sigs else []):
             p0 = x["c"]; up = p0 * (1 + s * win / 100); dn = p0 * (1 - s * loss / 100); out = None
@@ -131,7 +132,7 @@ def trials(c, sg, win, loss, hold_min, bounds):
                 if (y["h"] >= up) if s > 0 else (y["l"] <= up): out = win; break
             if out is None: out = max(-loss, min(win, s * (c[i + hold_min]["c"] / p0 - 1) * 100)); r["to"] += 1
             else: r["up" if out > 0 else "dn"] += 1
-            r["n"] += 1; r["out"] += out
+            r["n"] += 1; r["out"] += out; r["n_h"][hod] += 1
     return res
 
 def edge_of(t, fee, imp):
@@ -236,6 +237,8 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equit
         tr = trials(c1, sg, e["win_pct"], e["loss_pct"], int(e["hold_min"]), bounds); got = [t for t in (tr.get(j) for j in range(nw)) if t]
         eds = [edge_of(t, e["fee_pct"], x["impact"]) for t in got]
         tot_n = sum(t["n"] for t in got); res = sum(t["up"] + t["dn"] for t in got)
+        n_h = [sum(t["n_h"][h] for t in got) for h in range(24)]; b_h = [sum(t["bars_h"][h] for t in got) for h in range(24)]
+        x["tr_by_h"] = [round(n / (b / 60), 2) if b else 0.0 for n, b in zip(n_h, b_h)]      # trials per hour by UTC hour of day (session shape, NEXT 8)
         x.update(edge=med(eds), edge_sd=statistics.pstdev(eds) if len(eds) > 1 else 0.0, edges=[round(v, 4) for v in eds],
                  trials_h=med([t["n"] / (t["bars"] / 60) for t in got if t["bars"]]), n_trials=tot_n,
                  p_up=sum(t["up"] for t in got) / res if res else 0.0, timeout=sum(t["to"] for t in got) / tot_n if tot_n else 0.0,

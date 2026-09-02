@@ -44,6 +44,7 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "rg_leg_pct": ("sig", [1.5, 2.0, 3.0]),                    # the current-leg read's depth (NEXT 1): live experiment from 2026-09-02, numbers judged here
 }
 MIN_CYCLES, MIN_GAIN = 30, 0.10
+PRIORITY = ("retrace_frac", "rg_leg_pct", "c1_dev")   # keys under live experiment (NEXT 1, 5; 2026-09-02): judged every night on top of the two rotated keys, not once in ten days
 
 def arg(flag, default):
     return type(default)(sys.argv[sys.argv.index(flag) + 1]) if flag in sys.argv else default
@@ -73,7 +74,8 @@ def main():
         train = [f for f in files if os.path.basename(f)[4:12] != days_avail[-1]]; valid = [f for f in files if os.path.basename(f)[4:12] == days_avail[-1]]
     else:
         k = max(1, len(files) * 2 // 3); train, valid = files[:k], files[k:]
-    keys = arg("--keys", "").split(",") if "--keys" in sys.argv else [list(SPACE)[(time.localtime().tm_yday * 2 + i) % len(SPACE)] for i in range(2)]
+    rotated = [list(SPACE)[(time.localtime().tm_yday * 2 + i) % len(SPACE)] for i in range(2)]
+    keys = arg("--keys", "").split(",") if "--keys" in sys.argv else [k for k in PRIORITY if k in SPACE] + [k for k in rotated if k not in PRIORITY]
     print(f"train {len(train)} files, validate {len(valid)} files, keys {keys}, symbols {syms}, equity {equity}", flush=True)
     # candidates: incumbent, and for each key its one-step neighbours (plus two-step neighbours for the plateau check)
     cands = {"incumbent": (sig0, strat0)}

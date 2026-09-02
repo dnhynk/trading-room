@@ -86,6 +86,7 @@ def legs(secs, sigs, k, s, strat, day=None):
         if day and time.strftime("%Y%m%d", time.gmtime(tL)) != day: continue
         depth = s * (secs[ih][1] - pxL) / pxL * 100; dur = max(tL - t0, 1)
         step = max(strat["step_add_pct"], strat["step_add_atr"] * a15 / pxL * 100) if strat["step_add_atr"] > 0 else strat["step_add_pct"]
+        if strat.get("step_add_max_pct"): step = min(step, strat["step_add_max_pct"])   # as the engine (signal.add_step)
         vext = min(s * secs[i][3] for i in range(ih, il + 1))
         det = {}
         for src in ("any", "v", "1m", "s8"):

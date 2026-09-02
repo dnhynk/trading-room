@@ -624,6 +624,18 @@ class CurrentLeg(unittest.TestCase):
         st2 = Strategy(dict(side="long", unit_qty=70, max_notional=1e6), dict(SIG, rg_confirm=1, rg_leg_on=0)); ev = []
         st2._regime(f, 1, ev); self.assertNotEqual(st2.regime, "AGAINST")                  # off: the window label (drift -1 ATR) says nothing
 
+class StepCap(unittest.TestCase):
+    def test_the_ladder_step_is_capped_only_when_the_cap_is_set(self):
+        from bot.signal import add_step
+        p = dict(step_add_pct=0.5, step_add_atr=0.4, step_add_max_pct=0.0); f = dict(atr15=0.093)   # ATR15 3.1% of a 3.0 price: the post-crash inflation
+        self.assertAlmostEqual(add_step(p, f, 3.0), 1.24, 2)                                            # no cap: the step follows ATR15
+        self.assertAlmostEqual(add_step(dict(p, step_add_max_pct=1.0), f, 3.0), 1.0)                    # capped
+        self.assertAlmostEqual(add_step(dict(p, step_add_max_pct=1.0), dict(atr15=0.02), 3.0), 0.5)     # a quiet tape: the floor, untouched by the cap
+        st = Strategy(dict(side="long", unit_qty=70, step_add_atr=0.4, step_add_max_pct=1.0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        st.step(F(t=100, atr15=0.093), [], pos)
+        r = st.step(F(t=101, mid=2.967, bid=2.966, ask=2.968, atr15=0.093), [dict(sig="DIP_SLOWING")], pos)   # -1.1% under the last buy: past the 1.0% cap, inside the uncapped 1.24%
+        self.assertEqual(r["buy"], (2.966, 70))
+
 class Zigzag(unittest.TestCase):
     def test_straight_move_has_no_swings(self):
         self.assertEqual(zigzag([1, 1.01, 1.02, 1.03, 1.05], 0.007), [])
