@@ -46,6 +46,31 @@ def book(mode="live", lots=(), stop=None):
 
 def kinds(cy): return [k for k, _ in cy.events]
 
+class LeverageSet(unittest.TestCase):
+    """The engine sets params `lever` on its symbol, only while every book is flat: the leverage is the margin each unit locks (the margin
+    gate's brake), never a size — a symbol that joins the basket arrives with the exchange's default (HYPEUSDT at 20x, 2026-09-02)."""
+    def _cy(self, lots=(), lever=10, acct_lever=20.0, mode="crossed"):
+        from bot.cycle import Cycle
+        cy, bk = book(lots=lots); cy.books = {"long": bk}; cy.sp["lever"] = lever; cy.lever_t = 0.0
+        cy.b.margin_mode = mode
+        cy.b.account = lambda symbol: dict(marginMode=mode, crossedMarginLeverage=str(acct_lever), isolatedLongLever=str(acct_lever), isolatedShortLever=str(acct_lever), available="100")
+        cy.b.set_leverage = lambda symbol, lev, hold_side=None: cy.b.calls.append(("lever", lev, hold_side)) or {}
+        return cy, bk, Cycle.refresh_lever
+
+    def test_a_flat_book_is_brought_to_the_configured_leverage(self):
+        cy, bk, refresh = self._cy()
+        asyncio.run(refresh(cy))
+        self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [("lever", 10, None)]); self.assertIn("LEVER_SET", kinds(cy)); self.assertEqual(bk.lever, 10)
+
+    def test_a_positioned_book_is_left_alone_and_lever_0_means_hands_off(self):
+        cy, bk, refresh = self._cy(lots=[[70, 3.0, "a"]])
+        asyncio.run(refresh(cy))
+        self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], []); self.assertNotIn("LEVER_SET", kinds(cy)); self.assertEqual(bk.lever, 20.0)   # read, not set
+        cy, bk, refresh = self._cy(lever=0)
+        asyncio.run(refresh(cy)); self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [])
+        cy, bk, refresh = self._cy(mode="isolated")
+        asyncio.run(refresh(cy)); self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [("lever", 10, "long")])   # isolated: per side
+
 class StopFills(unittest.TestCase):
     def test_stop_fill_is_recognised_by_its_plan_order_identity_before_any_algo_push(self):
         cy, bk = book(lots=[[70, 3.0, "a"]], stop=dict(px=2.9, order_id="PLAN1"))

@@ -924,6 +924,19 @@ class Cycle:
                 lv = float((a.get("crossedMarginLeverage") if mode == "crossed" else a.get("isolatedLongLever" if sd == "long" else "isolatedShortLever")) or 0) or None
                 if lv != bk.lever: bk.ev("LEVER", lever=lv, was=bk.lever, avail=float(a.get("available") or 0))
                 bk.lever = lv
+            # the leverage is not a size (units are notional from the wallet share) but the margin each position locks, i.e. how loosely the
+            # margin gate lets the basket pile up — one number for every book, or the brake differs by symbol. A symbol that joins the basket
+            # arrives with the exchange's default (HYPEUSDT came at 20x, 2026-09-02), so the engine sets params `lever` itself, only while flat
+            want = float(self.sp.get("lever") or 0)
+            off = [bk.lever for bk in self.books.values() if bk.lever and abs(bk.lever - want) > 1e-9]
+            if want and off and self.mode == "live" and all(not bk.pos["lots"] and not bk.work["buy"] and not bk.work["trim"] for bk in self.books.values()):
+                try:
+                    if mode == "crossed": await self.rest(self.b.set_leverage, self.symbol, int(want))
+                    else:
+                        for sd in self.books: await self.rest(self.b.set_leverage, self.symbol, int(want), hold_side=sd)
+                    self.ev("LEVER_SET", lever=want, was=off[0], mode=mode)
+                    for bk in self.books.values(): bk.lever = want
+                except Exception as e: self.err("set_leverage", e)
         except Exception as e: self.err("refresh_lever", e)
 
     async def shutdown(self, why):
