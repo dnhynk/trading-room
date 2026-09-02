@@ -57,6 +57,7 @@ class Verdicts(unittest.TestCase):
         v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "phase:climax"))
         acts = apply(p, [row("A", "climax")], v, {"A": False}, HUNT, st, 1000.0)             # positioned: winds down, stays
         self.assertEqual([a[:2] for a in acts], [("wind", "A")]); self.assertEqual(p["books"]["A"]["wind_down"], 1)
+        self.assertEqual(p["books"]["A"]["exit"], 1)                                          # a phase exit: the engine sells the whole position into the next stall
         rows = [row("A", "markdown")]                                                          # the top is in: the same coin is a short candidate
         v = verdict(rows, p["books"], HUNT, st, 2000.0); self.assertEqual(v["top"], ("A", "short")); self.assertIsNone(v["add"])   # streak 1 of 2
         apply(p, rows, v, {"A": True}, HUNT, st, 2000.0); self.assertEqual(p["books"]["A"]["sides"], ["long"])                # flat, but not confirmed yet: stays
@@ -71,6 +72,13 @@ class Verdicts(unittest.TestCase):
         acts = apply(p2, [row("B", "markdown")], v, {"A": True}, HUNT, st2, 4000.0)
         self.assertEqual([a[:2] for a in acts], [("drop", "A"), ("add", "B")]); self.assertNotIn("A", st2.get("cool", {}))     # phase exit: no cooldown
         self.assertEqual(p2["books"], {"B": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}}); self.assertEqual(p2["strat"]["side"], "short")
+
+    def test_an_episode_death_winds_down_gently_without_the_exit_flag(self):
+        st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2)}, xstreak={"A": 1})
+        p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
+        v = verdict([row("A", "markdown", dead=True)], p["books"], HUNT, st, 1000.0); self.assertIn("dead", v["wind"][1])   # dead = footprints' own-venue volume under a quarter of the peak
+        apply(p, [row("A", "markdown", dead=True)], v, {"A": False}, HUNT, st, 1000.0)
+        self.assertEqual(p["books"]["A"]["wind_down"], 1); self.assertNotIn("exit", p["books"]["A"])
 
     def test_an_episode_death_starts_the_cooldown(self):
         st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2, exit="dead")}, streak={"B:short": 1})

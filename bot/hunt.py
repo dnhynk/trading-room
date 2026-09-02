@@ -176,7 +176,10 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
     books = p.get("books") or {}; sp = p.setdefault("strat", {})
     if v["wind"]:
         s, why = v["wind"]
-        if s in books and not books[s].get("wind_down"): books[s]["wind_down"] = 1; acts.append(("wind", s, why))
+        if s in books and not books[s].get("wind_down"):
+            books[s]["wind_down"] = 1                                       # no more adds; trims and the stop keep working
+            if not _death(why): books[s]["exit"] = 1                        # the phase turned: the engine sells the whole position into the next stall whatever the cost
+            acts.append(("wind", s, why))                                   # (an episode death leaves gently: stalls above cost, or the cap)
     leaving = [s for s in books if books[s].get("wind_down")]; live = [s for s in books if not books[s].get("wind_down")]
     add = v["add"]
     if add and not live and all(flats.get(s) for s in leaving):

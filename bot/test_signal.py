@@ -641,5 +641,42 @@ class Zigzag(unittest.TestCase):
         self.assertEqual(zigzag([1, 1.01, 1.02, 1.03, 1.05], 0.007), [])
         self.assertEqual(len(zigzag([1, 1.02, 1.0, 1.02, 1.0], 0.007)), 3)
 
+class ExitMode(unittest.TestCase):
+    """exit (2026-09-03): the premise broke (hunt: the phase turned) — the whole position sells into the next stall whatever the cost,
+    and a floor under the stall: taker after exit_after_s, or exit_atr x ATR further against us."""
+    def _st(self, **kw):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, exit=1, exit_after_s=600, exit_atr=3.0, **kw))
+        pos = dict(lots=[[70, 3.0, "a"], [70, 2.95, "b"]], avg=2.975, last="buy", last_buy_px=2.95, pause=True)
+        return st, pos
+
+    def test_a_stall_below_cost_sells_everything_as_a_maker_then_taker(self):
+        st, pos = self._st()
+        r = st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos)
+        self.assertEqual(r["events"][0][0], "EXIT_ARMED"); self.assertIsNone(r["trim"])                      # armed, nothing to sell into yet
+        r = st.step(F(t=105, mid=2.9, bid=2.899, ask=2.901), [dict(sig="POP_STALLING")], pos)
+        ev = [e for e in r["events"] if e[0] == "PULL_TRIM" and e[1]["mode"] == "exit"][0][1]              # (a default-param derisk pull fires first and is replaced)
+        self.assertEqual((ev["all"], ev["qty"]), (True, 140))                                                # the whole position, 2.5% under the average
+        self.assertEqual(r["trim"], (2.901, 140, "maker", None)); self.assertIsNone(r["buy"])
+        r = st.step(F(t=116, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertEqual(r["trim"][2], "taker")   # trim_taker_after_s: it does not rest for long
+        r = st.step(F(t=117, mid=2.88, bid=2.879, ask=2.881), [], pos); self.assertEqual(r["trim"][1], 140)     # a further drop does not drop the pull (gate -1e9)
+
+    def test_no_stall_in_time_or_an_adverse_move_takes_it_at_market(self):
+        st, pos = self._st()
+        st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos)
+        r = st.step(F(t=699, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertIsNone(r["trim"])
+        r = st.step(F(t=700, mid=2.9, bid=2.899, ask=2.901), [], pos)
+        self.assertEqual(r["trim"], (2.899, 140, "taker", None)); self.assertEqual([e[1]["path"] for e in r["events"] if e[0] == "PULL_TRIM"], ["timeout"])
+        st, pos = self._st()
+        st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos)
+        r = st.step(F(t=130, mid=2.84, bid=2.839, ask=2.841), [], pos)                                          # 3 x ATR(0.02) = 0.06 under the flag
+        self.assertEqual(r["trim"][2], "taker"); self.assertEqual([e[1]["path"] for e in r["events"] if e[0] == "PULL_TRIM"], ["adverse"])
+
+    def test_without_the_flag_nothing_changes_and_a_flat_book_forgets_the_flag(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        r = st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [dict(sig="POP_STALLING")], pos)
+        self.assertIsNone(r["trim"]); self.assertNotIn("EXIT_ARMED", [e[0] for e in r["events"]])            # below the gate: the normal book waits
+        st, pos = self._st(); st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertEqual(st.exit_t, 100)
+        pos["lots"] = []; st.step(F(t=101, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertIsNone(st.exit_t)
+
 if __name__ == "__main__":
     unittest.main()

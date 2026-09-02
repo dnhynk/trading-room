@@ -51,6 +51,9 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
                                      # back a fixed share of the move it crowned to count as a reversal. 0 restores the ATR-only rule; trim_retrace_atr 0 disables both
              fee_rt_pct=None,        # round-trip fee (%) flooring an added unit's relaxed gate (a taker exit still pays): None = from the contract (OMS / backtest)
              wallet_frac=1.0,   # 이 엔진이 쓰는 지갑의 몫. 심볼 하나면 1.0, 포트폴리오면 심볼마다 나눠 합이 1.0 (params["books"][symbol])
+             exit=False, exit_after_s=600, exit_atr=3.0,   # exit: the campaign's premise broke (hunt: the phase turned against the book) — sell the WHOLE
+             # position into the next stall / retrace top whatever the cost; no stall within exit_after_s, or the price exit_atr x ATR further
+             # against us since the flag: taker. CONCEPT "전제가 깨지면 시장가로 던지지 않고 되돌림에 판다" with a floor under "되돌림" (2026-09-03)
              wind_down=False,   # 이 심볼만의 PAUSE: 담기 중단, 덜기·스탑은 그대로. select가 자격 잃은 책을 flat 으로 몰 때 켠다(정체에서 팔지 시장가로 던지지 않는다)
              unit_frac=0.0, cap_frac=0.0, daily_loss_frac=0.0, notional_frac=0.0,   # >0: unit notional / cap / daily limit / position notional cap as
              # multiples of wallet equity (cycle.py resizes when flat). CONCEPT: "한 포지션에 거는 돈과 하루 손실에는 상한이 있고, 그 상한은 자본에 비례한다"
@@ -646,6 +649,7 @@ class Strategy:
         self.sig_seen = {}       # buy-side signal source -> exchange second (agreement check for confirmed adds)
         self.arm_filled = 0.0    # quantity filled against the current arm (progress is per order, not net position)
         self.derisk_armed, self.last_qty = False, 0.0
+        self.exit_t = self.exit_ref = None   # when the exit flag was first seen with a position, and the mid then (the taker floor's reference)
         self.brk_seen = False    # a break against the side fired while the book held a position: de-risk evidence must postdate the campaign
         self.regime, self.rg_cand, self.rg_pend, self.rg_t = "TWO_WAY", "TWO_WAY", 0, None
 
@@ -817,6 +821,21 @@ class Strategy:
                                              mode="derisk" if is_cut else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),   # the gate in force
                                              path="stall" if trim_sig in names else "retrace", lot="core" if lot_from is not None else None,
                                              peak=self.peak)))
+            if p.get("exit"):                                                              # the book is leaving (the premise broke — hunt: the phase turned): the WHOLE position
+                if self.exit_t is None:                                                    # sells into the next stall or retrace top whatever the cost; a floor under "되돌림":
+                    self.exit_t, self.exit_ref = t, mid                                    # no stall within exit_after_s, or exit_atr x ATR further against us: taker now
+                    ev.append(("EXIT_ARMED", dict(mid=mid, qty=qty, after_s=p["exit_after_s"], atr=p["exit_atr"])))
+                adverse = bool(atr) and s * (self.exit_ref - mid) >= p["exit_atr"] * atr
+                late = t - self.exit_t >= p["exit_after_s"]
+                if (trim_sig in names or retrace_top) and not (self.pull and self.pull.get("exit")):
+                    self.pull = dict(t=t, qty=qty, target=0.0, gate=-1e9, ref=avg, px0=touch_out, lot=None, exit=True)
+                    ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=avg, qty=qty, all=True, px=touch_out, mode="exit",
+                                                 path="stall" if trim_sig in names else "retrace", lot=None, peak=self.peak)))
+                elif (late or adverse) and not (self.pull and self.pull.get("exit") and self.pull.get("floor")):
+                    self.pull = dict(t=t - p["trim_taker_after_s"], qty=qty, target=0.0, gate=-1e9, ref=avg, px0=touch_in, lot=None, exit=True, floor=True)   # backdated: taker at once
+                    ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=avg, qty=qty, all=True, px=touch_in, mode="exit_taker",
+                                                 path="timeout" if late else "adverse", lot=None, peak=self.peak)))
+            else: self.exit_t = self.exit_ref = None
             if self.pull:
                 if s * (mid / self.pull["ref"] - 1) * 100 < self.pull["gate"] - tick / self.pull["ref"] * 100:   # one tick of hysteresis: a wiggle at the gate must not cancel and re-queue the maker (2026-08-30 03:17: six pull/drop flips in 41 s lost the queue)
                     ev.append(("PULL_DROP", dict(dev_lot=round(dev_lot, 2)))); self.pull = None
@@ -830,7 +849,7 @@ class Strategy:
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0
+        if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
         else:
             cap_px = avg - s * p["cap_usdt"] / max(qty, unit)   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
