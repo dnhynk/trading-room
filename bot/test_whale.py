@@ -6,7 +6,7 @@ def bar(ts, o, c, wick=0.2, v=1000.0): return dict(ts=ts, o=o, h=max(o, c) + wic
 
 def fp(**kw):
     f = dict(px=129.0, high48=150.0, run=50.0, off=14.0, age_h=6, vmax_at_high=False, post_red=0, vmax_share=0.1, upwick=0.2, lower_high=False,
-             hint15=None, twoway24=30.0, ratio=10.0, new=False, qv=4e7, fund=0.0, dead=False, atr15_pct=2.0)
+             exhaustion=False, hint15=None, twoway24=30.0, ratio=10.0, new=False, qv=4e7, fund=0.0, dead=False, atr15_pct=2.0)
     f.update(kw); return f
 
 class Rules(unittest.TestCase):
@@ -29,6 +29,13 @@ class Rules(unittest.TestCase):
         self.assertEqual(phase(fp(off=3.0, hint15="long", lower_high=True, fund=0.2))[0], "climax")
         self.assertEqual(phase(fp(off=20.0, hint15="long", lower_high=True, fund=0.2))[0], "unknown")                 # too far under the high to be a top read
         self.assertEqual(phase(fp(off=3.0, hint15="long", post_red=3, upwick=0.45))[0], "markup")                     # reds without the volume peak at the high
+
+    def test_quiet_exhaustion_after_a_big_pump_reads_climax_but_a_modest_run_does_not(self):
+        self.assertEqual(phase(fp(off=2.0, hint15=None, run=142.0, exhaustion=True))[0], "climax")                    # AKE: +142% then fading bodies + dry volume, no red bar
+        self.assertIn("exhaustion", phase(fp(off=2.0, hint15=None, run=142.0, exhaustion=True))[1])
+        self.assertEqual(phase(fp(off=2.0, hint15="long", run=50.0, exhaustion=True))[0], "markup")                   # a modest run: exhaustion alone is one vote, not a climax
+        self.assertEqual(phase(fp(off=2.0, hint15="long", run=142.0, exhaustion=True, upwick=0.45))[0], "climax")     # with a second vote it needs no big_run guard
+        self.assertNotEqual(phase(fp(off=20.0, hint15="long", run=142.0, exhaustion=True))[0], "climax")             # far under the high: exhaustion does not force a top read
 
 class Footprints(unittest.TestCase):
     def test_a_pump_then_a_rollover_measures_and_reads_as_climax_then_markdown(self):

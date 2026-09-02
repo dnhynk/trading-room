@@ -29,6 +29,9 @@ WHALE = dict(episode_ratio=4.0,   # 24h volume / own 7-day median: an episode
              climax_votes=2,      # footprints that must agree for climax
              post_red=2,          # red closes among the 3 hours after the max-volume hour (effort > result)
              upwick=0.4,          # mean upper-wick share of the last 4 x 15m ranges
+             exh_bars=4,          # quiet exhaustion: the last exh_bars x 15m up-bodies fade (each <= the previous) while price still climbs,
+             vol_dry=0.5,         # and the last bar's volume < vol_dry x the mean of the exh_bars before it. A climax on its own only after a
+             #                      big_run pump at the high (AKE 2026-09-03: bodies +7.4 -> +0.5%, last 15m 1% of the window's volume, no red bar yet)
              fund_hot=0.1,        # funding %/8h: longs crowded (climax vote)
              fund_cold=-0.1,      # funding %/8h: shorts crowded (squeeze)
              twoway_dead=8.0,     # 1h two-way path %/day under which a coin has no churn
@@ -48,6 +51,15 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     vmax_share = h48[i_v]["qv"] / max(sum(x["qv"] for x in h48[-24:]), 1e-9) if i_v >= len(h48) - 24 else 0.0
     last = bars15[-4:]
     upwick = statistics.mean([(x["h"] - max(x["o"], x["c"])) / (x["h"] - x["l"]) if x["h"] > x["l"] else 0.0 for x in last]) if last else 0.0
+    # quiet exhaustion: the up-move fades bar by bar while price still climbs, and the last bar's volume dries up — a top that rolls
+    # over silently (volume-decay), the counterpart to the loud effort_fail rollover
+    exhaustion = False; k = int(p["exh_bars"])
+    if len(bars15) >= 2 * k:
+        recent = bars15[-k:]; prior = bars15[-2 * k:-k]
+        up = lambda blk: max([(x["c"] - x["o"]) / x["o"] for x in blk] + [0.0])   # the strongest up-push in the block (0 if none)
+        fading = up(recent) < up(prior) and recent[-1]["c"] > recent[0]["o"]       # the biggest push weakened while price still net-climbs (robust to one up-tick)
+        vprior = statistics.mean([x["qv"] for x in prior]) or 1e-9
+        exhaustion = fading and recent[-1]["qv"] < p["vol_dry"] * vprior            # ... and the latest bar's volume dried up
     atr15 = wilder_atr(bars15); hint15 = structure_side(bars15, atr15) if atr15 else None
     lower_high = None
     if atr15 and len(bars15) >= 20:
@@ -61,7 +73,7 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     new = len(prior) < 3                                         # a fresh listing has no baseline: its whole life is the episode (ratio 99)
     peak = max(float((held or {}).get("peak") or 0.0), qv)
     return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
-                vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, hint15=hint15, twoway24=round(twoway24, 1),
+                vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1),
                 ratio=99.0 if new else round(qv / base, 1), new=new, qv=qv, fund=(ticker or {}).get("fund"), dead=bool(held) and qv < p["dead_ratio"] * peak,
                 atr15_pct=round(atr15 / px * 100, 2) if atr15 else None)
 
@@ -78,7 +90,9 @@ def phase(f, p=WHALE):
     if f["upwick"] >= p["upwick"]: votes.append(f"upwick{f['upwick']}")                                     # hours after it closed red: effort > result
     if f["lower_high"]: votes.append("lower_high")
     if f["fund"] is not None and f["fund"] >= p["fund_hot"]: votes.append(f"fund{f['fund']}")
-    if f["off"] < p["top_off"] and len(votes) >= p["climax_votes"]: return "climax", votes
+    if f.get("exhaustion"): votes.append("exhaustion")
+    # climax: two votes near the high, OR quiet exhaustion after a big pump at the high (a silent volume-decay top the vote count misses)
+    if f["off"] < p["top_off"] and (len(votes) >= p["climax_votes"] or (f.get("exhaustion") and f["run"] >= p["big_run"])): return "climax", votes
     episode = f["ratio"] >= p["episode_ratio"] or f["run"] >= p["big_run"]
     if episode and f["run"] >= p["run_min"] and f["off"] < p["down_off"] and f["hint15"] in ("long", None): return "markup", votes
     return "unknown", votes
