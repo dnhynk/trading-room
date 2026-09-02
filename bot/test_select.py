@@ -128,10 +128,12 @@ class Apply(unittest.TestCase):
         apply(p2, rows, [("AUSDT", "vol24M")], [], {"AUSDT": True}, self.SEL)
         self.assertEqual(list(p2["books"]), ["AUSDT"])                                          # never empty: whole-wallet fallback would double the size
 
-    def test_every_book_carries_one_nth_of_the_wallet(self):
+    def test_every_main_book_carries_one_nth_of_the_main_pool(self):
         p = self.params({"AUSDT": {"wallet_frac": 1.0}})
         apply(p, [row("AUSDT")], [], [], {}, self.SEL)
-        self.assertEqual(p["books"]["AUSDT"]["wallet_frac"], 0.25)                              # 1/n while a slot is empty, so the sum never exceeds one wallet
+        self.assertEqual(p["books"]["AUSDT"]["wallet_frac"], 0.225)                             # (1 - probe 0.1) / n while a slot is empty, so the sum never exceeds one wallet
+        apply(p, [row("AUSDT")], [], [], {}, dict(self.SEL, probe=0))
+        self.assertEqual(p["books"]["AUSDT"]["wallet_frac"], 0.25)                              # no probe slot: the whole wallet over n
 
     def test_an_add_opens_a_book_and_moves_the_default_symbol_when_the_old_one_is_gone(self):
         rows = [row("BUSDT", edge=0.5), row("AUSDT", flags=["vol24M"])]
@@ -146,6 +148,134 @@ class Apply(unittest.TestCase):
         p = self.params({s: {} for s in ("AUSDT", "BUSDT", "CUSDT", "DUSDT")})
         apply(p, [row("EUSDT")], [], ["EUSDT"], {}, self.SEL)
         self.assertNotIn("EUSDT", p["books"]); self.assertEqual(len(p["books"]), 4)
+
+def cyc(sym, t0, t1, net, qty=10.0, entry=100.0, gross=None):
+    return dict(symbol=sym, t0=t0, t1=t1, qty=qty, entry=entry, net=net, gross=net + 0.02 if gross is None else gross)
+
+class Evidence(unittest.TestCase):
+    NOW = time.mktime(time.strptime("2026-09-02 12:00:00", "%Y-%m-%d %H:%M:%S"))
+
+    def test_live_edge_per_hour_from_the_window_of_completed_cycles(self):
+        from bot.select import evidence
+        done = [cyc("AUSDT", "2026-09-02 08:00:00", "2026-09-02 08:30:00", 1.0), cyc("AUSDT", "2026-09-02 09:00:00", "2026-09-02 10:00:00", 3.0),
+                cyc("AUSDT", "2026-08-20 09:00:00", "2026-08-20 10:00:00", -50.0)]                # outside the window: not evidence
+        e = evidence(self.NOW, 5, done)["AUSDT"]
+        self.assertEqual(e["n"], 2); self.assertAlmostEqual(e["mean"], 0.2); self.assertAlmostEqual(e["hours"], 2.0); self.assertAlmostEqual(e["cyc_h"], 1.0)
+        self.assertAlmostEqual(e["edge_h"], 0.2); self.assertGreater(e["se"], 0)
+
+    def test_the_leader_needs_two_measured_books_and_a_gap_outside_the_noise(self):
+        from bot.select import leader_of
+        sel = dict(SELECT, min_cycles=10, sigma=2.0)
+        ev = {"AUSDT": dict(n=50, edge_h=0.30, se_h=0.02), "BUSDT": dict(n=50, edge_h=0.10, se_h=0.02), "CUSDT": dict(n=5, edge_h=9.0, se_h=0.01)}
+        self.assertEqual(leader_of(["AUSDT", "BUSDT", "CUSDT"], ev, sel), "AUSDT")                 # C is unmeasured (n < min_cycles) however high it reads
+        ev["BUSDT"]["se_h"] = 0.15
+        self.assertIsNone(leader_of(["AUSDT", "BUSDT"], ev, sel))                                # the gap is inside 2 se: equal shares
+        self.assertIsNone(leader_of(["AUSDT"], ev, sel))
+
+    def test_shares_sum_to_the_pool_and_tilt_to_the_leader(self):
+        from bot.select import shares
+        sel = dict(SELECT, n=4, probe=0.1, lead=0.5)
+        books = {"AUSDT": {}, "BUSDT": {}, "CUSDT": {}, "PUSDT": {"probe": 1}}
+        s = shares(books, sel)
+        self.assertAlmostEqual(s["AUSDT"], 0.225); self.assertAlmostEqual(s["PUSDT"], 0.1); self.assertLessEqual(sum(s.values()), 1.0)   # one slot empty: money idle, never over-allocated
+        s = shares(books, sel, leader="AUSDT")
+        self.assertAlmostEqual(s["AUSDT"], 0.45); self.assertAlmostEqual(s["BUSDT"], 0.15); self.assertAlmostEqual(s["CUSDT"], 0.15)     # leader half of the pool, the rest over n - 1 slots
+        s = shares(books, dict(sel, sigma_norm=1), sigma={"AUSDT": 2.0, "BUSDT": 4.0, "CUSDT": 4.0})
+        self.assertAlmostEqual(s["AUSDT"], 2 * s["BUSDT"]); self.assertAlmostEqual(s["AUSDT"] + s["BUSDT"] + s["CUSDT"], 0.675)          # 1/sigma, same total
+
+class Verdict(unittest.TestCase):
+    SEL = {**SELECT, "n": 3, "confirm": 2, "max_per_day": 2, "min_cycles": 10, "sigma": 2.0, "probe_days": 5, "per_cluster": 2}
+    NOW = time.mktime(time.strptime("2026-09-02 12:00:00", "%Y-%m-%d %H:%M:%S"))
+
+    def test_a_main_book_negative_on_its_own_ledger_is_evicted_after_confirm_scans(self):
+        from bot.select import verdict
+        rows = [row("AUSDT"), row("BUSDT")]; books = {"AUSDT": {}, "BUSDT": {}}
+        ev = {"AUSDT": dict(n=40, mean=-0.30, se=0.05, edge_h=-0.6, se_h=0.1), "BUSDT": dict(n=40, mean=-0.02, se=0.05, edge_h=-0.04, se_h=0.1)}
+        st = {}
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW); self.assertEqual(v["evict"], [])          # first scan: a streak of one
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW)
+        self.assertEqual([s for s, _ in v["evict"]], ["AUSDT"])                                                     # -0.30 is 6 se under zero; B's -0.02 is noise
+        ev["AUSDT"]["mean"] = 0.1
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW); self.assertEqual(v["evict"], []); self.assertEqual(st["evict"]["AUSDT"], 0)
+
+    def test_the_probe_is_promoted_over_the_weakest_measured_main_or_ended(self):
+        from bot.select import verdict
+        rows = [row("AUSDT"), row("BUSDT"), row("PUSDT")]; books = {"AUSDT": {}, "BUSDT": {}, "PUSDT": {"probe": 1}}
+        ev = {"AUSDT": dict(n=40, mean=0.2, se=0.02, edge_h=0.40, se_h=0.04), "BUSDT": dict(n=40, mean=0.05, se=0.02, edge_h=0.10, se_h=0.04),
+              "PUSDT": dict(n=12, mean=0.3, se=0.03, edge_h=0.60, se_h=0.06)}
+        st = {"probe_t": {"PUSDT": self.NOW - 86400}}
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW)
+        self.assertEqual(v["promote"][:2], ("PUSDT", "BUSDT")); self.assertIsNone(v["probe_end"])                    # beat the weakest measured main by > 2 se
+        ev["PUSDT"]["edge_h"] = 0.12
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW)
+        self.assertIsNone(v["promote"]); self.assertEqual(v["probe_end"][0], "PUSDT")                                # judged and not better: it ends
+        ev["PUSDT"]["n"] = 3; st["probe_t"]["PUSDT"] = self.NOW - 6 * 86400
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW); self.assertEqual(v["probe_end"][0], "PUSDT")   # unjudgeable after probe_days: ends too
+        st["probe_t"]["PUSDT"] = self.NOW - 86400
+        v = verdict(rows, books, self.SEL, st, "20260902", ev, self.NOW); self.assertIsNone(v["probe_end"]); self.assertIsNone(v["promote"])   # young and thin: keeps probing
+
+    def test_the_probe_slot_takes_the_next_candidate_after_confirm_scans_and_respects_cooldown(self):
+        from bot.select import verdict
+        rows = [row("AUSDT"), row("BUSDT"), row("CUSDT", edge=0.9), row("DUSDT", edge=0.5)]; books = {"AUSDT": {}, "BUSDT": {}}
+        st = {"cool": {"CUSDT": self.NOW + 86400}}
+        v = verdict(rows, books, self.SEL, st, "20260902", {}, self.NOW)
+        self.assertEqual(v["adds"], []); self.assertIsNone(v["probe"])                                              # streaks of one
+        v = verdict(rows, books, self.SEL, st, "20260902", {}, self.NOW)
+        self.assertEqual(v["adds"], ["DUSDT"]); self.assertIsNone(v["probe"])                                       # C is cooling down: D fills the free main slot, nothing left to probe
+        books["DUSDT"] = {}; rows.append(row("EUSDT", edge=0.3))
+        for _ in range(2): v = verdict(rows, books, self.SEL, st, "20260902", {}, self.NOW)
+        self.assertEqual(v["probe"], "EUSDT")                                                                        # basket full: the best candidate probes
+
+    def test_no_third_main_book_of_one_driver_cluster(self):
+        from bot.select import verdict
+        rows = [row("AUSDT", cluster="AUSDT"), row("BUSDT", cluster="AUSDT"), row("CUSDT", edge=0.9, cluster="AUSDT"), row("XUSDT", edge=0.2, cluster="XUSDT")]
+        books = {"AUSDT": {}, "BUSDT": {}}; st = {}
+        for _ in range(2): v = verdict(rows, books, self.SEL, st, "20260902", {}, self.NOW)
+        self.assertEqual(v["adds"], ["XUSDT"])                                                                       # C scores best but would be the third of the AUSDT cluster
+
+class ApplyProbe(unittest.TestCase):
+    SEL = {**SELECT, "n": 3, "probe": 0.1, "lead": 0.5, "min_cycles": 10, "probe_cooldown_d": 7}
+
+    def params(self, books):
+        return dict(strat=dict(symbol=list(books)[0], side="long", sides=["long", "short"]), books=books)
+
+    def test_probe_opens_at_its_fraction_promotion_winds_the_loser_down_and_the_probe_takes_the_slot_when_it_is_gone(self):
+        rows = [row("AUSDT"), row("BUSDT"), row("CUSDT"), row("PUSDT", edge=0.7)]
+        p = self.params({"AUSDT": {}, "BUSDT": {}, "CUSDT": {}}); st = {}
+        acts = apply(p, rows, [], [], {}, self.SEL, probe="PUSDT", st=st, now=1000.0)
+        self.assertEqual([a[:2] for a in acts], [("probe", "PUSDT")]); self.assertEqual(p["books"]["PUSDT"], {"probe": 1, "wallet_frac": 0.1}); self.assertEqual(st["probe_t"]["PUSDT"], 1000.0)
+        self.assertAlmostEqual(sum(b["wallet_frac"] for b in p["books"].values()), 1.0)
+        acts = apply(p, rows, [], [], {}, self.SEL, promote=("PUSDT", "BUSDT", "better"), st=st, now=2000.0)
+        self.assertEqual([a[:2] for a in acts], [("promote", "PUSDT")]); self.assertEqual(p["books"]["BUSDT"]["wind_down"], 1); self.assertEqual(p["books"]["PUSDT"]["promote"], 1)
+        self.assertEqual(p["books"]["PUSDT"]["wallet_frac"], 0.1)                                                     # still the probe's share while the loser holds its slot
+        acts = apply(p, rows, [], [], {"BUSDT": True}, self.SEL, st=st, now=3000.0)
+        self.assertEqual([a[:2] for a in acts], [("drop", "BUSDT"), ("main", "PUSDT")])
+        self.assertNotIn("probe", p["books"]["PUSDT"]); self.assertAlmostEqual(p["books"]["PUSDT"]["wallet_frac"], 0.3)   # a main book now: (1 - 0.1) / 3
+        self.assertGreater(st["cool"]["BUSDT"], 3000.0)                                                                 # the evicted book waits out the cooldown
+
+    def test_a_finished_probe_winds_down_and_the_leader_takes_half_the_pool(self):
+        rows = [row("AUSDT"), row("BUSDT"), row("PUSDT")]
+        p = self.params({"AUSDT": {}, "BUSDT": {}, "PUSDT": {"probe": 1}}); st = {}
+        ev = {"AUSDT": dict(n=40, edge_h=0.5, se_h=0.05), "BUSDT": dict(n=40, edge_h=0.1, se_h=0.05)}
+        acts = apply(p, rows, [], [], {}, self.SEL, probe_end=("PUSDT", "not better"), ev=ev, st=st, now=1000.0)
+        self.assertEqual([a[:2] for a in acts], [("probe_end", "PUSDT")]); self.assertEqual(p["books"]["PUSDT"]["wind_down"], 1)
+        self.assertAlmostEqual(p["books"]["AUSDT"]["wallet_frac"], 0.45); self.assertAlmostEqual(p["books"]["BUSDT"]["wallet_frac"], 0.225)   # leader: 0.9 x 0.5; the rest over n - 1 = 2 slots
+        apply(p, rows, [], [], {"PUSDT": True}, self.SEL, ev=ev, st=st, now=2000.0)
+        self.assertNotIn("PUSDT", p["books"]); self.assertIn("PUSDT", st["cool"])
+
+class Clusters(unittest.TestCase):
+    def test_correlated_symbols_share_a_cluster_and_the_slow_flag_reads_trials_per_hour(self):
+        from bot.scan import clusters, corr
+        import random
+        random.seed(1); base = [random.gauss(0, 1) for _ in range(96)]
+        r = lambda k, noise: {1000 + i: base[i] * k + random.gauss(0, noise) for i in range(96)}
+        rows = [dict(symbol="ETH", qv=3e9, _r15=r(1, 0.3)), dict(symbol="SOL", qv=1e9, _r15=r(1, 0.5)), dict(symbol="XAG", qv=1e8, _r15={1000 + i: random.gauss(0, 1) for i in range(96)})]
+        clusters(rows, 0.5)
+        self.assertEqual([x["cluster"] for x in rows], ["ETH", "ETH", "XAG"]); self.assertNotIn("_r15", rows[0])
+        self.assertAlmostEqual(corr(list(range(12)), [2 * x for x in range(12)]), 1.0); self.assertEqual(corr([1.0] * 12, list(range(12))), 0.0)
+        self.assertEqual(corr([1, 2, 3], [2, 4, 6]), 0.0)                                                            # under 10 points a correlation is noise: none
+        x = dict(tick_pct=0.01, spread_bp=1.0, fund=0.0, qv=1e8, trials_h=0.8)
+        self.assertEqual(flags_of(x, [], 0.0, 0.0, 0.0, 1.3), ["slow0.8/h"]); self.assertEqual(flags_of(dict(x, trials_h=2.0), [], 0.0, 0.0, 0.0, 1.3), [])
 
 class Flat(unittest.TestCase):
     def test_a_stale_or_loaded_engine_is_not_flat(self):

@@ -343,7 +343,10 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
         base["wallet_frac"] = 1.0 / max(int((p.get("select") or {}).get("n") or len(p["books"])), 1)
     strat = {**base, **(strat or {})}
     if qstep is None: qstep = (contract_meta(sym) or {}).get("qstep", 0.1)
-    first = load_seconds(files[0], sym) if files else []
+    loaded, first = {}, []
+    for path in files:                                             # the first file that carries this symbol: a warm-up file recorded before the
+        loaded[path] = load_seconds(path, sym)                     # symbol joined the recording is empty for it (2026-09-01: ETH/XAG sized at the file's
+        if loaded[path]: first = loaded[path]; break               # unit 70 = $170k and seeded nothing because only files[0] was looked at)
     if not fixed and any(strat.get(f) for f in SIZED.values()):
         equity = equity if equity is not None else latest_equity()
         mid = next(((b + a) / 2 for _, b, a, *_ in first if b and a), None)
@@ -351,7 +354,7 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
         else: print(f"sizing: no equity ({equity}) or no quote on the tape; the file's fixed sizes apply", file=sys.stderr)
     eng = Engine(sig, strat, qstep=qstep, sides=["long", "short"] if follow else sides, follow=follow)
     if first: eng.seed(*seed_history(sym, first[0][0]))
-    for path in files: eng.run(first if path == files[0] else load_seconds(path, sym))
+    for path in files: eng.run(loaded[path] if path in loaded else load_seconds(path, sym))
     m = eng.metrics()
     m["sizing"] = dict(qstep=qstep, equity=None if fixed else equity, **{k: strat.get(k) for k in SIZED})
     if events: m["events"] = eng.events

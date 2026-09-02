@@ -59,6 +59,7 @@ WIN = 1440
 # once, in the score. Pooling across symbols assumes this geometry is symbol-invariant — that is the hypothesis these constants
 # encode, and TRUMPUSDT is 93% of the sample, so it is barely tested (NEXT 6).
 EDGE = dict(win_pct=0.360, loss_pct=0.569, fee_pct=0.048, hold_min=120)   # hold_min: live median hold is 13 min, 120 covers the tail (measured timeout share 0-8%)
+MIN_TRIALS_H = 1.3   # fewer pauses per hour than this cannot accumulate 300 campaigns in 30 days: unjudgeable on live results = ineligible (select.min_trials_h)
 
 def arg(flag, default):
     return type(default)(sys.argv[sys.argv.index(flag) + 1]) if flag in sys.argv else default
@@ -138,7 +139,31 @@ def edge_of(t, fee, imp):
     if not t or not t["n"] or not t["bars"]: return 0.0
     return t["n"] / (t["bars"] / 60) * (t["out"] / t["n"] - fee - imp)
 
-def flags_of(x, wins, net_total, min_vol=0.0, fee=0.0):
+def corr(a, b):
+    """Pearson correlation of two equal-length return series (0.0 when either is flat)."""
+    n = len(a)
+    if n < 10 or n != len(b): return 0.0
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a); vb = sum((y - mb) ** 2 for y in b)
+    if va <= 0 or vb <= 0: return 0.0
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (va * vb) ** 0.5
+
+def clusters(rows, th=0.5):
+    """Driver clusters from the latest window's 15-minute returns (`_r15`: {bar ts: return}): rows in volume order, each joins the first
+    cluster whose SEED it correlates with at >= th, else seeds a new one; the cluster id is its seed's symbol. Crypto majors correlate
+    0.6-0.8 with each other and ~0 with tokenised stocks and metals, so this splits the universe by what drives it without any fitted
+    model — a basket of four crypto books is one bet on the crash day (NEXT 8: 상관). Sets r["cluster"] and drops the series."""
+    seeds = []
+    for r in sorted(rows, key=lambda r: -r.get("qv", 0.0)):
+        mine = r.pop("_r15", None) or {}
+        for sym, ser in seeds:
+            keys = sorted(set(mine) & set(ser))
+            if keys and corr([mine[k] for k in keys], [ser[k] for k in keys]) >= th: r["cluster"] = sym; break
+        else:
+            r["cluster"] = r["symbol"]; seeds.append((r["symbol"], mine))
+    return rows
+
+def flags_of(x, wins, net_total, min_vol=0.0, fee=0.0, min_trials_h=0.0):
     """Hard disqualification, never ranking: a flagged symbol is not a candidate and a flagged holding is wound down (bot/select.py).
     Only facts that hold whatever the score says go here — our footprint, the contract, the tape's shape. The score's own verdict
     (`entry`) is a soft gate that blocks an add and never forces an exit: the estimator is measured to be pessimistic against this
@@ -153,9 +178,10 @@ def flags_of(x, wins, net_total, min_vol=0.0, fee=0.0):
     ups = [w["net"] for w in wins if w]
     if (ups and max(ups) >= 25) or net_total >= 40: f.append(f"pump{max(ups + [net_total]):+.0f}%")   # a pump is an UP move (crashes are cycle heaven): +25% in a day or +40% over the windows, however two-way it swings on the way
     if wins and wins[0] and wins[0]["er"] >= 0.35: f.append(f"ER{wins[0]['er']:.2f}")
+    if min_trials_h and x.get("trials_h") is not None and x["trials_h"] < min_trials_h: f.append(f"slow{x['trials_h']:.1f}/h")   # too few pauses to ever be judged on live results (300 campaigns in 30 days needs ~1.3/h): unjudgeable is ineligible
     return f
 
-def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equity=None, n_books=1, edge=None):
+def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equity=None, n_books=1, edge=None, min_trials_h=0.0, corr_th=0.5):
     """Scan the universe; returns rows sorted: unflagged by edge (desc) first, then flagged by volume. Public REST only.
     `always` = symbols measured even when they fail the volume gate (bot/select.py passes the held books: a basket verdict needs
     numbers for the symbols being traded, and absence is not evidence). They are measured, never exempted — the volume flag is
@@ -203,6 +229,8 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equit
         # and our unit is ~20 ppm of ADV, so this reads as an upper bound; the tick backtest is what can calibrate it (NEXT 6).
         rr = [a["c"] / q["c"] - 1 for q, a in zip(c1[-WIN:], c1[-WIN + 1:]) if q["c"]]
         sig_d = statistics.pstdev(rr) * (1440 ** 0.5) * 100 if len(rr) > 60 else 0.0
+        x["sigma_d"] = sig_d                                                                  # daily sigma (%): the impact term, the optional sigma-normalised share (select), the pair table
+        last = c1[-WIN:]; x["_r15"] = {last[i]["ts"] // 900_000: last[i + 14]["c"] / last[i]["c"] - 1 for i in range(0, len(last) - 14, 15) if last[i]["c"]}   # 15-min returns for the driver clusters
         x["unit_usdt"] = un = unit_usdt or sp["unit_qty"] * x["px"] / n_books / n_sides
         x["impact"] = sig_d * (un / x["qv"]) ** 0.5 if x["qv"] else 0.0
         tr = trials(c1, sg, e["win_pct"], e["loss_pct"], int(e["hold_min"]), bounds); got = [t for t in (tr.get(j) for j in range(nw)) if t]
@@ -220,8 +248,9 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equit
             r["h"], r["l"], r["c"] = max(r["h"], v["h"]), min(r["l"], v["l"]), v["c"]
         s15 = sorted({**{v["ts"]: v for v in c15}, **bars15}.values(), key=lambda v: v["ts"])[:-1]; b1h = bars_1h(s15)[:-1]
         x["side"] = (structure_side(b1h, wilder_atr(b1h)) if len(b1h) >= 20 else structure_side(s15, wilder_atr(s15))) or "-"
-        x["flags"] = flags_of(x, wins, (c1[-1]["c"] / c1[0]["c"] - 1) * 100, min_vol, e["fee_pct"])
+        x["flags"] = flags_of(x, wins, (c1[-1]["c"] / c1[0]["c"] - 1) * 100, min_vol, e["fee_pct"], min_trials_h)
         rows.append(x)
+    clusters(rows, corr_th)
     ok = sorted([r for r in rows if not r["flags"]], key=lambda r: (not r.get("entry"), -r["edge"]))   # entry-eligible first, then by score
     bad = sorted([r for r in rows if r["flags"]], key=lambda r: -r["qv"])
     return ok + bad
@@ -229,12 +258,12 @@ def rank(min_vol=5e7, days=3, syms=None, exclude=(), log=print, always=(), equit
 def table(rows, top, e=None):
     e = {**EDGE, **(e or {})}
     print(f"{'symbol':<12}{'edge%/h':>9}{'+-sd':>7}{'p_up':>6}{'need':>6}{'tr/h':>6}{'out%':>7}{'imp%':>8}{'concept':>8}"
-          f"{'legs/h':>7}{'atr%':>6}{'bounce':>7}{'ER':>6}{'vol24h':>8}{'fund%':>7}  side   in  flags")
+          f"{'legs/h':>7}{'atr%':>6}{'sig_d':>6}{'ER':>6}{'vol24h':>8}{'fund%':>7}  side   in  cluster     flags")
     for r in rows[:top] + [r for r in rows if r["flags"]][:top]:
         print(f"{r['symbol']:<12}{r.get('edge', 0.0):9.3f}{r.get('edge_sd', 0.0):7.3f}{r.get('p_up', 0.0):6.2f}{r.get('need', 0.0):6.2f}"
               f"{r.get('trials_h', 0.0):6.2f}{r.get('out', 0.0):+7.3f}{r.get('impact', 0.0):8.4f}{r['concept']:8.2f}"
-              f"{r['legs_h']:7.2f}{r['atr_pct']:6.2f}{r['bounce']:7.2f}{r['er']:6.2f}{r['qv'] / 1e6:7.0f}M{r['fund']:+7.3f}  {r['side']:<5} "
-              f"{'ok' if r.get('entry') else '- ':>3}  {' '.join(r['flags'])}")
+              f"{r['legs_h']:7.2f}{r['atr_pct']:6.2f}{r.get('sigma_d', 0.0):6.2f}{r['er']:6.2f}{r['qv'] / 1e6:7.0f}M{r['fund']:+7.3f}  {r['side']:<5} "
+              f"{'ok' if r.get('entry') else '- ':>3}  {r.get('cluster', '-'):<11} {' '.join(r['flags'])}")
     if rows: print(f"  edge%/h = tr/h x (out% - fee {e['fee_pct']:.3f} - imp%), barriers win {e['win_pct']:.3f} / loss {e['loss_pct']:.3f} / hold {int(e['hold_min'])}m, "
                    f"unit {rows[0].get('unit_usdt', 0):.0f} USDT.  `in` = may be added (out% pays the toll); `need` = break-even p_up")
 
@@ -248,7 +277,9 @@ def main():
     syms = arg("--sym", "").split(",") if "--sym" in sys.argv else None
     from bot.cycles import geometry
     edge = (p.get("select") or {}).get("edge") or geometry()          # as select charges it: the live ledger's current geometry, else EDGE
-    t0 = time.time(); rows = rank(min_vol, days, syms, equity=eq, n_books=nb, always=tuple(portfolio(p)) if p else (), edge=edge)
+    sel = p.get("select") or {}
+    t0 = time.time(); rows = rank(min_vol, days, syms, equity=eq, n_books=nb, always=tuple(portfolio(p)) if p else (), edge=edge,
+                                  min_trials_h=float(sel.get("min_trials_h", MIN_TRIALS_H)), corr_th=float(sel.get("corr_th", 0.5)))
     table(rows, top, edge); print(f"--- {len(rows)} symbols, {days} windows of 24h, {time.time() - t0:.0f}s" + (f", geometry from {edge['n']} live cycles" if edge and edge.get('n') else ", geometry = EDGE constants"))
     if "--json" in sys.argv:
         os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)

@@ -168,6 +168,21 @@ class BacktestSizing(unittest.TestCase):
         self.assertEqual((s["unit_frac"], s["cap_frac"], s["daily_loss_frac"], s["notional_frac"]), (0.0, 0.0, 0.0, 0.0))   # the engine cannot resize offline
         self.assertEqual(size_from_equity(dict(unit_qty=70, cap_usdt=20), 700.0, 82.3, 0.01)["unit_qty"], 70)               # no fractions: the file's fixed sizes
 
+    def test_sizing_and_seeding_use_the_first_file_that_carries_the_symbol(self):
+        """A warm-up file recorded before the symbol joined the recording is empty for it: the live sizing must still come from equity
+        (2026-09-01 nightly: ETH/XAG ran at the file's unit 70 = $170k notional, every signal blocked by max_notional, zero cycles)."""
+        from bot import backtest
+        secs = [[7200 + i, 100.0, 100.02, [[100.0, 5.0]], [[100.02, 5.0]], None, [], []] for i in range(5)]
+        old = backtest.load_seconds, backtest.seed_history, backtest.latest_equity, backtest.contract_meta, backtest.load_params
+        seeded = []
+        backtest.load_seconds = lambda path, sym: [] if path == "warm" else secs
+        backtest.seed_history = lambda sym, start: seeded.append(start) or (None, None, None)
+        backtest.latest_equity = lambda: 700.0; backtest.contract_meta = lambda sym: dict(qstep=0.01); backtest.load_params = lambda: {}
+        try: m = backtest.run_files(["warm", "day"], "TESTUSDT", strat=dict(unit_frac=1.5, wallet_frac=0.25, max_notional=1e9), sides=["long"])
+        finally: backtest.load_seconds, backtest.seed_history, backtest.latest_equity, backtest.contract_meta, backtest.load_params = old
+        self.assertAlmostEqual(m["sizing"]["unit_qty"], 2.62, 6)                           # 700 x 0.25 x 1.5 / 100.01, not the file's 70
+        self.assertEqual(seeded, [7200])                                                   # seeded from the first second that exists
+
     def test_the_contract_step_is_read_from_the_cache(self):
         import json, os
         from bot import backtest
