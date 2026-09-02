@@ -6,19 +6,13 @@
       "ticker",
       "candle1m"
     ],
-    "HYPEUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
     "ETHUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "XAGUSDT": [
+    "HYPEUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -30,43 +24,13 @@
       "ticker",
       "candle1m"
     ],
+    "XAGUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "ZECUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "SOLUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "DOGEUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "XRPUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "CLUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "SNDKUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "PROMUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -86,10 +50,10 @@
     "mode": "live",
     "adopt": false,
     "unit_qty": 70,
-    "unit_frac": 1.5,
-    "cap_frac": 0.15,
-    "daily_loss_frac": 0.3,
-    "notional_frac": 6.5,
+    "unit_frac": 4.0,
+    "cap_frac": 0.4,
+    "daily_loss_frac": 1.0,
+    "notional_frac": 16.0,
     "max_units": 4,
     "max_notional": 900,
     "step_add_pct": 0.5,
@@ -113,7 +77,7 @@
     "stop_buffer_atr": 0.3,
     "stop_trail": 1,
     "stop_cooldown_s": 300,
-    "max_stops_day": 3,
+    "max_stops_day": 6,
     "daily_loss_limit": 40,
     "buy_ttl_s": 90,
     "cancel_v": 1.0,
@@ -126,14 +90,16 @@
     "derisk_on_against": 0,
     "derisk_under_units": 0,
     "retrace_frac": 0.2,
-    "cap_min_atr": 30
+    "cap_min_atr": 30,
+    "lever": 20
   },
   "books": {
     "UAIUSDT": {
       "wallet_frac": 1.0,
       "sides": [
         "short"
-      ]
+      ],
+      "hunt": 1
     }
   },
   "sig": {
@@ -188,5 +154,8 @@
     "record_extra": [
       "PROMUSDT"
     ]
+  },
+  "hunt": {
+    "on": 1
   }
 }

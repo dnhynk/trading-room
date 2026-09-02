@@ -13,7 +13,8 @@ from bot.ws import load_params, portfolio, outside_books
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS = {"record": [sys.executable, "-u", "-m", "bot.ws", "record"], "cycle": [sys.executable, "-u", "-m", "bot.cycle"],
         "nightly": [sys.executable, "-u", "-m", "bot.nightly"], "sweep": [sys.executable, "-u", "-m", "bot.sweep"],
-        "select": [sys.executable, "-u", "-m", "bot.select"]}
+        "select": [sys.executable, "-u", "-m", "bot.select"],
+        "hunt": [sys.executable, "-u", "-m", "bot.hunt"]}          # the short-hunting side pipeline (report-only unless params hunt.on = 1)
 
 def stopped(): return os.path.exists(os.path.join(ROOT, "STOP"))
 

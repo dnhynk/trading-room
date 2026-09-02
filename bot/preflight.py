@@ -64,13 +64,20 @@ def main():
     for q in all_pos:                                   # 포트폴리오 밖 계약에 남은 물량 = 엔진의 OLD_POSITION halt 와 같은 조건
         if q["symbol"] not in syms and float(q.get("total", 0)) > 0:
             rep("WARN", f"[{q['symbol']}] {q['holdSide']}: {q['total']} on a contract no engine runs (the engine halts on this: OLD_POSITION)")
-    jobs = ["record", "nightly", "sweep", "select"] + sorted(os.path.basename(f)[:-4] for f in glob.glob(os.path.join(LOGS, "cycle*.pid")))
+    hunt_on = bool((p.get("hunt") or {}).get("on"))       # hunt mode: bot.hunt owns books and bot.select must NOT run (two writers)
+    jobs = ["record", "nightly", "sweep", "hunt" if hunt_on else "select"] + sorted(os.path.basename(f)[:-4] for f in glob.glob(os.path.join(LOGS, "cycle*.pid")))
+    def alive_pid(job):
+        pid = int(open(os.path.join(LOGS, f"{job}.pid")).read().strip())
+        return pid, str(pid) in subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, errors="replace").stdout
     for job in jobs:
         try:
-            pid = int(open(os.path.join(LOGS, f"{job}.pid")).read().strip())
-            alive = str(pid) in subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True).stdout
+            pid, alive = alive_pid(job)
             rep("PASS" if alive else "FAIL", f"supervisor {job} pid {pid} {'alive' if alive else 'NOT running'}")
         except Exception as e: rep("FAIL", f"supervisor {job}: {e}")
+    if hunt_on:
+        try: pid, alive = alive_pid("select")
+        except Exception: alive = False
+        rep("FAIL" if alive else "PASS", f"hunt mode: bot.select {'is RUNNING — two writers of params.books' if alive else 'stopped'}")
     try:
         lines = open(os.path.join(LOGS, "record.log"), encoding="utf-8").read().splitlines()
         last = [l for l in lines if " REC " in l][-1]; rep("INFO", f"recorder last stats: {last[:120]}")
