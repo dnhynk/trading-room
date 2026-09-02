@@ -1,6 +1,6 @@
 {
   "record": {
-    "UAIUSDT": [
+    "AKEUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -24,6 +24,12 @@
       "ticker",
       "candle1m"
     ],
+    "UAIUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "XAGUSDT": [
       "trade",
       "books15",
@@ -36,13 +42,19 @@
       "ticker",
       "candle1m"
     ],
+    "ARBUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "BTCUSDT": [
       "candle1m"
     ]
   },
   "strat": {
-    "symbol": "UAIUSDT",
-    "side": "short",
+    "symbol": "AKEUSDT",
+    "side": "long",
     "sides": [
       "long",
       "short"
@@ -51,7 +63,7 @@
     "adopt": false,
     "unit_qty": 70,
     "unit_frac": 4.0,
-    "cap_frac": 0.4,
+    "cap_frac": 0.77,
     "daily_loss_frac": 1.0,
     "notional_frac": 16.0,
     "max_units": 4,
@@ -94,10 +106,10 @@
     "lever": 20
   },
   "books": {
-    "UAIUSDT": {
+    "AKEUSDT": {
       "wallet_frac": 1.0,
       "sides": [
-        "short"
+        "long"
       ],
       "hunt": 1
     }
@@ -156,6 +168,9 @@
     ]
   },
   "hunt": {
-    "on": 1
+    "on": 1,
+    "min_vol": 5000000.0,
+    "universe": 5000000.0,
+    "max_atr": 2.0
   }
 }
