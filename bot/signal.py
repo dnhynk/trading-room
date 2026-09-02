@@ -32,6 +32,8 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            # untouched, so live is bit-identical; replay/legs/nightly compare v / 1m / s8), 1 lets it arm and trim like the other two
            s8_on=0, s8_h=8, s8_decel=0.3, s8_rebuild=0.5, s8_cool=60,
            s8_hold=1, s8_vd=0,     # which pause (NEXT 1): the dead speed must persist s8_hold seconds; s8_vd=1 also needs the leg's aggressor volume to be fading (sell_decay / buy_decay)
+           s8_dip=1, s8_pop=1,     # which side of s8 fires (DIP_SLOWING / POP_STALLING) — diagnosis knobs for NEXT 1
+           s8_gap_s=0,             # > 0: s8 fires only where the base rules (v / 1m) have been silent for this many seconds — s8 as a gap-filler for the slides 1m misses, never a second voice at a pause 1m already took
            # structure: last confirmed 1m pivot low/high (zigzag rg_theta over stop_lookback candles) for the structural stop
            stop_lookback=180,
            # volume-decay component of a deceleration (10s windows of aggressor volume vs the 10-min average): a spike of >= vd_spike x that
@@ -462,22 +464,23 @@ class Features:
             pop_ok = lambda: vd_pop and (u["last"] is None or sec - u["last"][0] >= p["cooldown"] or mid >= u["last"][1] + p["refire_atr"] * atr)
             cond = D >= p["dip_min_atr"] and d["minv"] <= -p["v_fast"] and v >= -p["v_slow"] and a > 0
             d["hold"] = d["hold"] + 1 if cond else 0
-            if d["hold"] >= p["hold_s"] and dip_ok(): d["last"] = (sec, mid); d["minv"] = ve; out.append(dict(sig="DIP_SLOWING", src="v"))
+            if d["hold"] >= p["hold_s"] and dip_ok(): d["last"] = (sec, mid); d["last_base"] = sec; d["minv"] = ve; out.append(dict(sig="DIP_SLOWING", src="v"))
             cond = U >= p["dip_min_atr"] and u["maxv"] >= p["v_fast"] and v <= p["v_slow"] and a < 0
             u["hold"] = u["hold"] + 1 if cond else 0
-            if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["maxv"] = ve; out.append(dict(sig="POP_STALLING", src="v"))
+            if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["last_base"] = sec; u["maxv"] = ve; out.append(dict(sig="POP_STALLING", src="v"))
+            for name in self.pending:   # 1m-candle rule, same cooldown and veto as the velocity rule
+                if name == "DIP_SLOWING" and dip_ok(): d["last"] = (sec, mid); d["last_base"] = sec; out.append(dict(sig=name, src="1m"))
+                if name == "POP_STALLING" and pop_ok(): u["last"] = (sec, mid); u["last_base"] = sec; out.append(dict(sig=name, src="1m"))
             h = p["s8_h"]
             if n > h > 0:               # third source: the h-second move in ATR units against the leg's own strongest push (s8_step)
                 x = (allm[-1 - h] - mid) / atr
-                if s8_step(self.s8["d"], x, sec, D >= p["dip_min_atr"], p, not p["s8_vd"] or sell_decay) and (not p["s8_on"] or dip_ok()):
+                gap = lambda st: not p["s8_gap_s"] or sec - st.get("last_base", -1e9) >= p["s8_gap_s"]   # gap-filler mode: only where v / 1m have been silent
+                if s8_step(self.s8["d"], x, sec, D >= p["dip_min_atr"], p, not p["s8_vd"] or sell_decay) and p["s8_dip"] and gap(d) and (not p["s8_on"] or dip_ok()):
                     if p["s8_on"]: d["last"] = (sec, mid)
                     out.append(dict(sig="DIP_SLOWING", src="s8", shadow=not p["s8_on"]))
-                if s8_step(self.s8["u"], -x, sec, U >= p["dip_min_atr"], p, not p["s8_vd"] or buy_decay) and (not p["s8_on"] or pop_ok()):
+                if s8_step(self.s8["u"], -x, sec, U >= p["dip_min_atr"], p, not p["s8_vd"] or buy_decay) and p["s8_pop"] and gap(u) and (not p["s8_on"] or pop_ok()):
                     if p["s8_on"]: u["last"] = (sec, mid)
                     out.append(dict(sig="POP_STALLING", src="s8", shadow=not p["s8_on"]))
-            for name in self.pending:   # 1m-candle rule, same cooldown and veto as the velocity rule
-                if name == "DIP_SLOWING" and dip_ok(): d["last"] = (sec, mid); out.append(dict(sig=name, src="1m"))
-                if name == "POP_STALLING" and pop_ok(): u["last"] = (sec, mid); out.append(dict(sig=name, src="1m"))
         else:
             self.f = dict(t=sec, mid=mid, bid=self.bid, ask=self.ask, mark=self.mark, sigma=sigma, atr=None, v=v, a=a, brk=False, bko=False)
         self.pending = []

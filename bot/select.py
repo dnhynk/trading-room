@@ -161,7 +161,8 @@ def shares(books, sel, leader=None, sigma=None):
     """wallet_frac per book. Main books share the pool (1 - probe) over `n` SLOTS — not over the books present, so an empty slot leaves
     money idle and the sum never exceeds one wallet mid-change; the leader takes `lead` of the pool and the others split the rest over
     n - 1 slots; a probe book carries `probe`. sigma_norm: main shares x 1 / sigma_daily, renormalised to the same total."""
-    n = max(int(sel["n"]), 1); probe = float(sel.get("probe") or 0.0); pool = 1.0 - probe
+    probe = float(sel.get("probe") or 0.0); pool = 1.0 - probe
+    n = max(int(sel["n"]), 1, sum(1 for b in books.values() if not b.get("probe")))   # more main books than slots (n reduced by hand): divide by the books, never over-allocate
     out = {}
     for s, b in books.items():
         if b.get("probe"): out[s] = probe
@@ -198,6 +199,10 @@ def verdict(rows, books, sel, st, today, ev=None, now=None):
         streak[s] = streak.get(s, 0) + 1 if bad else 0
         if bad and streak[s] >= int(sel["confirm"]) and s not in gone: evict.append((s, f"live {e['mean']:+.3f}%/cycle over {e['n']} cycles (se {e['se']:.3f})"))
     for s in [s for s in streak if s not in active]: del streak[s]
+    over = len(mains) - n                                                             # 2b. n reduced below the books held: the weakest measured main books leave (money is never over-allocated meanwhile: shares())
+    if over > 0:
+        weak = sorted((ev[m]["edge_h"], m) for m in active if m in ev and ev[m]["n"] >= int(sel["min_cycles"]) / 2 and m not in gone and m not in {s for s, _ in evict})
+        for e_h, m in weak[:over]: evict.append((m, f"n {n} < {len(mains)} books: weakest live edge {e_h:+.4f}%/h"))
     measured = sorted((ev[m]["edge_h"], ev[m]["se_h"], m) for m in active if m in ev and ev[m]["n"] >= int(sel["min_cycles"]) and m not in gone)
     for s in probes:                                                                  # 3. the probe's verdict
         if books[s].get("wind_down") or s in gone or books[s].get("promote"): continue

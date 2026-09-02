@@ -585,6 +585,11 @@ class ThirdDetector(unittest.TestCase):
         feat = Features(dict(vol_hl=300, s8_on=1)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
         out = self._slide(feat); s8 = [x for x in out if x["sig"] == "DIP_SLOWING" and x.get("src") == "s8"]
         self.assertTrue(s8); self.assertFalse(any(x["shadow"] for x in s8)); self.assertIsNotNone(feat.dip["last"])
+        feat = Features(dict(vol_hl=300, s8_on=1, s8_dip=0)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
+        self.assertFalse([x for x in self._slide(feat) if x.get("src") == "s8"])               # the dip side switched off: nothing from s8 on a slide
+        feat = Features(dict(vol_hl=300, s8_on=1, s8_gap_s=600)); feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(120)])
+        feat.dip["last_base"] = 7200 + 100                                                      # a base rule fired a moment ago: the gap-filler stays silent
+        self.assertFalse([x for x in self._slide(feat) if x.get("src") == "s8"])
         self.assertEqual(Strategy(dict(side="long", unit_qty=70, max_notional=1e6)).step(F(mid=99.4, bid=99.39, ask=99.41), [s8[0]], dict(lots=[], avg=None))["buy"], (99.39, 70))
 
 class CurrentLeg(unittest.TestCase):

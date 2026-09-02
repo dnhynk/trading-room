@@ -172,6 +172,15 @@ class Evidence(unittest.TestCase):
         self.assertIsNone(leader_of(["AUSDT", "BUSDT"], ev, sel))                                # the gap is inside 2 se: equal shares
         self.assertIsNone(leader_of(["AUSDT"], ev, sel))
 
+    def test_more_books_than_slots_never_over_allocates_and_the_weakest_measured_leaves(self):
+        from bot.select import shares, verdict
+        sel = dict(SELECT, n=3, probe=0.1, min_cycles=10, confirm=2)
+        books = {"AUSDT": {}, "BUSDT": {}, "CUSDT": {}, "DUSDT": {}}                          # n was cut to 3 while four are held
+        s = shares(books, sel); self.assertAlmostEqual(sum(s.values()), 0.9); self.assertAlmostEqual(s["AUSDT"], 0.225)   # divided by the books, not by n
+        ev = {"AUSDT": dict(n=40, mean=0.2, se=0.05, edge_h=0.4, se_h=0.1), "BUSDT": dict(n=40, mean=-0.05, se=0.05, edge_h=-0.1, se_h=0.1), "CUSDT": dict(n=2, mean=-9, se=1, edge_h=-9, se_h=1)}
+        v = verdict([row(s_) for s_ in books], books, sel, {}, "20260902", ev, time.time())
+        self.assertEqual([s_ for s_, _ in v["evict"]], ["BUSDT"])                                  # the weakest MEASURED book leaves; C's -9 on 2 cycles is not evidence, D has none
+
     def test_shares_sum_to_the_pool_and_tilt_to_the_leader(self):
         from bot.select import shares
         sel = dict(SELECT, n=4, probe=0.1, lead=0.5)
