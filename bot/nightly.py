@@ -36,6 +36,9 @@ def report(day):
                 out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", sides]).strip().split("\n") or [""])[-1])
             for v in ("0", "1"):   # the current-leg read as a size scale (NEXT 1), both ways whatever params say: the live experiment's readout is on minus off, per symbol per day
                 out.append(f"--sig rg_leg_on={v} (dual): " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short", "--sig", f"rg_leg_on={v}"]).strip().split("\n") or [""])[-1])
+            # the other live experiments of 2026-09-02 (NEXT 3, 5): the counterfactual of each, per symbol per day — live params vs the value it replaced
+            for label, ov in (("derisk on (pct 3, under-units cut)", ["--strat", "derisk_pct=3.0", "--strat", "derisk_under_units=1"]), ("retrace_frac 0.33", ["--strat", "retrace_frac=0.33"])):
+                out.append(f"counterfactual {label} (dual): " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short"] + ov).strip().split("\n") or [""])[-1])
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break
                 out.append(f"--follow {fol}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--follow", fol]).strip().split("\n") or [""])[-1])
             out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")

@@ -28,7 +28,8 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "unit_min_pct": ("strat", [0.1, 0.15, 0.25, 0.4]),
     "step_add_atr": ("strat", [0.3, 0.4, 0.5, 0.7, 1.0]),
     "gap_rebuy_pct": ("strat", [0.15, 0.3, 0.5, 0.8]),
-    "derisk_pct": ("strat", [0.5, 1.0, 2.0, 3.0, 5.0]),
+    # derisk_pct / derisk_core_frac / brk_atr / stop_buffer_atr: out of the grid while the de-risk family is switched off (params derisk_pct 0,
+    # user decision 2026-09-02, NEXT 3) — inert keys would only burn the nightly budget; put them back when the family returns
     "gate_relax": ("strat", [0.25, 0.35, 0.5, 0.7]),          # how much one refused bounce lowers the trim gate (0 would switch the mechanism off: not offered)
     "trim_retrace_atr": ("strat", [0.3, 0.5, 0.8, 1.2]),      # retrace that confirms a top (0 = no wick protection: not offered, user decision)
     "trim_taker_after_s": ("strat", [5, 10, 20, 60]),          # the trim's maker -> taker clock (2026-08-30 tape: the clock barely matters, the slip trigger carries the value)
@@ -38,9 +39,6 @@ SPACE = {  # (section, grid) — coarse on purpose; add keys here to make them t
     "rg_window": ("sig", [45, 60, 90, 120, 180]),
     "rg_drift_min_pct": ("sig", [1.0, 2.0, 3.0, 5.0]),         # a one-way that matters: the window's net move in % (0 would restore the ATR-only reading: not offered)
     "against_regime_mult": ("strat", [0.25, 0.5, 0.75, 1.0]),  # AGAINST scales the add (0 would restore the veto: not offered, user decision 2026-08-30)
-    "stop_buffer_atr": ("strat", [0.3, 0.5, 0.8, 1.2]),        # how far under the pivot the premise counts as broken (B: a de-risk trigger, not an exchange stop; bot/sweeps.py measures the hunts)
-    "brk_atr": ("sig", [0.3, 0.5, 0.8, 1.2, 2.0]),             # how far under the 30-min low (in ATR) a volume push counts as a break -> the de-risk trigger's depth (2026-08-30: 3 of 4 campaigns were halved at -0.3% by breaks 0.25% under the low)
-    "derisk_core_frac": ("strat", [0.25, 0.5, 0.75]),
     "retrace_frac": ("strat", [0.2, 0.33, 0.5]),               # the share of the bounce a top must give back (0 would restore the ATR-only wiggle: not offered)
     "c1_dev": ("sig", [0.25, 0.3, 0.4, 0.5, 0.7]),             # the 1m rule's depth in % — 3.3..10 ATR across the basket (NEXT 1 unit mismatch): the basket, not one symbol, judges it
     "rg_leg_pct": ("sig", [1.5, 2.0, 3.0]),                    # the current-leg read's depth (NEXT 1): live experiment from 2026-09-02, numbers judged here
