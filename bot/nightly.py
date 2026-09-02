@@ -34,6 +34,8 @@ def report(day):
             out.append("\n## sides (the day's tape as long / short / dual at live sizing; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
             for sides in ("long", "short", "long,short"):
                 out.append(f"--sides {sides}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", sides]).strip().split("\n") or [""])[-1])
+            out.append("--sig rg_leg_on=1 (dual; the current-leg read scales the against side, NEXT 1): "
+                       + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short", "--sig", "rg_leg_on=1"]).strip().split("\n") or [""])[-1])
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break
                 out.append(f"--follow {fol}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--follow", fol]).strip().split("\n") or [""])[-1])
             out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")
