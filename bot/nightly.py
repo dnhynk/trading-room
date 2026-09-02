@@ -28,7 +28,7 @@ def report(day):
         for sym in syms:                                # every book gets its own tables: a basket's evidence is per symbol, never one default symbol's
             out.append(f"\n# {sym}\n")
             out.append("## signals (replay, forward 15m; split by source / volume decay / CVD divergence / value area / regime)\n")
-            out.append(run_cmd(["bot.replay"] + warm + files + ["--sym", sym, "--quiet", "--day", day, "--by", "sell_decay,buy_decay,cvd_div,cvd_div_bear,vp_va,vp_dens,rg_er,U,D,side_hint_1h,side_hint_15m,daily_trend,dbl,brk"]))
+            out.append(run_cmd(["bot.replay"] + warm + files + ["--sym", sym, "--quiet", "--day", day, "--by", "sell_decay,buy_decay,cvd_div,cvd_div_bear,vp_va,vp_dens,rg_er,leg_ow,U,D,side_hint_1h,side_hint_15m,daily_trend,dbl,brk"]))
             out.append("\n## legs (where the deceleration detectors fire vs the real extremes; speed-model evidence)\n")
             out.append(run_cmd(["bot.legs"] + warm + files + ["--sym", sym, "--quiet", "--day", day]))
             out.append("\n## sides (the day's tape as long / short / dual at live sizing; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")

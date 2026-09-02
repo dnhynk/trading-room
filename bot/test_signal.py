@@ -587,6 +587,38 @@ class ThirdDetector(unittest.TestCase):
         self.assertTrue(s8); self.assertFalse(any(x["shadow"] for x in s8)); self.assertIsNotNone(feat.dip["last"])
         self.assertEqual(Strategy(dict(side="long", unit_qty=70, max_notional=1e6)).step(F(mid=99.4, bid=99.39, ask=99.41), [s8[0]], dict(lots=[], avg=None))["buy"], (99.39, 70))
 
+class CurrentLeg(unittest.TestCase):
+    def _feat(self, **sig):
+        from bot.signal import Features
+        feat = Features(dict(vol_hl=300, rg_theta=0.7, rg_leg_pct=2.0, **sig))
+        feat.seed_candles([dict(ts=i * 60000, o=100, h=100.05, l=99.95, c=100, v=1000) for i in range(200)])
+        return feat
+
+    def _candles(self, feat, closes, t0=200):
+        out = []
+        for i, c in enumerate(closes):
+            ts = (t0 + i) * 60000
+            out += feat.feed(dict(arg=dict(channel="candle1m"), data=[[str(ts), str(c), str(c + 0.02), str(c - 0.02), str(c), "1000", "0", "0"]], ts=ts))
+            out += feat.feed(dict(arg=dict(channel="candle1m"), data=[[str(ts + 60000), str(c), str(c), str(c), str(c), "0", "0", "0"]], ts=ts + 60000))   # the next bar opens: this one closes
+        return out
+
+    def test_the_leg_is_one_way_from_two_percent_deep_until_the_first_theta_bounce(self):
+        feat = self._feat()
+        slide = [100 - 0.1 * i for i in range(1, 26)]                    # -2.5% over 25 minutes, no 0.7% bounce inside
+        self._candles(feat, slide[:19]); self.assertEqual(feat.leg.get("leg_ow"), 0)       # -1.9%: not yet
+        self._candles(feat, slide[19:], t0=219); self.assertEqual(feat.leg["leg_ow"], -1); self.assertEqual(feat.leg["leg_dir"], -1); self.assertGreaterEqual(feat.leg["leg_pct"], 2.0)
+        self._candles(feat, [97.5 + 0.2 * i for i in range(1, 6)], t0=225)                 # +1.0% bounce: a theta swing confirms the low, the leg is a new up-leg
+        self.assertEqual(feat.leg["leg_dir"], 1); self.assertEqual(feat.leg["leg_ow"], 0)
+
+    def test_the_strategy_reads_the_leg_only_when_switched_on(self):
+        from bot.signal import Strategy, SIG
+        f = dict(F(), rg_t=1, rg_up=0, rg_dn=3, rg_med_up=0.0, rg_med_dn=0.9, rg_drift=-1.0, rg_er=0.5, mid=100.0, atr=0.1, leg_ow=-1, leg_dir=-1, leg_pct=2.4, leg_min=20)
+        st = Strategy(dict(side="long", unit_qty=70, max_notional=1e6), dict(SIG, rg_confirm=1, rg_leg_on=1)); ev = []
+        st._regime(f, 1, ev); self.assertEqual(st.regime, "AGAINST")                       # the leg runs against the long book: one-way now
+        st._regime(dict(f, rg_t=2, leg_ow=0), 1, ev); self.assertEqual(st.regime, "TWO_WAY")   # the bounce ended the leg: released at once, no window to drain
+        st2 = Strategy(dict(side="long", unit_qty=70, max_notional=1e6), dict(SIG, rg_confirm=1, rg_leg_on=0)); ev = []
+        st2._regime(f, 1, ev); self.assertNotEqual(st2.regime, "AGAINST")                  # off: the window label (drift -1 ATR) says nothing
+
 class Zigzag(unittest.TestCase):
     def test_straight_move_has_no_swings(self):
         self.assertEqual(zigzag([1, 1.01, 1.02, 1.03, 1.05], 0.007), [])

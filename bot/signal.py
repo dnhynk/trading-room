@@ -18,6 +18,10 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            # regime block (per closed 1m candle, rg_window candles): efficiency ratio, drift in ATR, zigzag swings >= rg_theta %
            rg_window=90, rg_theta=0.7, rg_drift=6.0, rg_counter_max=1, rg_confirm=3, rg_dead_sw=2,
            rg_drift_min_pct=0.0,   # > 0: AGAINST/FAVOR also need the window's net move to be at least this % of price (a -1% grind in a 0.1%-ATR tape is 7 ATR but no catastrophe)
+           # current-leg read (NEXT 1/2, 2026-09-02): the leg since the last confirmed rg_theta pivot; one-way while its net move is >= rg_leg_pct % of price,
+           # released by the next theta counter-swing (which ends the leg). No trailing window, so it is on within the move and off at the first real bounce.
+           # rg_leg_on=0 records it only (f.leg_dir/leg_pct/leg_min/leg_ow; replay/nightly splits, backtest --follow leg); 1 = it replaces the window label's AGAINST/FAVOR
+           rg_leg_on=0, rg_leg_pct=2.0,
            # volume profile from the last vp_window 1m candles (volume spread over each bar's range), buckets of vp_bucket_ticks
            vp_window=360, vp_bucket_ticks=5, vp_hvn=1.5,
            # 1m-candle rule = the manual watcher's speed_line (bot/watch.py v13, 2026-08-29); emitted with src="1m"
@@ -210,6 +214,7 @@ class Features:
         self.dbid, self.dask = deque(maxlen=60), deque(maxlen=60)
         self.candles, self.cur, self.atr, self.atr15, self.cf = [], None, None, None, {}
         self.tick, self.rg, self.vp = None, {}, None                      # tick inferred from the first book
+        self.leg = {}                                                      # current-leg read (leg_dir / leg_pct / leg_min / leg_ow), per closed candle
         self.pending, self.struct_lo, self.struct_hi = [], None, None     # 1m-rule signals waiting for the next second close
         self.c15, self.side_hint = [], None                                # 15m bars (seeded + built from 1m) and the structure's side
         self.side_hint_15m = self.side_hint_1h = None; self.daily, self.daily_trend = [], None   # 1H structure is the primary side read; daily trend scales size
@@ -315,6 +320,15 @@ class Features:
         if piv and piv[-1][1] == "H": lo = min(lo, min(c["l"] for c in cl[piv[-1][0] + 1:] or cl[-1:]))   # down-leg in progress
         if piv and piv[-1][1] == "L": hi = max(hi, max(c["h"] for c in cl[piv[-1][0] + 1:] or cl[-1:]))   # up-leg in progress
         self.struct_lo, self.struct_hi = lo, hi
+        # the current leg (NEXT 1/2): from the last confirmed pivot to the last close. Inside it there is no theta counter-swing by
+        # construction (one would have confirmed a new pivot), so "one-way in progress" = the leg is >= rg_leg_pct deep — on within
+        # the move, not after a trailing window, and off the moment a real bounce ends the leg. Recorded always; Strategy reads it
+        # only with rg_leg_on (size scale / FAVOR, never a veto: the post-crash first deceleration stays the best add).
+        if piv:
+            i, k = piv[-1]; d = 1 if k == "L" else -1; p0 = cl[i]["c"]
+            pct = d * (cl[-1]["c"] / p0 - 1) * 100 if p0 else 0.0
+            self.leg = dict(leg_dir=d, leg_pct=round(pct, 3), leg_min=len(cl) - 1 - i, leg_ow=d if pct >= self.p["rg_leg_pct"] else 0)
+        else: self.leg = {}
 
     def _regime(self):
         p, cl = self.p, self.candles; W = int(p["rg_window"])
@@ -439,7 +453,7 @@ class Features:
                           side_hint_15m=self.side_hint_15m, side_hint_1h=self.side_hint_1h, daily_trend=self.daily_trend, htf_lows=self.htf_lows, htf_highs=self.htf_highs,
                           dip_low=d["lows"][-1][0] if d["lows"] else None, pop_high=u["highs"][-1][0] if u["highs"] else None,
                           sell_spike=sell_spike, sell_decay=sell_decay, sell_now=sell_now, buy_spike=buy_spike, buy_decay=buy_decay, buy_now=buy_now,
-                          **self.cf, **self.rg, **self._vp_feats(mid, atr))
+                          **self.cf, **self.rg, **self.leg, **self._vp_feats(mid, atr))
             # no veto anywhere: BREAKDOWN/BREAKOUT sit in f (brk/bko) as the 5-minute flag; Strategy reads them only as de-risk evidence
             # against a position it already held when the break fired (the deceleration after a crash is the best add, never blocked)
             vd_dip = not p["vd_gate"] or (sell_spike >= p["vd_spike"] and sell_decay)   # optional: the selling that made the dip must be fading
@@ -634,11 +648,14 @@ class Strategy:
         drift = s * f["rg_drift"]; asym = fav_m / adv_m if adv_m else (9.9 if fav_m else 1.0)
         big = abs(f["rg_drift"]) * (f.get("atr") or 0.0) / f["mid"] * 100 >= g.get("rg_drift_min_pct", 0.0)   # the move is large in price, not only in ATR
         # one-way = strong drift AND (almost) no swings against it; a trend with 1%+ counter-swings every 20 minutes is cycle territory
-        if drift <= -g["rg_drift"] and fav_n <= g["rg_counter_max"] and big: cand = "AGAINST"
+        if g.get("rg_leg_on"):                                   # the current-leg read: on while the leg since the last pivot is >= rg_leg_pct deep, off at the next theta swing
+            ow = s * (f.get("leg_ow") or 0)
+            cand = "AGAINST" if ow < 0 else "FAVOR" if ow > 0 else "DEAD" if fav_n + adv_n < g["rg_dead_sw"] else "TWO_WAY"
+        elif drift <= -g["rg_drift"] and fav_n <= g["rg_counter_max"] and big: cand = "AGAINST"
         elif drift >= g["rg_drift"] and adv_n <= g["rg_counter_max"] and big: cand = "FAVOR"
         elif fav_n + adv_n < g["rg_dead_sw"]: cand = "DEAD"
         else: cand = "TWO_WAY"
-        if self.regime == "AGAINST" and cand != "AGAINST" and not (fav_n > g["rg_counter_max"] or drift > -g["rg_drift"] / 2): cand = "AGAINST"
+        if not g.get("rg_leg_on") and self.regime == "AGAINST" and cand != "AGAINST" and not (fav_n > g["rg_counter_max"] or drift > -g["rg_drift"] / 2): cand = "AGAINST"
         if cand == self.regime: self.rg_pend = 0; return
         self.rg_pend = self.rg_pend + 1 if cand == self.rg_cand else 1; self.rg_cand = cand
         if self.rg_pend >= g["rg_confirm"]:

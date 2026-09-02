@@ -203,6 +203,7 @@ class Engine:
         rg = self.books["long"].strat.regime if "long" in self.books else None                  # the long book's side-relative label: AGAINST = the market runs short
         h = (self.feat.side_hint_15m if self.follow == "15m" else self.feat.side_hint_1h if self.follow == "1h"
              else ("short" if rg == "AGAINST" else "long" if rg == "FAVOR" else None) if self.follow == "regime"
+             else ("short" if f.get("leg_ow") == -1 else "long" if f.get("leg_ow") == 1 else None) if self.follow == "leg"   # the current-leg read (sig.rg_leg_*), whatever the Strategy uses
              else "short" if f.get("brk") else "long" if f.get("bko") else None)          # "brk": the side of the last volume break (5-min flag) — event-based, not structure-based
         if h != self.hint_last: self.hint_last, self.hint_t = h, sec
         if h and h != self.active and sec - self.hint_t >= self.follow_confirm_s and not any(pos_stats(bk.pos)[0] for bk in self.books.values()):
