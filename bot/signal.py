@@ -56,6 +56,9 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              # multiples of wallet equity (cycle.py resizes when flat). CONCEPT: "한 포지션에 거는 돈과 하루 손실에는 상한이 있고, 그 상한은 자본에 비례한다"
              # — every limit here has to scale or it goes stale as the wallet compounds (2026-09-01: a fixed max_notional 900 fell below one
              # resized unit and skipped most signals). notional_frac = max_units x unit_frac holds exactly one full ladder.
+             cap_min_atr=0.0,   # > 0: the money cap must sit at least this many ATR(1m) under a one-unit entry — the unit shrinks so it does, the cap
+             # (money) stays, never enlarges (`unit_under_cap`; resize and backtest size_from_equity). 0 = off. 30 live 2026-09-03 for the pump-coin
+             # book: a sigma-23%/day coin put the 4-unit cap 2.5% under the ladder, half an hourly sigma, a noise stop (NEXT 8, RULES 사이징)
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: the round-trip fee, fee_rt_pct)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
@@ -98,6 +101,11 @@ def book_params(sp, side, tick, n_sides, qstep=None, fee_rt=None):
         for k in SPLIT_KEYS:
             if p.get(k): p[k] = p[k] / n_sides
     return p
+
+def unit_under_cap(unit_qty, cap_usdt, atr, k):
+    """The money cap has to sit at least k ATR under a one-unit entry: the unit (quantity) shrinks so it does; the cap is money and
+    stays; the unit is never enlarged. k, atr or cap missing = off. Shared by cycle.Book.resize and backtest.size_from_equity."""
+    return min(unit_qty, cap_usdt / (k * atr)) if k and atr and cap_usdt else unit_qty
 
 def s8_state(): return dict(best=0.0, legmax=0.0, imax=None, cool=-1, dead=0)
 

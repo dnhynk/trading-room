@@ -272,6 +272,23 @@ class Params(unittest.TestCase):
         bk.resize()
         self.assertAlmostEqual(bk.dyn["unit_qty"], prev * 1.25, 2)                # 이전 동적 값이 있으면 한 번에 25% 까지만
 
+    def test_the_money_cap_keeps_a_minimum_atr_distance_by_shrinking_the_unit(self):
+        """cap_min_atr(2026-09-03): 돈 한도(cap)는 그대로 두고 유닛을 줄여 1유닛 진입에서 한도까지 >= k ATR 이 되게 한다 — σ 23%/일 코인에선
+        4유닛 사다리 아래 2.5% 가 시간당 σ 의 반이라 잡음 손절이었다. 늘리지는 않고, 0 이면 무변화."""
+        cy, bk = book(); cy.qstep, cy.vp = 1, 0
+        cy.acct = dict(equity=52.0, upl_all=0.0, avail=52.0)
+        atr = 0.52 * 0.0059                                                            # UAIUSDT 2026-09-03: mid 0.52, ATR(1m) 0.59%
+        bk.sp = {**bk.sp, "unit_frac": 1.5, "cap_frac": 0.15, "wallet_frac": 1.0, "cap_min_atr": 30}
+        bk.feat.f = {"mid": 0.52, "atr": atr}; bk.dyn = {}; bk.pos["lots"] = []
+        bk.resize()
+        self.assertEqual(bk.dyn["unit_qty"], round(7.8 / (30 * atr)))                # 명목 78$ → 한도 7.8$ 가 30 ATR 아래 = 명목 44$ (85계약)
+        self.assertEqual(bk.dyn["cap_usdt"], 7.8)                                      # 한도는 돈 그대로
+        self.assertEqual(round(7.8 / (85 * atr), 1), cy.events[-1][1]["cap_atr"])      # SIZING 이 1유닛 기준 한도의 ATR 거리를 적는다
+        bk.sp["cap_min_atr"] = 0; bk.dyn = {}; bk.sized_t = 0; bk.resize()
+        self.assertEqual(bk.dyn["unit_qty"], 150)                                      # 끄면 78 / 0.52
+        bk.sp["cap_min_atr"] = 30; bk.feat.f = {"mid": 0.52, "atr": 0.52 * 0.001}; bk.sized_t = 0; bk.resize()
+        self.assertEqual(bk.dyn["unit_qty"], 150)                                      # 한도가 이미 멀면(ATR 0.1% → 100 ATR) 늘리지 않는다
+
     def test_wrong_types_of_file_only_and_optional_keys_are_rejected(self):
         bad = valid_params({**STRAT, "daily_loss_limit": "40", "stop_structural": "oops", "adopt": "false", "symbol": "TRUMPUSDT"}, {})
         self.assertEqual(bad, ["adopt", "daily_loss_limit", "stop_structural"])

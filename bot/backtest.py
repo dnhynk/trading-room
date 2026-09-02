@@ -30,7 +30,7 @@ Output: realized pnl net of fees, open pnl at the end, cycles (trim fills), adds
 and the sizing the run used."""
 import gzip, json, os, pickle, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot.signal import Features, Strategy, STRAT, SPLIT_KEYS, apply_fill, pos_stats, book_params, sim_match, sim_book
+from bot.signal import Features, Strategy, STRAT, SPLIT_KEYS, apply_fill, pos_stats, book_params, sim_match, sim_book, unit_under_cap, wilder_atr
 from bot.ws import load_params, load_states, strat_for
 from bot.bitget import Bitget
 
@@ -61,14 +61,17 @@ def latest_equity():
     sts = [s for s in load_states().values() if (s.get("acct") or {}).get("equity")]
     return max(sts, key=lambda s: s.get("t", ""))["acct"]["equity"] if sts else None
 
-def size_from_equity(strat, equity, mid, qstep):
+def size_from_equity(strat, equity, mid, qstep, atr=None):
     """What cycle.Book.resize would set at this equity and price: the file-level (pre side-split) fixed sizes for every fraction that is
-    on, the fractions themselves switched off. wallet = equity x wallet_frac, as live."""
+    on, the fractions themselves switched off. wallet = equity x wallet_frac, as live; atr = the seeded ATR(1m) for cap_min_atr."""
     wallet = equity * strat.get("wallet_frac", 1.0); out = dict(strat)
     for fixed, frac in SIZED.items():
         if not strat.get(frac): continue
         v = wallet * strat[frac]
-        if fixed == "unit_qty": v = max(round(v / mid / qstep) * qstep, qstep)
+        if fixed == "unit_qty":
+            cap = wallet * strat["cap_frac"] if strat.get("cap_frac") else strat.get("cap_usdt")
+            v = unit_under_cap(v / mid, cap, atr, strat.get("cap_min_atr")) * mid      # the money cap's ATR floor, as resize
+            v = max(round(v / mid / qstep) * qstep, qstep)
         out[fixed], out[frac] = round(v, 9), 0.0
     return out
 
@@ -348,13 +351,15 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
     for path in files:                                             # the first file that carries this symbol: a warm-up file recorded before the
         loaded[path] = load_seconds(path, sym)                     # symbol joined the recording is empty for it (2026-09-01: ETH/XAG sized at the file's
         if loaded[path]: first = loaded[path]; break               # unit 70 = $170k and seeded nothing because only files[0] was looked at)
+    seed = seed_history(sym, first[0][0]) if first else (None, None, None)   # before sizing: cap_min_atr needs the seeded ATR, as live
     if not fixed and any(strat.get(f) for f in SIZED.values()):
         equity = equity if equity is not None else latest_equity()
         mid = next(((b + a) / 2 for _, b, a, *_ in first if b and a), None)
-        if equity and mid: strat = size_from_equity(strat, equity, mid, qstep)
+        atr = wilder_atr(seed[0][-100:]) if seed[0] else None
+        if equity and mid: strat = size_from_equity(strat, equity, mid, qstep, atr)
         else: print(f"sizing: no equity ({equity}) or no quote on the tape; the file's fixed sizes apply", file=sys.stderr)
     eng = Engine(sig, strat, qstep=qstep, sides=["long", "short"] if follow else sides, follow=follow)
-    if first: eng.seed(*seed_history(sym, first[0][0]))
+    if first: eng.seed(*seed)
     for path in files: eng.run(loaded[path] if path in loaded else load_seconds(path, sym))
     m = eng.metrics()
     m["sizing"] = dict(qstep=qstep, equity=None if fixed else equity, **{k: strat.get(k) for k in SIZED})

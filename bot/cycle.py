@@ -30,7 +30,7 @@ import asyncio, glob, json, os, sys, time
 from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
-from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match, sim_book
+from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match, sim_book, unit_under_cap
 from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS, strat_for, portfolio, outside_books
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -220,6 +220,8 @@ class Book:
         wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
         if self.sp.get("unit_frac"):
             tgt = wallet * self.sp["unit_frac"] / mid             # 양자화 전 목표
+            cap = wallet * self.sp["cap_frac"] if self.sp.get("cap_frac") else self.sp.get("cap_usdt")
+            tgt = unit_under_cap(tgt, cap, self.feat.f.get("atr"), self.sp.get("cap_min_atr"))   # 돈 한도는 그대로, 유닛이 줄어 한도가 ≥ k ATR 아래에
             cur = self.dyn.get("unit_qty")        # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
             if cur: tgt = max(min(tgt, cur * 1.25), cur * 0.75)   # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛)
             new["unit_qty"] = round(quantize_unit(tgt, cur, self.cy.qstep), self.cy.vp)
@@ -228,7 +230,8 @@ class Book:
         if self.sp.get("notional_frac"): new["max_notional"] = round(wallet * self.sp["notional_frac"], 2)
         if any(abs(self.sp.get(k, 0) - v) > 0.02 * max(abs(v), 1e-9) for k, v in new.items()):   # only moves of >= 2%: no per-minute jitter
             self.dyn.update(new); self.sp.update(new); self.strat.p = self.sp
-            self.ev("SIZING", wallet=round(wallet, 2), mid=mid, **new)
+            atr, uq, cap = self.feat.f.get("atr"), self.sp.get("unit_qty"), self.sp.get("cap_usdt")
+            self.ev("SIZING", wallet=round(wallet, 2), mid=mid, atr=atr, cap_atr=round(cap / (uq * atr), 1) if atr and uq and cap else None, **new)   # cap_atr = 1유닛 기준 한도의 ATR 거리
 
     # ---- order management ---------------------------------------------------------
     async def reconcile(self, d):

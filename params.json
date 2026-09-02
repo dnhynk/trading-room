@@ -1,6 +1,6 @@
 {
   "record": {
-    "ZECUSDT": [
+    "UAIUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -30,7 +30,7 @@
       "ticker",
       "candle1m"
     ],
-    "DOGEUSDT": [
+    "ZECUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -42,13 +42,25 @@
       "ticker",
       "candle1m"
     ],
-    "XAUUSDT": [
+    "DOGEUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "SUIUSDT": [
+    "XRPUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "CLUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "SNDKUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -65,8 +77,8 @@
     ]
   },
   "strat": {
-    "symbol": "HYPEUSDT",
-    "side": "long",
+    "symbol": "UAIUSDT",
+    "side": "short",
     "sides": [
       "long",
       "short"
@@ -92,7 +104,7 @@
     "trim_retrace_atr": 0.5,
     "core_units": 1,
     "favor_pop_mult": 2.0,
-    "derisk_pct": 3.0,
+    "derisk_pct": 0,
     "derisk_on_breakdown": true,
     "derisk_core_frac": 0.5,
     "cap_usdt": 20,
@@ -111,20 +123,17 @@
     "confirm_within_s": 90,
     "against_daily_mult": 1.0,
     "against_regime_mult": 0.5,
-    "derisk_on_against": 0
+    "derisk_on_against": 0,
+    "derisk_under_units": 0,
+    "retrace_frac": 0.2,
+    "cap_min_atr": 30
   },
   "books": {
-    "ZECUSDT": {
-      "wallet_frac": 0.25
-    },
-    "HYPEUSDT": {
-      "wallet_frac": 0.25
-    },
-    "ETHUSDT": {
-      "wallet_frac": 0.25
-    },
-    "XAGUSDT": {
-      "wallet_frac": 0.25
+    "UAIUSDT": {
+      "wallet_frac": 1.0,
+      "sides": [
+        "short"
+      ]
     }
   },
   "sig": {
@@ -162,11 +171,12 @@
     "vd_spike": 2.0,
     "vd_decay": 0.5,
     "vd_gate": 0,
-    "rg_drift_min_pct": 2.0
+    "rg_drift_min_pct": 2.0,
+    "rg_leg_on": 1
   },
   "select": {
     "every_h": 4,
-    "n": 4,
+    "n": 3,
     "confirm": 2,
     "max_per_day": 2,
     "record_top": 5,
