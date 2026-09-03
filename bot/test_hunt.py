@@ -33,6 +33,8 @@ class Flags(unittest.TestCase):
         self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0), long_, HUNT), [])
         self.assertEqual(exit_flags(row("A", "climax"), long_, HUNT), ["phase:climax"])          # the long stops at the climax
         self.assertEqual(exit_flags(row("A", "climax"), short, HUNT), [])                         # a short does not care about a climax vote
+        self.assertEqual(exit_flags(row("A", "unknown", off=70.0, hint15="long"), long_, HUNT), ["far70.0"])   # 70% under the top: the long leaves whatever the structure says
+        self.assertEqual(exit_flags(row("A", "unknown", off=70.0, hint15="long"), short, HUNT), [])            # a short far under the top is where it earns
         self.assertEqual(exit_flags(row("A", "markup"), short, HUNT), ["phase:markup"])           # a short leaves a relaunch
         self.assertEqual(exit_flags(row("A", "squeeze"), short, HUNT), ["phase:squeeze"])
         self.assertEqual(exit_flags(row("A", "markdown", px=151.0), short, HUNT), ["newhigh"])
@@ -99,6 +101,26 @@ class Verdicts(unittest.TestCase):
         apply(p, [row("B", "markdown")], v, {"A": True}, HUNT, st, 4000.0)
         self.assertGreater(st["cool"]["A"], 4000.0 + 23 * 3600)
         v = verdict([row("A", "markdown")], p["books"], HUNT, st, 5000.0); self.assertIsNone(v["top"])   # in cooldown: not a candidate
+
+    def test_a_quiet_leaver_does_not_come_straight_back_on_the_other_side_in_the_same_write(self):
+        st = dict(held={"A": dict(side="short", exit="quiet18/40")}, streak={"A:long": 1})
+        p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1, "exit": 1}})
+        rows = [row("A", "markup", hint15="long", off=2.0)]                                   # the quiet coin now reads markup: a long candidate on paper
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["add"], ("A", "long"))
+        acts = apply(p, rows, v, {"A": True}, HUNT, st, 1000.0)
+        self.assertEqual(acts, []); self.assertEqual(list(p["books"]), ["A"]); self.assertEqual(p["books"]["A"]["sides"], ["short"])   # stays as the flat placeholder
+        self.assertNotIn("A", st.get("cool", {}))                                              # not dropped, so not cooled yet either
+
+    def test_a_phase_flip_exit_is_undone_when_the_read_comes_back_before_flat(self):
+        st = dict(held={"A": dict(side="long", exit="phase:climax", peak=4e7, climax=150.2)})
+        p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "wind_down": 1, "exit": 1}})
+        rows = [row("A", "markup", hint15="long", off=2.0)]                                   # one bad 15m close read climax; now it is markup again
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertIsNone(v["resume"]); self.assertEqual(st["rstreak"], {"A": 1})
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["resume"], "A"); self.assertIsNone(v["add"])
+        acts = apply(p, rows, v, {"A": False}, HUNT, st, 1000.0)
+        self.assertEqual([a[:2] for a in acts], [("resume", "A")]); self.assertNotIn("wind_down", p["books"]["A"]); self.assertNotIn("exit", p["books"]["A"])
+        st2 = dict(held={"A": dict(side="long", exit="quiet10/40")})                           # a quiet leaver never resumes: it cools and we chase another coin
+        v = verdict(rows, {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "wind_down": 1, "exit": 1}}, HUNT, st2, 1000.0); self.assertIsNone(v["resume"])
 
     def test_a_basket_or_a_hand_book_makes_the_job_refuse(self):
         v = verdict([row("A")], {"HYPEUSDT": {"wallet_frac": 0.3}}, HUNT, {}, 1000.0)

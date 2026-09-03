@@ -84,7 +84,8 @@ def exit_flags(r, held, hunt):
     elif tw_peak >= hunt["min_twoway"] and tw < hunt["quiet_frac"] * tw_peak: f.append(f"quiet{tw:.0f}/{tw_peak:.0f}")   # the coin cooled off its own hot: chase
     if side == "long":
         if ph in ("climax", "markdown", "squeeze"): f.append(f"phase:{ph}")
-        if r["fund"] is not None and r["fund"] > hunt["max_fund"]: f.append(f"fund{r['fund']:+.2f}%")
+        elif (r.get("off") or 0) >= WHALE["far_off"]: f.append(f"far{r.get('off')}")     # the top is far_off % away whatever the structure reads (a bounce that flips
+        if r["fund"] is not None and r["fund"] > hunt["max_fund"]: f.append(f"fund{r['fund']:+.2f}%")   # the 15m read to "long" 70% under the top is not a markup — audit 2026-09-03)
     else:
         if ph in ("markup", "squeeze"): f.append(f"phase:{ph}")
         if held.get("climax") and r["px"] > held["climax"]: f.append("newhigh")
@@ -147,7 +148,14 @@ def verdict(rows, books, hunt, st, now):
     if other: return dict(refuse=f"books holds non-hunt symbols {other}: stop this job or empty the basket first", cur=None, wind=None, add=None, top=None)
     if len(held) > 1: return dict(refuse=f"more than one hunt book {held}", cur=None, wind=None, add=None, top=None)
     cur = held[0] if held else None
-    wind = None
+    wind = resume = None
+    if cur and books[cur].get("wind_down") and cur in by and not _leave_coin((st.get("held", {}).get(cur) or {}).get("exit", "")):
+        # a phase-flip exit is undone when the read comes back to our side for `confirm` scans before the book is flat (a single bad
+        # 15m close must not dump a good book: exit_confirm is 1 — audit 2026-09-03)
+        r = by[cur]; mine = (books[cur].get("sides") or ["short"])[0]
+        back = r.get("side") == mine and not exit_flags(r, st.get("held", {}).get(cur, {}), hunt)
+        st.setdefault("rstreak", {})[cur] = st.get("rstreak", {}).get(cur, 0) + 1 if back else 0
+        if back and st["rstreak"][cur] >= int(hunt["confirm"]): resume = cur; st["rstreak"][cur] = 0
     if cur and not books[cur].get("wind_down"):
         r = by.get(cur)
         if r and r.get("phase") not in ("unread", "shallow"):        # absent or unread = not evidence: keep
@@ -168,7 +176,8 @@ def verdict(rows, books, hunt, st, now):
     slot_open = cur is None or books[cur].get("wind_down") or wind is not None
     add = top if top and slot_open and st["streak"][key] >= int(hunt["confirm"]) else None
     if cur and not slot_open and top and top[0] == cur: add = None
-    return dict(refuse=None, cur=cur, wind=wind, add=add, top=top)
+    if resume: add = None                                                   # the book stays: nothing replaces it this scan
+    return dict(refuse=None, cur=cur, wind=wind, add=add, top=top, resume=resume)
 
 def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol"))   # volume gone: dumping into thin books hurts — leave gently (stalls above cost, or the cap)
 def _leave_coin(why): return _illiquid(why) or any(k in (why or "") for k in ("flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one
@@ -187,8 +196,14 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
             books[s]["wind_down"] = 1                                       # no more adds; trims and the stop keep working
             if not _illiquid(why): books[s]["exit"] = 1                     # a phase flip OR the coin gone quiet: the engine sells the whole position into the next stall whatever the cost (leave fast)
             acts.append(("wind", s, why))                                   # (an episode death leaves gently: stalls above cost, or the cap)
+    if v.get("resume"):                                                     # a phase-flip exit whose read reverted before the book was flat: undo it (audit 2026-09-03)
+        s = v["resume"]
+        if s in books and books[s].get("wind_down") and not _leave_coin((st.get("held", {}).get(s) or {}).get("exit", "")):
+            books[s].pop("wind_down", None); books[s].pop("exit", None); st.get("held", {}).get(s, {}).pop("exit", None); acts.append(("resume", s, "phase back on our side"))
     leaving = [s for s in books if books[s].get("wind_down")]; live = [s for s in books if not books[s].get("wind_down")]
     add = v["add"]
+    cooling = {s for s in leaving if _leave_coin((st.get("held", {}).get(s) or {}).get("exit", ""))}   # a quiet/dead leaver must not come straight back on the other side (audit 2026-09-03)
+    if add and add[0] in cooling: add = None
     if add and not live and all(flats.get(s) for s in leaving):
         for s in leaving:
             why = (st.get("held", {}).get(s) or {}).get("exit", "")
@@ -208,7 +223,7 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
     rec["BTCUSDT"] = ["candle1m"]; p["record"] = rec
     return acts
 
-ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP"}
+ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP", "resume": "HUNT_RESUME"}
 
 def pid_alive(path):
     try: pid = int(open(path).read().strip())

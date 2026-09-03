@@ -25,7 +25,9 @@ WHALE = dict(episode_ratio=4.0,   # 24h volume / own 7-day median: an episode
              quiet_ratio=2.0,     # under this, with no churn, the coin is quiet
              run_min=25.0,        # % run into the 48h high from the low before it
              top_off=15.0,        # climax is read only this close (%) under the 48h high
-             down_off=10.0,       # markdown needs the price at least this far (%) under the high
+             down_off=10.0,       # markdown needs the price at least this far (%) under the high (with the 15m structure down) ...
+             far_off=20.0,        # ... or this far under it after a run, structure unreadable: a lagging structure reader (its zigzag threshold is 2 x ATR15, 10-20%
+             #                      on a pump coin) must not leave a coin 30% under its top in "unknown" (AKE 2026-09-03 13:00-14:00, audit)
              climax_votes=2,      # footprints that must agree for climax
              post_red=2,          # red closes among the 3 hours after the max-volume hour (effort > result)
              upwick=0.4,          # mean upper-wick share of the last 4 x 15m ranges
@@ -82,9 +84,12 @@ def phase(f, p=WHALE):
     high) > markup (episode, run, near the high, structure not down) > unknown."""
     if f["dead"]: return "dead", ["dead"]
     if f["ratio"] < p["quiet_ratio"] and f["twoway24"] < p["twoway_dead"]: return "quiet", [f"ratio{f['ratio']}", f"twoway{f['twoway24']}"]
-    if f["off"] >= p["down_off"] and f["hint15"] == "short":
-        if f["fund"] is not None and f["fund"] <= p["fund_cold"]: return "squeeze", [f"off{f['off']}", "hint_short", f"fund{f['fund']}"]
-        return "markdown", [f"off{f['off']}", "hint_short"]
+    down = f["off"] >= p["down_off"] and f["hint15"] == "short"
+    far = f["off"] >= p["far_off"] and f["hint15"] is None and f["run"] >= p["run_min"]      # the top is in by distance alone: structure unreadable, run behind it
+    if down or far:
+        why = [f"off{f['off']}", "hint_short" if down else "far_off"]
+        if f["fund"] is not None and f["fund"] <= p["fund_cold"]: return "squeeze", why + [f"fund{f['fund']}"]
+        return "markdown", why
     votes = []
     if f["vmax_at_high"] and f["post_red"] >= p["post_red"]: votes.append(f"effort_fail{f['post_red']}")   # the biggest hour sat at the peak and the
     if f["upwick"] >= p["upwick"]: votes.append(f"upwick{f['upwick']}")                                     # hours after it closed red: effort > result

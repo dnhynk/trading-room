@@ -16,6 +16,10 @@ class Rules(unittest.TestCase):
         self.assertEqual(phase(fp(off=14.0, hint15="short"))[0], "markdown")
         self.assertEqual(phase(fp(off=14.0, hint15="short", fund=-0.2))[0], "squeeze")
         self.assertEqual(phase(fp(off=5.0, hint15="short"))[0], "unknown")                       # the top is not far enough in for markdown, structure down: nothing
+        self.assertEqual(phase(fp(off=32.0, hint15=None, run=142.0))[0], "markdown")             # far under the top after a run, structure unreadable: the top is in by distance (AKE)
+        self.assertEqual(phase(fp(off=12.0, hint15=None, run=142.0))[0], "unknown")              # not far enough for the distance read, structure silent: nothing
+        self.assertEqual(phase(fp(off=32.0, hint15="long", run=142.0))[0], "unknown")            # structure says up: distance alone does not call a markdown
+        self.assertEqual(phase(fp(off=32.0, hint15=None, run=10.0))[0], "unknown")               # no run behind it: a drifter, not a pump's markdown
         self.assertEqual(phase(fp(off=3.0, hint15="long", ratio=10.0, run=50.0))[0], "markup")
         self.assertEqual(phase(fp(off=3.0, hint15=None, ratio=99.0, new=True, run=140.0))[0], "markup")   # a fresh listing (AKE)
         self.assertEqual(phase(fp(off=3.0, hint15="long", ratio=2.5, run=50.0))[0], "unknown")    # an old baseline (TRUMP 2.8x, MAGMA 1.8x) is not an episode
