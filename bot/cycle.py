@@ -218,13 +218,15 @@ class Book:
         if qty or not mid: return
         # 지갑은 계좌 전체다 — 엔진이 여럿이면 각자 자기 몫만 써야 한다(안 나누면 심볼 수만큼 노출이 배가 된다)
         wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
-        if self.sp.get("unit_frac"):
+        if wallet <= 0: return                                    # an empty wallet sizes nothing and is no reference for the next resize (2026-09-03: a first SIZING at
+        if self.sp.get("unit_frac"):                              # wallet 0 pinned the unit to the qstep floor, and the damp could never lift it: 0.1 x 1.25 quantizes back to 0.1)
             tgt = wallet * self.sp["unit_frac"] / mid             # 양자화 전 목표
             cap = wallet * self.sp["cap_frac"] if self.sp.get("cap_frac") else self.sp.get("cap_usdt")
             tgt = unit_under_cap(tgt, cap, self.feat.f.get("atr"), self.sp.get("cap_min_atr"))   # 돈 한도는 그대로, 유닛이 줄어 한도가 ≥ k ATR 아래에
-            cur = self.dyn.get("unit_qty")        # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
-            if cur: tgt = max(min(tgt, cur * 1.25), cur * 0.75)   # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛)
-            new["unit_qty"] = round(quantize_unit(tgt, cur, self.cy.qstep), self.cy.vp)
+            cur = self.dyn.get("unit_qty"); step = self.cy.qstep or 0.0   # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
+            if cur and cur > step:                                # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛); a unit AT the
+                tgt = max(min(tgt, max(cur * 1.25, cur + step)), max(min(cur * 0.75, cur - step), step))   # floor is no reference either. The band is at least one qstep
+            new["unit_qty"] = round(quantize_unit(tgt, cur, self.cy.qstep), self.cy.vp)                    # wide: x1.25 of a few steps quantizes back to where it was
         if self.sp.get("cap_frac"): new["cap_usdt"] = round(wallet * self.sp["cap_frac"], 2)
         if self.sp.get("daily_loss_frac"): new["daily_loss_limit"] = round(wallet * self.sp["daily_loss_frac"], 2)
         if self.sp.get("notional_frac"): new["max_notional"] = round(wallet * self.sp["notional_frac"], 2)

@@ -272,6 +272,19 @@ class Params(unittest.TestCase):
         bk.resize()
         self.assertAlmostEqual(bk.dyn["unit_qty"], prev * 1.25, 2)                # 이전 동적 값이 있으면 한 번에 25% 까지만
 
+    def test_an_empty_wallet_sizes_nothing_and_a_floor_unit_is_no_damping_reference(self):
+        """2026-09-03: the EGLD engine's first SIZING ran at wallet 0 -> unit pinned to the qstep floor 0.1; every later resize was damped to
+        0.1 x 1.25 = 0.125, which quantizes back to 0.1 — stuck forever while the target was 43. Rules: wallet <= 0 writes nothing; a unit
+        at the floor is not a reference (no damp); the damp band is at least one qstep wide."""
+        cy, bk = book(); cy.qstep, cy.vp = 0.1, 1
+        cy.acct = dict(equity=0.0, upl_all=0.0, avail=0.0)
+        bk.sp = {**bk.sp, "unit_frac": 4.0, "cap_frac": 0.77, "wallet_frac": 1.0}; bk.feat.f = {"mid": 5.3}; bk.dyn = {}; bk.pos["lots"] = []
+        bk.resize(); self.assertEqual(bk.dyn, {})                                          # nothing sized, nothing remembered
+        bk.dyn = {"unit_qty": 0.1}; cy.acct = dict(equity=57.55, upl_all=0.0, avail=57.55); bk.sized_t = 0
+        bk.resize(); self.assertAlmostEqual(bk.dyn["unit_qty"], round(57.55 * 4.0 / 5.3, 1), 1)   # from the floor straight to the target (43.4): no damp from a floor value
+        cy.qstep, cy.vp = 0.01, 2; bk.dyn = {"unit_qty": 0.02}; bk.sp = {**bk.sp, "unit_frac": 1.0, "wallet_frac": 0.01}; bk.feat.f = {"mid": 5.3}; bk.sized_t = 0
+        bk.resize(); self.assertAlmostEqual(bk.dyn["unit_qty"], 0.03, 2)                   # a real small unit still moves a whole step (x1.25 of 0.02 would quantize back to 0.02)
+
     def test_the_money_cap_keeps_a_minimum_atr_distance_by_shrinking_the_unit(self):
         """cap_min_atr(2026-09-03): 돈 한도(cap)는 그대로 두고 유닛을 줄여 1유닛 진입에서 한도까지 >= k ATR 이 되게 한다 — σ 23%/일 코인에선
         4유닛 사다리 아래 2.5% 가 시간당 σ 의 반이라 잡음 손절이었다. 늘리지는 않고, 0 이면 무변화."""
