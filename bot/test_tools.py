@@ -224,5 +224,32 @@ class SupervisorJob(unittest.TestCase):
         finally:
             if p.poll() is None: p.kill()
 
+class SelectorCounterfactual(unittest.TestCase):
+    """bot/campaigns.py walks an entry forward and asks which came first, the stop or an exit. p from this decides the sign of
+    the month's geometric growth (NEXT 14/18), so the ordering and the horizon have to be exact."""
+    def scans(self, prices, n=8):
+        import datetime as dt
+        from bot.hunt import HUNT
+        base = dt.datetime(2026, 9, 4, 0, 0)
+        row = lambda px, **kw: dict(dict(symbol="A", px=px, qv=4e7, ratio=10.0, twoway24=30.0, atr_pct=0.6, off=5.0, off_close=5.0,
+                                        high48=200.0, fund=0.0, dead=False, phase="markup", side="long", qv_shape=4e7), **kw)
+        return [(base + dt.timedelta(minutes=10 * i), {"A": row(px)}) for i, px in enumerate(prices)], HUNT
+
+    def test_the_stop_is_read_before_any_exit_on_the_same_scan(self):
+        from bot.campaigns import campaign
+        SC, cfg = self.scans([100.0, 95.0, 80.0])          # -20% on scan 2, and that scan also reads `dead`
+        SC[2][1]["A"]["dead"] = True
+        k, mv, h, fu, why = campaign(SC, "A", 0, "long", cfg, 10.0, 12.0)
+        self.assertEqual((k, why), ("stop", "stop")); self.assertAlmostEqual(mv, -20.0, places=6)
+
+    def test_an_exit_ends_it_when_no_stop_is_reached_and_the_horizon_returns_nothing(self):
+        from bot.campaigns import campaign
+        SC, cfg = self.scans([100.0, 101.0, 102.0])
+        SC[2][1]["A"]["dead"] = True
+        self.assertEqual(campaign(SC, "A", 0, "long", cfg, 10.0, 12.0)[4], "dead")
+        SC2, _ = self.scans([100.0, 101.0, 102.0])         # nothing fires: not finished, not counted
+        self.assertIsNone(campaign(SC2, "A", 0, "long", cfg, 10.0, 12.0))
+        self.assertIsNone(campaign(SC2, "A", 0, "long", cfg, 10.0, 0.05))   # horizon shorter than one scan
+
 if __name__ == "__main__":
     unittest.main()

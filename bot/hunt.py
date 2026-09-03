@@ -47,9 +47,12 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             #                              where the cliff is (2026-09-04, 1758 rows): the next hour's movement is flat at ~2.5%/h above
             #                              0.30 and falls through it (0.25-0.30 1.68%/h, 0.20-0.25 1.39, 0.15-0.20 1.32). It costs 8% of
             #                              candidate rows (eligible ATR1m p10 = 0.31, p50 = 0.50). Was 0.15 (user: "문턱 좀 가까이 붙여")
-            exit_atr_min=0.30,   # a HELD coin whose ATR(1m) falls under this has stopped moving at the scale we trade: wind down (no market
-            #                      dump), same floor as entry so there is no gap. The CEILING stays an entry veto only — a held coin's ATR
-            #                      exploding is the pump itself (RULES). ATR1m is the best predictor we measured; twoway24 is the worst.
+            exit_atr_min=0.15,   # a HELD coin whose ATR(1m) falls under this has stopped moving at the scale we trade: wind down (no market
+            #                      dump). Deliberately WELL UNDER the entry floor — entry and exit are different questions and the gap is
+            #                      hysteresis, not an oversight. At 0.30 (= the entry floor, 2026-09-04 first try) a single scan below it
+            #                      ended 69% of campaigns at a 1.7h median and cut the path traversed while held — the fuel a cycle burns —
+            #                      from 16.5% to 7.1%. At 0.15 it ends 12% of them and the fuel is back (232 simulated entries, 6 coins).
+            #                      The CEILING stays an entry veto only: a held coin's ATR exploding is the pump itself (RULES).
             min_fund=-0.05,      # funding %/8h floor for a short (negative = shorts pay; T -0.29 would tax a short 0.9%/day)
             max_fund=0.3,        # funding %/8h ceiling for a long (longs crowded and paying)
             min_lever=10,        # the contract must allow at least this leverage (AKE max 10)

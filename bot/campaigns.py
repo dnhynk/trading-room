@@ -1,0 +1,92 @@
+"""선정기 반사실 — logs/hunt-history.jsonl 의 모든 스캔에서 "그때 그 코인에 들어갔다면?"을 걸어가며 세는 읽기 전용 도구.
+    python -m bot.campaigns [--stop 10] [--hours 12] [--by off|ratio|run|atr|tw|age|spread|phase]
+
+각 스캔의 각 행에 **현재 live 설정으로 진입 자격을 다시 판정**하고(`flags_of`), 통과한 자리마다 캠페인을 열어 스캔마다
+`exit_flags` 를 건다. 진입가 대비 `--stop`% 역행이 먼저면 stop, 퇴출 조건이 먼저면 exit. p = stop / (stop + exit) 이고
+이 p 가 NEXT 14 의 기하 성장률 부호를 정한다(손익분기 ~10.5%). `fuel` = 보유 중 지나간 총 경로 % — 사이클이 태우는 재료라
+캠페인의 이익 잠재력을 근사한다(퇴출이 너무 빠르면 여기가 먼저 줄어든다).
+
+두 가지를 조심해서 읽어라 (2026-09-04 감사에서 둘 다 당했다, NEXT 18):
+  1. `HUNT` 는 코드 기본값이고 live 는 `{**HUNT, **params["hunt"]}` 다 — 기본값으로 재면 다른 표가 나온다. 이 모듈은 live 를 쓴다.
+  2. **인접 스캔은 같은 캠페인이다.** 한 에피소드가 수십 개의 진입 자리를 만들므로 n 은 독립 사건 수보다 훨씬 크다.
+     `--by` 표의 칸마다 찍히는 `코인/에피소드` 수가 실제 표본이다 — 그게 한 자리면 그 칸은 잡음이다."""
+import json, os, statistics, sys, datetime as dt
+from collections import Counter
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from bot.hunt import flags_of, exit_flags, HUNT
+from bot.ws import load_params
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEEP = lambda r: r.get("phase") not in (None, "shallow", "unread")
+BUCKETS = {"off": [(0, 3, "0-3%"), (3, 6, "3-6%"), (6, 12, "6-12%"), (12, 25, "12-25%"), (25, 100, ">=25%")],
+           "ratio": [(0, 4, "<4x"), (4, 10, "4-10x"), (10, 30, "10-30x"), (30, 98, ">=30x"), (98, 100, "new 99")],
+           "run": [(0, 40, "<40%"), (40, 80, "40-80%"), (80, 150, "80-150%"), (150, 9e9, ">=150%")],
+           "atr": [(0.3, 0.5, "0.30-0.50"), (0.5, 0.8, "0.50-0.80"), (0.8, 1.3, "0.80-1.30"), (1.3, 9, ">=1.30")],
+           "tw": [(15, 30, "15-30"), (30, 50, "30-50"), (50, 70, "50-70"), (70, 999, ">=70")],
+           "age": [(0, 24, "<1d"), (24, 72, "1-3d"), (72, 168, "3-7d"), (168, 9e9, ">=7d")],
+           "spread": [(0, 5, "<5bp"), (5, 10, "5-10bp"), (10, 20, "10-20bp"), (20, 999, ">=20bp")]}
+KEY = {"off": "off", "ratio": "ratio", "run": "run", "atr": "atr_pct", "tw": "twoway24", "age": "age_h", "spread": "spread_bp"}
+
+def scans(path=None):
+    out = []
+    for line in open(path or os.path.join(ROOT, "logs", "hunt-history.jsonl"), encoding="utf-8"):
+        d = json.loads(line)
+        out.append((dt.datetime.strptime(d["t"], "%Y-%m-%d %H:%M:%S"), {r["symbol"]: r for r in d["rows"]}))
+    out.sort(key=lambda x: x[0]); return out
+
+def fuel(SC, sym, i, j):
+    """보유 중 지나간 총 경로 %/캠페인 — 사이클의 재료"""
+    px = [SC[k][1][sym]["px"] for k in range(i, j + 1) if sym in SC[k][1] and SC[k][1][sym].get("px")]
+    return sum(abs(px[k + 1] / px[k] - 1) for k in range(len(px) - 1)) * 100 if len(px) > 1 else 0.0
+
+def campaign(SC, sym, i, side, cfg, stop, hours):
+    """그 자리의 결말: (kind, 진입가 대비 %, 지속 h, fuel %, 끝낸 이유) 또는 None(지평 안에 안 끝남)"""
+    r0 = SC[i][1][sym]; px0 = r0["px"]; s = 1 if side == "long" else -1
+    held = dict(side=side, peak=r0.get("qv_shape") or r0["qv"], climax=r0.get("high48"), tw_peak=r0.get("twoway24") or 0.0)
+    for j in range(i + 1, len(SC)):
+        age = (SC[j][0] - SC[i][0]).total_seconds() / 3600
+        if age > hours: return None
+        r = SC[j][1].get(sym)
+        if not r or not r.get("px"): continue
+        mv = s * (r["px"] / px0 - 1) * 100
+        if mv <= -stop: return ("stop", mv, age, fuel(SC, sym, i, j), "stop")
+        if not DEEP(r): continue
+        held["tw_peak"] = max(held["tw_peak"], r.get("twoway24") or 0.0)
+        held["peak"] = max(held["peak"], r.get("qv_shape") or r["qv"])
+        f = exit_flags(r, held, cfg)
+        if f: return ("exit", mv, age, fuel(SC, sym, i, j), f[0])
+    return None
+
+def main():
+    a = sys.argv[1:]
+    get = lambda k, d: float(a[a.index(k) + 1]) if k in a else d
+    stop, hours = get("--stop", 10.0), get("--hours", 12.0)
+    by = a[a.index("--by") + 1] if "--by" in a else None
+    cfg = {**HUNT, **((load_params() or {}).get("hunt") or {})}
+    SC = scans()
+    print(f"scans {len(SC)}  {SC[0][0]} .. {SC[-1][0]}  | live: min_vol {cfg['min_vol'] / 1e6:.0f}M  atr [{cfg['min_atr']}, {cfg['max_atr']}]  "
+          f"exit_atr_min {cfg['exit_atr_min']}  exit_twoway {cfg['exit_twoway']}  min_twoway {cfg['min_twoway']}")
+    rows = []
+    for i in range(len(SC)):
+        for sym, r in SC[i][1].items():
+            if not DEEP(r) or not r.get("side") or flags_of(r, cfg): continue
+            o = campaign(SC, sym, i, r["side"], cfg, stop, hours)
+            if o: rows.append(dict(sym=sym, kind=o[0], mv=o[1], h=o[2], fuel=o[3], why=o[4], **r))
+    if not rows: print("no finished campaign in the horizon"); return
+    st = sum(1 for r in rows if r["kind"] == "stop")
+    print(f"\n진입 자리 중 결말이 관측된 것 {len(rows)} (stop -{stop:.0f}%, 지평 {hours:.0f}h)  코인 {len(set(r['sym'] for r in rows))}종")
+    print(f"  p = {st / len(rows) * 100:.1f}%  ({st} stop / {len(rows) - st} exit)   지속 중앙 {statistics.median(r['h'] for r in rows):.1f}h   "
+          f"fuel 중앙 {statistics.median(r['fuel'] for r in rows):.1f}%   손익 중앙 {statistics.median(r['mv'] for r in rows):+.2f}%")
+    print("  끝낸 이유:", dict(Counter("".join(c for c in (r["why"] or "") if not c.isdigit() and c not in ".-+/%") for r in rows).most_common()))
+    if not by: return
+    key = KEY.get(by)
+    print(f"\n== {by} ==\n{'':>14}{'n':>5}{'코인':>5}{'p':>8}{'fuel':>8}{'손익':>9}")
+    for lo, hi, nm in ([(x, y, z) for x, y, z in BUCKETS[by]] if key else []):
+        sub = [r for r in rows if r.get(key) is not None and lo <= r[key] < hi]
+        if not sub: continue
+        n_sym = len(set(r["sym"] for r in sub))          # 이게 진짜 표본이다 — 1이면 그 칸은 한 에피소드다
+        print(f"{nm:>14}{len(sub):>5}{n_sym:>5}{sum(1 for r in sub if r['kind'] == 'stop') / len(sub) * 100:>7.0f}%"
+              f"{statistics.median(r['fuel'] for r in sub):>7.1f}%{statistics.median(r['mv'] for r in sub):>+8.2f}%")
+
+if __name__ == "__main__":
+    main()

@@ -44,14 +44,16 @@ class Flags(unittest.TestCase):
         self.assertEqual(exit_flags(row("A", "markdown", px=151.0), short, HUNT), ["newhigh"])
         self.assertEqual(exit_flags(row("A", "markdown", dead=True), short, HUNT), ["dead"])
         self.assertEqual(exit_flags(row("A", "markdown", twoway24=5.0), short, HUNT), [])              # the churn floor is off (inverted); movement is ATR's question now
-        self.assertEqual(exit_flags(row("A", "markdown", atr_pct=0.2), short, HUNT), ["still0.2"])
+        self.assertEqual(exit_flags(row("A", "markdown", atr_pct=0.1), short, HUNT), ["still0.1"])
 
 class StoppedMoving(unittest.TestCase):
     """ATR(1m) is the movement question at the scale we trade — twoway24's 24h window was the weakest predictor (NEXT 17f)."""
     def test_a_held_coin_under_the_atr_floor_leaves_but_gently(self):
         held = dict(side="long", peak=1e8, climax=150.2)
-        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=0.29), held, HUNT), ["still0.29"])
-        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=0.30), held, HUNT), [])   # the floor is the entry floor: no gap
+        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=0.14), held, HUNT), ["still0.14"])
+        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=0.20), held, HUNT), [])   # between the two floors: HELD, not re-entered
+        self.assertTrue(flags_of(row("A", "markup", hint15="long", off=2.0, atr_pct=0.20), HUNT))               # ... and it would not be opened here either
+        self.assertLess(HUNT["exit_atr_min"], HUNT["min_atr"])   # the gap IS the hysteresis: equal floors ended 69% of campaigns in 1.7h
         self.assertTrue(hunt._illiquid("still0.29"))          # wind down only: a book with nothing in it is not worth a market dump
         self.assertTrue(hunt._leave_coin("still0.29"))        # ... and it cools down like a quiet leaver
 
