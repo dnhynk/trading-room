@@ -15,7 +15,8 @@ THEORY (CONCEPT 실험 모드, 세력대항마): an operator runs a coin through
   squeeze  -> the short leaves (late shorts are the operator's next meal); dead -> leave the coin; quiet/unknown -> nothing opens.
 Footprints and thresholds: bot/whale.py (stage 1: candles + ticker; stage 2: CVD / OI / funding series and the fingerprint tables).
 Common vetoes: 24h volume, ATR(1m) band the 1m rules were tuned in, contract leverage, churn; funding must not tax our side.
-A phase exit does not start a cooldown (the same coin flips long -> short on the same scan it goes flat); an episode death does.
+A phase exit does not start a cooldown (the same coin flips long -> short on the same scan it goes flat), and neither does the coin
+merely going still (ATR floor) — an episode death or a coin that cooled off its own heat does.
 Rank among the eligible = 1h two-way path (churn) — the order for the empty slot, never a reason to replace a holding.
 Events: HUNT (every scan) in logs/events.jsonl; HUNT_ADD / HUNT_WIND_DOWN / HUNT_DROP / HUNT_BLOCKED also in logs/alerts.jsonl.
 State (streaks, cooldowns, the held coin's side / peak volume / climax high / exit reason) in logs/hunt-state.json."""
@@ -47,11 +48,13 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             #                              where the cliff is (2026-09-04, 1758 rows): the next hour's movement is flat at ~2.5%/h above
             #                              0.30 and falls through it (0.25-0.30 1.68%/h, 0.20-0.25 1.39, 0.15-0.20 1.32). It costs 8% of
             #                              candidate rows (eligible ATR1m p10 = 0.31, p50 = 0.50). Was 0.15 (user: "문턱 좀 가까이 붙여")
-            exit_atr_min=0.15,   # a HELD coin whose ATR(1m) falls under this has stopped moving at the scale we trade: wind down (no market
+            exit_atr_min=0.25,   # a HELD coin whose ATR(1m) falls under this has stopped moving at the scale we trade: wind down (no market
             #                      dump). Deliberately WELL UNDER the entry floor — entry and exit are different questions and the gap is
             #                      hysteresis, not an oversight. At 0.30 (= the entry floor, 2026-09-04 first try) a single scan below it
             #                      ended 69% of campaigns at a 1.7h median and cut the path traversed while held — the fuel a cycle burns —
-            #                      from 16.5% to 7.1%. At 0.15 it ends 12% of them and the fuel is back (232 simulated entries, 6 coins).
+            #                      from 16.5% to 7.1%. 0.15 restored it (still 12%, fuel 17.6%). Between 0.15 and 0.30 the tape cannot tell:
+            #                      NONE of them ever fired on the four books we actually held (lowest ATR1m while held: AKE 0.806, EGLD 0.379,
+            #                      UAI 0.356, MUBARAK 0.306), so the choice is how much room to leave under that 0.306 — 0.25 leaves 18%.
             #                      The CEILING stays an entry veto only: a held coin's ATR exploding is the pump itself (RULES).
             min_fund=-0.05,      # funding %/8h floor for a short (negative = shorts pay; T -0.29 would tax a short 0.9%/day)
             max_fund=0.3,        # funding %/8h ceiling for a long (longs crowded and paying)
@@ -249,7 +252,10 @@ def verdict(rows, books, hunt, st, now):
 
 def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
 #                                                                                      hurts and there is no hurry — leave gently (stalls above cost, or the cap)
-def _leave_coin(why): return _illiquid(why) or any(k in (why or "") for k in ("flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one
+def _leave_coin(why): return any(k in (why or "") for k in ("dead", "vol", "flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one.
+#   `still` is deliberately NOT here (2026-09-04): a coin that stopped moving has not ended its episode, it went quiet for an hour — banishing
+#   it for cooldown_h on one soft ATR reading is the wrong price for a floor that sits only ~18% under the lowest ATR we have actually held
+#   (0.306, MUBARAK). So it leaves gently like an illiquid one, keeps no cooldown, and HUNT_RESUME can undo it if the tape wakes before flat.
 #            everything else (a phase flip: climax / markdown / markup / squeeze / newhigh) is a same-coin side change — no cooldown, exit fast into a stall
 
 def apply(p, rows, v, flats, hunt, st, now, recent=()):
