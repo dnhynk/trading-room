@@ -5,7 +5,7 @@ from bot.hunt import flags_of, exit_flags, verdict, apply, HUNT
 
 def row(sym, phase="markdown", **kw):
     r = dict(symbol=sym, px=129.0, qv=4e7, base7=4e6, ratio=10.0, new=False, chg24=-5.0, fund=0.01, oi=1e7, spread_bp=2.0, lever_max=25, min_notional=1.0,
-             tick_pct=0.001, twoway24=30.0, net24=-3.0, run=50.0, off=14.0, high48=150.2, atr_pct=0.6, atr15_pct=2.0, hint15="short", dead=False,
+             tick_pct=0.001, twoway24=30.0, net24=-3.0, run=50.0, off=14.0, off_close=14.0, high48=150.2, atr_pct=0.6, atr15_pct=2.0, hint15="short", dead=False,
              phase=phase, votes=[], flags=[])
     r.update(kw); r["side"] = "long" if r["phase"] == "markup" else "short" if r["phase"] == "markdown" else None
     r["flags"] = list(kw.get("flags", flags_of(r, HUNT))); return r
@@ -33,7 +33,8 @@ class Flags(unittest.TestCase):
         self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0), long_, HUNT), [])
         self.assertEqual(exit_flags(row("A", "climax"), long_, HUNT), ["phase:climax"])          # the long stops at the climax
         self.assertEqual(exit_flags(row("A", "climax"), short, HUNT), [])                         # a short does not care about a climax vote
-        self.assertEqual(exit_flags(row("A", "unknown", off=70.0, hint15="long"), long_, HUNT), ["far70.0"])   # 70% under the top: the long leaves whatever the structure says
+        self.assertEqual(exit_flags(row("A", "unknown", off=70.0, off_close=31.0, hint15="long"), long_, HUNT), ["far70.0"])   # 70% under the top and 31% under its highest close: the long leaves whatever the structure says
+        self.assertEqual(exit_flags(row("A", "unknown", off=30.7, off_close=-10.0, hint15=None), long_, HUNT), [])          # under a spike wick but above every close: a shakeout, the long stays (STO)
         self.assertEqual(exit_flags(row("A", "unknown", off=70.0, hint15="long"), short, HUNT), [])            # a short far under the top is where it earns
         self.assertEqual(exit_flags(row("A", "markup"), short, HUNT), ["phase:markup"])           # a short leaves a relaunch
         self.assertEqual(exit_flags(row("A", "squeeze"), short, HUNT), ["phase:squeeze"])

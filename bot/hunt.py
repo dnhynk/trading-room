@@ -84,7 +84,7 @@ def exit_flags(r, held, hunt):
     elif tw_peak >= hunt["min_twoway"] and tw < hunt["quiet_frac"] * tw_peak: f.append(f"quiet{tw:.0f}/{tw_peak:.0f}")   # the coin cooled off its own hot: chase
     if side == "long":
         if ph in ("climax", "markdown", "squeeze"): f.append(f"phase:{ph}")
-        elif (r.get("off") or 0) >= WHALE["far_off"]: f.append(f"far{r.get('off')}")     # the top is far_off % away whatever the structure reads (a bounce that flips
+        elif (r.get("off") or 0) >= WHALE["far_off"] and (r.get("off_close") or 0) >= WHALE["far_close"]: f.append(f"far{r.get('off')}")   # far under the top AND its highest close, whatever the structure reads (a bounce that flips
         if r["fund"] is not None and r["fund"] > hunt["max_fund"]: f.append(f"fund{r['fund']:+.2f}%")   # the 15m read to "long" 70% under the top is not a markup — audit 2026-09-03)
     else:
         if ph in ("markup", "squeeze"): f.append(f"phase:{ph}")

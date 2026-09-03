@@ -28,6 +28,8 @@ WHALE = dict(episode_ratio=4.0,   # 24h volume / own 7-day median: an episode
              down_off=10.0,       # markdown needs the price at least this far (%) under the high (with the 15m structure down) ...
              far_off=20.0,        # ... or this far under it after a run, structure unreadable: a lagging structure reader (its zigzag threshold is 2 x ATR15, 10-20%
              #                      on a pump coin) must not leave a coin 30% under its top in "unknown" (AKE 2026-09-03 13:00-14:00, audit)
+             far_close=10.0,      # ... AND this far under the highest CLOSE: a wick high inflates `off` on any pullback (STO 2026-04-02 00:00, 30% under a spike
+             #                      wick but ABOVE every prior close, then +230% more — a shakeout, not a markdown; AKE 07:00+ was 17-31% under its top close)
              climax_votes=2,      # footprints that must agree for climax
              post_red=2,          # red closes among the 3 hours after the max-volume hour (effort > result)
              upwick=0.4,          # mean upper-wick share of the last 4 x 15m ranges
@@ -48,6 +50,7 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     h48 = hours[-48:]; i_hi = max(range(len(h48)), key=lambda k: h48[k]["h"]); high48 = h48[i_hi]["h"]
     before = hours[max(0, len(hours) - 48 + i_hi - 72):len(hours) - 48 + i_hi + 1] or h48[:i_hi + 1]
     run = _pct(high48, min(x["l"] for x in before)); off = -_pct(px, high48); age_h = len(h48) - 1 - i_hi
+    off_close = -_pct(px, max(x["c"] for x in h48))                                          # under the highest close (a wick is not a level the market accepted)
     i_v = max(range(len(h48)), key=lambda k: h48[k]["qv"])
     after = h48[i_v + 1:i_v + 4]; post_red = sum(1 for x in after if x["c"] < x["o"])
     vmax_share = h48[i_v]["qv"] / max(sum(x["qv"] for x in h48[-24:]), 1e-9) if i_v >= len(h48) - 24 else 0.0
@@ -74,7 +77,7 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     prior = [d["qv"] for d in days[-8:-1]]; base = statistics.median(prior) if len(prior) >= 3 else 0.0
     new = len(prior) < 3                                         # a fresh listing has no baseline: its whole life is the episode (ratio 99)
     peak = max(float((held or {}).get("peak") or 0.0), qv)
-    return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
+    return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), off_close=round(off_close, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
                 vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1),
                 ratio=99.0 if new else round(qv / base, 1), new=new, qv=qv, fund=(ticker or {}).get("fund"), dead=bool(held) and qv < p["dead_ratio"] * peak,
                 atr15_pct=round(atr15 / px * 100, 2) if atr15 else None)
@@ -85,7 +88,8 @@ def phase(f, p=WHALE):
     if f["dead"]: return "dead", ["dead"]
     if f["ratio"] < p["quiet_ratio"] and f["twoway24"] < p["twoway_dead"]: return "quiet", [f"ratio{f['ratio']}", f"twoway{f['twoway24']}"]
     down = f["off"] >= p["down_off"] and f["hint15"] == "short"
-    far = f["off"] >= p["far_off"] and f["hint15"] is None and f["run"] >= p["run_min"]      # the top is in by distance alone: structure unreadable, run behind it
+    far = (f["off"] >= p["far_off"] and f.get("off_close", 0.0) >= p["far_close"] and f["hint15"] is None
+           and f["run"] >= p["run_min"])                                                     # the top is in by distance alone: under the top AND under the highest close, structure unreadable, run behind it
     if down or far:
         why = [f"off{f['off']}", "hint_short" if down else "far_off"]
         if f["fund"] is not None and f["fund"] <= p["fund_cold"]: return "squeeze", why + [f"fund{f['fund']}"]
