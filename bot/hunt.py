@@ -112,6 +112,11 @@ def exit_flags(r, held, hunt):
     tw = r.get("twoway24") or 0.0; tw_peak = held.get("tw_peak") or 0.0
     if tw < hunt["exit_twoway"]: f.append(f"flat{tw}")                                          # absolute floor: no churn left to trade
     elif tw_peak >= hunt["min_twoway"] and tw < hunt["quiet_frac"] * tw_peak: f.append(f"quiet{tw:.0f}/{tw_peak:.0f}")   # the coin cooled off its own hot: chase
+    # 판독기가 우리 편이 아니라고 **적극적으로** 말하면 담기를 멈춘다(`hold:`, wind_down 만) — 새로 열지 않을 국면에서 계속 담는 것은
+    # CONCEPT-B "리스크를 여는 쪽이 닫는 쪽보다 높은 기준을 진다" 와 어긋난다(담기도 여는 것이다). `unknown` 은 여기 없다: 말을 못 하는
+    # 것은 근거가 아니고(판독의 36%), 그것으로 나가는 변형은 측정에서 기각됐다(NEXT 19a). distribution 은 AI 만 내는 라벨이라 전방 검증이
+    # 없으므로 전량 청산까지 가지 않는다 — 승격 조건은 `bot.campaigns` 에서 그 행의 전방 4h 꼬리가 markup(p10 −8.3%)보다 나쁠 때.
+    if ph in ("dead", "quiet") or (side == "long" and ph == "distribution"): f.append(f"hold:{ph}")   # 숏에게 distribution 은 우리 편이다(고점이 팔리는 중)
     if side == "long":
         if ph in ("climax", "markdown", "squeeze"): f.append(f"phase:{ph}")
         elif (r.get("off") or 0) >= WHALE["far_off"] and (r.get("off_close") or 0) >= WHALE["far_close"]: f.append(f"far{r.get('off')}")   # far under the top AND its highest close, whatever the structure reads (a bounce that flips
@@ -197,7 +202,7 @@ def ai_read(rows, hunt, log=log):
         p = subprocess.run(cmd + ["-"],
                            input=AI_PROMPT + chr(10) + body, capture_output=True, text=True, errors="replace",
                            timeout=float(hunt.get("ai_timeout_s") or 240))
-        raw = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
+        with open(out, encoding="utf-8") as fh: raw = fh.read()
     except Exception as e:
         log(f"hunt: ai_read failed ({type(e).__name__}: {str(e)[:80]}) - keeping the deterministic read"); return {}
     i, j = raw.find("{"), raw.rfind("}")
@@ -318,7 +323,7 @@ def verdict(rows, books, hunt, st, now):
     if resume: add = None                                                   # the book stays: nothing replaces it this scan
     return dict(refuse=None, cur=cur, wind=wind, add=add, top=top, resume=resume)
 
-def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
+def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still", "hold:"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
 #                                                                                      hurts and there is no hurry — leave gently (stalls above cost, or the cap)
 def _leave_coin(why): return any(k in (why or "") for k in ("dead", "vol", "flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one.
 #   `still` is deliberately NOT here (2026-09-04): a coin that stopped moving has not ended its episode, it went quiet for an hour — banishing

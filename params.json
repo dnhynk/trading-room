@@ -112,7 +112,9 @@
       "stop_trail_atr": 1.5,
       "blowoff_atr": 8.0,
       "blowoff_frac": 0.5,
-      "cap_per_unit": 1
+      "cap_per_unit": 1,
+      "wind_down": 1,
+      "exit": 1
     }
   },
   "sig": {

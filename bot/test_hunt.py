@@ -205,6 +205,33 @@ class MarketTape(unittest.TestCase):
         self.assertIsNone(hunt.market(types.SimpleNamespace(candles=boom), log=lambda *a: None))
         self.assertIsNone(hunt.market(self.stub([100.0, 100.0]), log=lambda *a: None))   # too few closed 1H bars to read
 
+class PositivelyNotOurSide(unittest.TestCase):
+    """새로 열지 않을 국면에서 계속 담는 것은 CONCEPT-B 와 어긋난다(담기도 리스크를 여는 것). 다만 `unknown` 은 근거가 아니다."""
+    long_ = dict(side="long", peak=1e8, climax=150.2, tw_peak=30.0)
+    short = dict(side="short", peak=1e8, climax=150.2, tw_peak=30.0)
+
+    def test_a_positive_reading_against_us_stops_the_adds_without_dumping(self):
+        for ph in ("distribution", "dead", "quiet"):
+            f = exit_flags(row("A", ph), self.long_, HUNT)
+            self.assertEqual(f, [f"hold:{ph}"], ph)
+            self.assertTrue(hunt._illiquid(f[0]), ph)          # wind_down 만: 검증 안 된 라벨에 포지션을 던지지 않는다
+        self.assertFalse(hunt._leave_coin("hold:distribution"))  # 쿨다운 없음: 분배는 에피소드의 끝이 아니다
+        self.assertTrue(hunt._leave_coin("hold:dead")); self.assertTrue(hunt._leave_coin("hold:quiet"))
+
+    def test_unknown_is_not_a_reading_and_keeps_the_book(self):
+        self.assertEqual(exit_flags(row("A", "unknown"), self.long_, HUNT), [])    # 판독의 36%, 나가는 변형은 기각됐다(NEXT 19a)
+        self.assertEqual(exit_flags(row("A", "unknown"), self.short, HUNT), [])
+
+    def test_distribution_is_asymmetric_because_a_short_is_on_its_side(self):
+        self.assertEqual(exit_flags(row("A", "distribution"), self.short, HUNT), [])   # 고점이 팔리는 중 = 숏에게는 우리 편
+        self.assertEqual(exit_flags(row("A", "distribution"), self.long_, HUNT), ["hold:distribution"])
+        self.assertTrue(flags_of(row("A", "distribution"), HUNT))                      # 어느 방향으로도 새로 열지는 않는다
+
+    def test_a_phase_flip_still_liquidates(self):
+        for ph in ("climax", "markdown", "squeeze"):
+            f = exit_flags(row("A", ph), self.long_, HUNT)
+            self.assertEqual(f, [f"phase:{ph}"], ph); self.assertFalse(hunt._illiquid(f[0]), ph)   # 전량 청산은 그대로
+
 class SecondOpinion(unittest.TestCase):
     """AI 판독은 국면과 방향만 대체한다. 자격(통행료 veto)은 못 뒤집고, 실패하면 결정론이 그대로 선다."""
     def run_with(self, out, rc=0):
