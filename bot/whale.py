@@ -25,6 +25,8 @@ WHALE = dict(episode_ratio=4.0,   # 24h volume / own 7-day median: an episode
              quiet_ratio=2.0,     # under this, with no churn, the coin is quiet
              run_min=25.0,        # % run into the 48h high from the low before it
              top_off=15.0,        # climax is read only this close (%) under the 48h high
+             markup_tol=5.0,      # markup only within this % of the highest CLOSE (a fresh close-high or just under it): a bounce that has not reclaimed the top
+             #                      is a pullback, not a markup (SYN 2026-06-26 03:00, -8% off the climax close, read markup then fell 13% more)
              down_off=10.0,       # markdown needs the price at least this far (%) under the high (with the 15m structure down) ...
              far_off=20.0,        # ... or this far under it after a run, structure unreadable: a lagging structure reader (its zigzag threshold is 2 x ATR15, 10-20%
              #                      on a pump coin) must not leave a coin 30% under its top in "unknown" (AKE 2026-09-03 13:00-14:00, audit)
@@ -73,6 +75,13 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
         if len(hs) >= 2: lower_high = hs[-1] < hs[-2] and closes[-1] < hs[-1]   # a price above the last pivot high has no lower high (a fresh leg up)
     h24 = hours[-24:]; o24 = h24[0]["o"]
     twoway24 = sum(abs(x["c"] - x["o"]) / o24 for x in h24) * 100 - abs(_pct(h24[-1]["c"], o24))
+    # ignition: the last 3 closed hours' volume against the median 3-hour volume of the 48 hours before them, and the price move over
+    # those 3 hours (강고양이 SIREN 2026-03-22: "거래량도 터지고 ... 넣어도 안정권" — the entry the 24h ratio cannot see: SIREN's ratio was 0.8x
+    # at ignition; on SIREN/STO/AKE hours with ign >= 5 and up3 > 0 were followed by +10..+20% in 4h vs +1..2% for quiet hours, in-sample)
+    ign = up3 = None
+    if len(hours) >= 51:
+        prior = [x["qv"] for x in hours[-51:-3]]; med3 = statistics.median([sum(prior[j:j + 3]) for j in range(0, len(prior) - 2, 3)]) or 1e-9
+        ign = round(sum(x["qv"] for x in hours[-3:]) / med3, 1); up3 = round(_pct(hours[-1]["c"], hours[-3]["o"]), 1)
     qv = float(ticker["qv"]) if ticker and ticker.get("qv") else sum(x["qv"] for x in h24)
     prior = [d["qv"] for d in days[-8:-1]]; base = statistics.median(prior) if len(prior) >= 3 else 0.0
     new = len(prior) < 3                                         # a fresh listing has no baseline: its whole life is the episode (ratio 99)
@@ -80,7 +89,7 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), off_close=round(off_close, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
                 vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1),
                 ratio=99.0 if new else round(qv / base, 1), new=new, qv=qv, fund=(ticker or {}).get("fund"), dead=bool(held) and qv < p["dead_ratio"] * peak,
-                atr15_pct=round(atr15 / px * 100, 2) if atr15 else None)
+                atr15_pct=round(atr15 / px * 100, 2) if atr15 else None, ign=ign, up3=up3)
 
 def phase(f, p=WHALE):
     """(phase, votes). Ordered: dead > quiet > markdown/squeeze (the top is in and the structure is down) > climax (votes near the
@@ -100,10 +109,13 @@ def phase(f, p=WHALE):
     if f["lower_high"]: votes.append("lower_high")
     if f["fund"] is not None and f["fund"] >= p["fund_hot"]: votes.append(f"fund{f['fund']}")
     if f.get("exhaustion"): votes.append("exhaustion")
+    near = f.get("off_close", f["off"])          # "near the top" is measured against the highest CLOSE: a blow-off wick inflates the wick distance exactly at the
+    #                                              top and left SYN 06-26 00:00 (exhaustion at the max close, 32% under the wick), SIREN 03-23 03:00 and AKE 07-27
+    #                                              18:00 in "unknown" instead of climax / markup (강고양이 replay, audit 2026-09-03)
     # climax: two votes near the high, OR quiet exhaustion after a big pump at the high (a silent volume-decay top the vote count misses)
-    if f["off"] < p["top_off"] and (len(votes) >= p["climax_votes"] or (f.get("exhaustion") and f["run"] >= p["big_run"])): return "climax", votes
+    if near < p["top_off"] and (len(votes) >= p["climax_votes"] or (f.get("exhaustion") and f["run"] >= p["big_run"])): return "climax", votes
     episode = f["ratio"] >= p["episode_ratio"] or f["run"] >= p["big_run"]
-    if episode and f["run"] >= p["run_min"] and f["off"] < p["down_off"] and f["hint15"] in ("long", None): return "markup", votes
+    if episode and f["run"] >= p["run_min"] and near <= p["markup_tol"] and f["hint15"] in ("long", None): return "markup", votes
     return "unknown", votes
 
 def _closed(rows, end_ms, span_ms): return [r for r in rows if r["ts"] + span_ms <= end_ms]

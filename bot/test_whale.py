@@ -6,8 +6,10 @@ def bar(ts, o, c, wick=0.2, v=1000.0): return dict(ts=ts, o=o, h=max(o, c) + wic
 
 def fp(**kw):
     f = dict(px=129.0, high48=150.0, run=50.0, off=14.0, off_close=14.0, age_h=6, vmax_at_high=False, post_red=0, vmax_share=0.1, upwick=0.2, lower_high=False,
-             exhaustion=False, hint15=None, twoway24=30.0, ratio=10.0, new=False, qv=4e7, fund=0.0, dead=False, atr15_pct=2.0)
-    f.update(kw); return f
+             exhaustion=False, hint15=None, twoway24=30.0, ratio=10.0, new=False, qv=4e7, fund=0.0, dead=False, atr15_pct=2.0, ign=None, up3=None)
+    f.update(kw)
+    if "off_close" not in kw: f["off_close"] = f["off"]     # unless a test separates wick and close, the two distances agree
+    return f
 
 class Rules(unittest.TestCase):
     def test_the_order_of_the_rules(self):
@@ -17,7 +19,10 @@ class Rules(unittest.TestCase):
         self.assertEqual(phase(fp(off=14.0, hint15="short", fund=-0.2))[0], "squeeze")
         self.assertEqual(phase(fp(off=5.0, hint15="short"))[0], "unknown")                       # the top is not far enough in for markdown, structure down: nothing
         self.assertEqual(phase(fp(off=32.0, off_close=31.0, hint15=None, run=142.0))[0], "markdown")   # far under the top after a run, structure unreadable: the top is in by distance (AKE)
-        self.assertEqual(phase(fp(off=30.7, off_close=-10.0, hint15=None, run=359.0))[0], "unknown")   # 30% under a spike WICK but above every close: a shakeout, not a markdown (STO 04-02 00:00, then +230%)
+        self.assertEqual(phase(fp(off=30.7, off_close=-10.0, hint15=None, run=359.0, ratio=20.0))[0], "markup")   # 30% under a spike WICK but AT the highest close: still the markup (STO 04-02 00:00, then +230%)
+        self.assertEqual(phase(fp(off=31.8, off_close=0.0, hint15=None, run=202.0, exhaustion=True))[0], "climax")   # exhaustion at the max close under a blow-off wick: the top (SYN 06-26 00:00)
+        self.assertEqual(phase(fp(off=37.3, off_close=8.0, hint15=None, run=202.0))[0], "unknown")                   # a bounce 8% under the climax close is not a markup (SYN 06-26 03:00, then -13%)
+        self.assertEqual(phase(fp(off=12.0, off_close=4.0, hint15="long", run=142.0))[0], "markup")                  # just under a fresh close-high: the markup continues
         self.assertEqual(phase(fp(off=12.0, hint15=None, run=142.0))[0], "unknown")              # not far enough for the distance read, structure silent: nothing
         self.assertEqual(phase(fp(off=32.0, hint15="long", run=142.0))[0], "unknown")            # structure says up: distance alone does not call a markdown
         self.assertEqual(phase(fp(off=32.0, hint15=None, run=10.0))[0], "unknown")               # no run behind it: a drifter, not a pump's markdown
