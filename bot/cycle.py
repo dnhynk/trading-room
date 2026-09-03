@@ -101,6 +101,8 @@ class Book:
         self.mismatch_since, self.lever, self.margin_alert_t, self.taker_t, self.seq = None, None, 0.0, 0.0, 0
         self.stop_oids, self.stop_hit_oids, self.unmatched_close = deque(maxlen=20), deque(maxlen=20), []   # known stop plan ids; stop orders already counted; close fills awaiting identity
         self.market_pending, self.stop_try_t, self.guarded = None, 0.0, None   # a market order whose response was lost (no second one until settled); fallback-stop throttle; last liq guard
+        self.trim_tag = {}                                      # trim clientOid -> why the order was placed when it was not a stall pull ("blowoff": the standing 급등 목표
+        #                                                         매도 makes no PULL_TRIM event, so without this its fills are indistinguishable from a normal trim (NEXT 6.15)
         self.trim_lot = {}                                      # trim clientOid -> the lot its fills reduce (0 = the core lot, a de-risk cut under units; None = LIFO)
         self._stop_lock = asyncio.Lock()                        # set_stop is find-then-place: two callers (a fill's reconcile, housekeeping's ensure_stop) must not both find nothing
         self._lock = self.acquire_lock()
@@ -259,7 +261,8 @@ class Book:
             if w and want is not None and abs(want[0] - w["px"]) < self.cy.px_tick / 2 and abs(want[1] - (w["qty"] - w["filled"])) < self.cy.qstep / 2: continue
             if w and (want is None or time.time() - self.replaced[role] >= 1.0):
                 await self.cancel(role); w = self.work[role]
-            if want is not None and w is None: await self.place(role, want[0], want[1], want[3] if role == "trim" and len(want) > 3 else None)
+            if want is not None and w is None: await self.place(role, want[0], want[1], want[3] if role == "trim" and len(want) > 3 else None,
+                                                                want[4] if role == "trim" and len(want) > 4 else None)
         if qty and d["stop"] is not None:
             px = self.guard(d["stop"], pos_stats(self.pos)[1])
             if self.stop is None or abs(px - self.stop["px"]) >= self.cy.px_tick / 2:
@@ -273,10 +276,13 @@ class Book:
         self.trim_lot[oid] = lot
         for k in list(self.trim_lot)[:-50]: del self.trim_lot[k]
 
-    async def place(self, role, px, qty, lot=None):
+    async def place(self, role, px, qty, lot=None, tag=None):
         if not self.cy.live_ok(): self.ev("ORDER_BLOCKED", role=role, why="private feed down"); return
         self.seq += 1; oid = f"{self.OIDP}{role[0]}{int(time.time() * 1000)}{self.seq % 1000:03d}"
         w = dict(oid=oid, order_id=None, px=px, qty=qty, filled=0.0, t=time.time()); self.remember_lot(oid, lot)
+        if tag:
+            self.trim_tag[oid] = tag
+            for k in list(self.trim_tag)[:-50]: del self.trim_tag[k]
         lvl = dict(self.feat.bids if self.rest_on_bid(role) else self.feat.asks)
         w["queue"] = w["S"] = lvl.get(px, 0.0); w["seen"] = 0.0   # contracts already resting at our price (dry: the fill model's queue, S/seen for sim_book; live: the record — a miss is a queue that did not drain, not a price that did not come)
         if self.mode != "dry":
@@ -492,6 +498,7 @@ class Book:
         q, avg = pos_stats(self.pos)
         self.ev("FILL", role=role, qty=qty, px=px, fee=rnd(fee), pnl=rnd(pnl), scope=scope, pos_qty=rnd(q), avg=rnd(avg), realized=rnd(self.realized), oid=oid,
                 lot="core" if lot == 0 else None,   # a de-risk cut under units reduces the core lot, not the LIFO unit (bot.cycles follows this)
+                why=self.trim_tag.get(oid),         # "blowoff" = the standing target sold it (no PULL_TRIM event names it); None for every other fill
                 mid=self.feat.mid)                  # mid at the fill: with PLACE/TAKER.mid (arrival) this is the slippage and impact record (NEXT 6)
         await self.tick([])          # re-place the opposite side at once
 

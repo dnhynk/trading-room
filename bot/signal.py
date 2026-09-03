@@ -651,6 +651,7 @@ class Strategy:
         self.best = None         # the campaign's best favourable mid since it opened (profit lock/trail); None while flat
         self.peak = None         # best favourable mid since the last fill (retrace-based top detection)
         self.trough = None       # worst mid since the last fill: peak - trough is the bounce a retrace is measured against
+        self.blow_base = None    # the campaign's largest position: the blow-off target sells blowoff_frac of THAT, once (never a share of what is left after it filled)
         self.bpeak = None        # best favourable mid since the trough was set: the bounce the market-referenced gate measures (a decline from an earlier peak is not a bounce)
         self.struct_skip = False # STRUCT_SKIP reported once per position (a level may still qualify later)
         self.fail_n = 0          # trim-side stalls that failed to reach the LIFO lot's gate (gate relaxation); the lot's own history
@@ -815,6 +816,7 @@ class Strategy:
                 if s * (mid - self.peak) > 0: self.peak = mid
                 if s * (mid - self.trough) < 0: self.trough = self.bpeak = mid            # a new low restarts the bounce
                 elif s * (mid - self.bpeak) > 0: self.bpeak = mid
+            self.blow_base = max(self.blow_base or 0.0, qty)                              # high-water of this campaign (adds raise it; a trim does not lower it)
             mk, mkf, a15 = p.get("trim_market_atr") or 0.0, p.get("trim_market_frac") or 0.0, f.get("atr15") or 0.0
             mk_lot = ((mk > 0 and a15 > 0) or mkf > 0) and (not is_core or p.get("trim_market_core")) and (not p.get("trim_market_against") or self.regime == "AGAINST")
             mk_only = bool(mk_lot and p.get("trim_market_only"))                          # cost is not an input for this lot at all
@@ -860,7 +862,10 @@ class Strategy:
                     self.pull = dict(t=t - p["trim_taker_after_s"], qty=qty, target=0.0, gate=-1e9, ref=avg, px0=touch_in, lot=None, exit=True, floor=True)   # backdated: taker at once
                     ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=avg, qty=qty, all=True, px=touch_in, mode="exit_taker",
                                                  path="timeout" if late else "adverse", lot=None, peak=self.peak)))
-            else: self.exit_t = self.exit_ref = None
+            else:
+                self.exit_t = self.exit_ref = None
+                if self.pull and self.pull.get('exit'):        # the read came back to our side before the book was flat (hunt's HUNT_RESUME): a standing "sell everything at
+                    ev.append(("PULL_DROP", dict(why="exit_off", dev_lot=round(dev_lot, 2)))); self.pull = None   # any price" order outlives its reason otherwise (gate -1e9 never drops it)
             if self.pull:
                 if s * (mid / self.pull["ref"] - 1) * 100 < self.pull["gate"] - tick / self.pull["ref"] * 100:   # one tick of hysteresis: a wiggle at the gate must not cancel and re-queue the maker (2026-08-30 03:17: six pull/drop flips in 41 s lost the queue)
                     ev.append(("PULL_DROP", dict(dev_lot=round(dev_lot, 2)))); self.pull = None
@@ -874,12 +879,13 @@ class Strategy:
             if trim is None and p.get("blowoff_atr", 0) > 0 and f.get("atr15"):          # 급등 목표 매도: a standing target for part of the position (experiment mode)
                 px = avg + s * p["blowoff_atr"] * f["atr15"]
                 px = max(px, touch_out) if s > 0 else min(px, touch_out)
-                bq = min(qty, round(round(qty * p.get("blowoff_frac", 1.0) / qs) * qs, 9))
-                if bq >= qs - 1e-9: trim = (round_tick(px, tick), bq, "maker", None)
+                keep = (self.blow_base or qty) * (1 - float(p.get("blowoff_frac") or 1.0))   # sell down to this and no further: the target is blowoff_frac of the campaign's
+                bq = min(qty, round(round(max(qty - keep, 0.0) / qs) * qs, 9))                # largest position, not of whatever is left — recomputing it from the remaining
+                if bq >= qs - 1e-9: trim = (round_tick(px, tick), bq, "maker", None, "blowoff")   # qty re-armed half of the rest at the same price after every fill (140 -> 70 -> 35 ...)
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = self.best = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
+        if not qty: self.struct_stop = self.stop_px = self.best = self.blow_base = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
         else:
             cap_px = avg - s * p["cap_usdt"] / max(qty, unit)   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the

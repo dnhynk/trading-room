@@ -676,11 +676,35 @@ class ExitMode(unittest.TestCase):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, blowoff_atr=8.0, blowoff_frac=0.5))
         pos = dict(lots=[[70, 3.0, "a"], [70, 2.9, "b"]], avg=2.95, last="buy", last_buy_px=2.9)
         r = st.step(F(t=100, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos)
-        self.assertEqual(r["trim"], (round(2.95 + 8 * 0.06, 10), 70, "maker", None))                  # 3.43, half of 140, resting above the market
+        self.assertEqual(r["trim"], (round(2.95 + 8 * 0.06, 10), 70, "maker", None, "blowoff"))       # 3.43, half of 140, resting above the market, tagged for the ledger
         r = st.step(F(t=200, mid=3.02, bid=3.019, ask=3.021, atr15=0.06), [dict(sig="POP_STALLING")], pos)   # a stall above the LIFO lot's cost: the pull wins the slot
         self.assertEqual(r["trim"][2], "maker"); self.assertLess(r["trim"][0], 3.1)
         st0 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos0 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         self.assertIsNone(st0.step(F(t=100, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos0)["trim"])   # off by default: the basket never rests a target
+
+    def test_the_blow_off_target_sells_its_share_of_the_campaign_once(self):
+        """The target is blowoff_frac of the campaign's LARGEST position, not of whatever is left: recomputing it from the remaining qty
+        re-armed half of the rest at the same price after every fill (140 -> 70 -> 35 -> ... down to the exchange step)."""
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, blowoff_atr=8.0, blowoff_frac=0.5))
+        pos = dict(lots=[[70, 3.0, "a"], [70, 2.9, "b"]], avg=2.95, last="buy", last_buy_px=2.9)
+        r = st.step(F(t=100, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos); self.assertEqual(r["trim"][1], 70)
+        pos["lots"] = [[70, 3.0, "a"]]                                                      # the target filled: 70 of the 140 are gone
+        r = st.step(F(t=110, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos); self.assertIsNone(r["trim"])   # its share is sold; nothing rests again
+        pos["lots"] = [[70, 3.0, "a"], [70, 2.9, "b"], [70, 2.85, "c"]]                     # adds rebuild it past the old high-water mark: the target covers the new units
+        r = st.step(F(t=120, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos); self.assertEqual(r["trim"][1], 105.0)   # half of 210, not half of what a fill left
+        pos["lots"] = []; st.step(F(t=130, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos); self.assertIsNone(st.blow_base)   # flat forgets the campaign
+
+    def test_an_exit_pull_is_dropped_when_the_flag_clears(self):
+        """hunt clears `exit` when a one-bar misread reverts before the book is flat (HUNT_RESUME). The standing "sell everything at any
+        price" pull has gate -1e9, so nothing else would ever drop it and the book would keep dumping."""
+        st, pos = self._st()
+        st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos)
+        r = st.step(F(t=105, mid=2.9, bid=2.899, ask=2.901), [dict(sig="POP_STALLING")], pos)
+        self.assertTrue(st.pull.get("exit")); self.assertIsNotNone(r["trim"])
+        st.p["exit"] = 0
+        r = st.step(F(t=106, mid=2.9, bid=2.899, ask=2.901), [], pos)
+        self.assertIsNone(st.pull); self.assertIsNone(r["trim"]); self.assertIsNone(st.exit_t)
+        self.assertEqual([e[1]["why"] for e in r["events"] if e[0] == "PULL_DROP"], ["exit_off"])
 
     def test_without_the_flag_nothing_changes_and_a_flat_book_forgets_the_flag(self):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)

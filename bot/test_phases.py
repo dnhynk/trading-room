@@ -1,6 +1,6 @@
 """Invariants of the phase evidence tables (bot/phases.py).  python -m unittest bot.test_phases"""
 import unittest
-from bot.phases import phase_at, forward_table, ledger_table, flow_table
+from bot.phases import phase_at, forward_table, ledger_table, flow_table, end_ms_of
 
 def tl_row(t_ms, ph, px, next1h=None, next4h=None):
     return (t_ms, ph, [], {"px": px, "next1h": next1h}, next4h)
@@ -50,6 +50,15 @@ def _ms(t):
 
 def cyc(t0, side, net, qty, entry):
     return dict(symbol="X", side=side, t0=t0, t1=t0, net=net, qty=qty, entry=entry, gross=net, fee=0.0)
+
+class DayWindow(unittest.TestCase):
+    """--day names a UTC day (the recordings and the nightly are keyed by UTC hour). The old code applied the local zone twice and in
+    KST ended the day 18 h early, so the nightly's phases table covered 00:00-06:00 UTC of the day it reported on."""
+    def test_a_day_ends_at_2359_utc_and_an_explicit_end_stays_local(self):
+        import calendar, time
+        self.assertEqual(end_ms_of("20260903"), calendar.timegm((2026, 9, 3, 23, 59, 59, 0, 0, 0)) * 1000)
+        self.assertEqual(end_ms_of(None, "2026-09-03 20:00"), int(time.mktime(time.strptime("2026-09-03 20:00", "%Y-%m-%d %H:%M")) * 1000))
+        self.assertEqual(end_ms_of("20260903", "2026-09-03 20:00"), end_ms_of(None, "2026-09-03 20:00"))   # --end wins
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ young Bitget listing):
                 markup), open-interest change %/h (a shakeout harvests longs -> OI falls on a green bar), funding. Evidence only, not
                 fed to `phase` until this table splits (NEXT 6.13; the script does not fit itself to one tape — CONCEPT).
 Nothing here trades or writes params; it reads logs/events.jsonl and the recordings."""
-import json, os, statistics, sys, time
+import calendar, json, os, statistics, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.cycles import build as build_cycles
 from bot.whale import timeline, load, WHALE
@@ -96,7 +96,8 @@ def report(sym, end_ms, hours, since, files):
     tl = timeline(sym, end_ms, hours, data=load(sym, end_ms, hours))
     for i, (t, ph, votes, f, nxt) in enumerate(tl):        # a next-1h column beside whale's next-4h (rows are one hour apart, step=1)
         f["next1h"] = round((tl[i + 1][3]["px"] / f["px"] - 1) * 100, 2) if i + 1 < len(tl) else None
-    done = [c for c in build_cycles(since=since, sym=sym)[0] if c["symbol"] == sym]
+    until = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_ms / 1000))   # events.jsonl stamps local time; the ledger stops where the phase timeline does
+    done = [c for c in build_cycles(since=since, until=until, sym=sym)[0] if c["symbol"] == sym]
     fwd = forward_table(tl); led = ledger_table(done, tl); flow = flow_table(tl, flow_by_hour(files, sym)) if files else {}
     out = [f"### {sym}  ({len([r for r in tl])} hourly reads, {len(done)} live cycles; phase at each hour, Binance for a young listing)"]
     out.append(f"  {'phase':9}{'hours':>6}{'next1h':>8}{'next4h':>8} | forward move after the read")
@@ -113,6 +114,14 @@ def report(sym, end_ms, hours, since, files):
             if ph in flow: n, c, o, fu = flow[ph]; out.append(f"  {ph:9}{n:>6}{c:>10.0f}{(f'{o:+.2f}' if o is not None else '-'):>7}{(f'{fu:+.4f}' if fu is not None else '-'):>8}")
     return "\n".join(out)
 
+def end_ms_of(day, end=None):
+    """--day is a UTC day (recordings and the nightly are keyed by UTC hour) and ends at 23:59:59 UTC; --end keeps its local-time
+    meaning (bot.whale's timeline prints KST). The old line applied the local zone twice (mktime -> gmtime -> mktime) and in KST
+    ended the day 18 h early — the nightly's phases table stopped at 06:00 UTC and lost most of the day it reported on."""
+    if end: return int(time.mktime(time.strptime(end, "%Y-%m-%d %H:%M")) * 1000)
+    if day: return calendar.timegm(time.strptime(day + " 235959", "%Y%m%d %H%M%S")) * 1000
+    return int(time.time() * 1000)
+
 def main():
     args = sys.argv[1:]; syms = args[0].split(",") if args and not args[0].startswith("--") else []
     day = end = since = None; hours = 96; files = []; i = 1 if syms else 0
@@ -125,8 +134,7 @@ def main():
         else:
             if args[i].endswith(".jsonl") or args[i].endswith(".gz"): files.append(args[i])
             i += 1
-    if day and not end: end = time.strftime("%Y-%m-%d %H:%M", time.gmtime(time.mktime(time.strptime(day + " 235959", "%Y%m%d %H%M%S"))))
-    end_ms = int((time.mktime(time.strptime(end, "%Y-%m-%d %H:%M")) if end else time.time()) * 1000)
+    end_ms = end_ms_of(day, end)
     since = since or "2026-08-29 18:18"
     for sym in syms:
         print(report(sym, end_ms, hours, since, files) + "\n")

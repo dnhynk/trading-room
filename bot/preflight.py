@@ -82,7 +82,9 @@ def main():
         lines = open(os.path.join(LOGS, "record.log"), encoding="utf-8").read().splitlines()
         last = [l for l in lines if " REC " in l][-1]; rep("INFO", f"recorder last stats: {last[:120]}")
     except Exception: rep("WARN", "recorder has no REC line yet")
-    r = subprocess.run([sys.executable, "-m", "unittest", "bot.test_signal", "bot.test_cycle", "bot.test_select", "bot.test_tools"], cwd=ROOT, capture_output=True, text=True)
+    # track B too (test_hunt / test_whale / test_phases): without them the selector and the evidence tables can break while preflight says PASS
+    mods = ["bot.test_signal", "bot.test_cycle", "bot.test_select", "bot.test_tools", "bot.test_hunt", "bot.test_whale", "bot.test_phases"]
+    r = subprocess.run([sys.executable, "-m", "unittest"] + mods, cwd=ROOT, capture_output=True, text=True)
     rep("PASS" if r.returncode == 0 else "FAIL", f"unit tests: {(r.stderr or r.stdout).strip().splitlines()[-1]}")
     fails = [m for lv, m in out if lv == "FAIL"]
     print("\nRESULT:", "FAIL" if fails else "PASS", f"({len(fails)} fail, {sum(1 for lv, _ in out if lv == 'WARN')} warn)")

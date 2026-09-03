@@ -49,7 +49,7 @@ def _close(lots, done, side, s, qty, px, fee, t, why, from_core=False):
     return orphan
 
 
-def build(since=LIVE, only=None, sym=None):
+def build(since=LIVE, only=None, sym=None, until=None):
     books, done, orphan, eng, cur = {}, [], 0.0, {}, None
     with open(LOG, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -63,7 +63,7 @@ def build(since=LIVE, only=None, sym=None):
             if ev == "START":                      # 체결 이벤트에 symbol 이 붙기 전(2026-09-01 17:30 이전) 장부의 귀속처.
                 cur = d.get("symbol") or cur       # START 는 전 기간 symbol 을 담고, 그때는 엔진이 하나였다.
                 continue
-            if ev not in ("FILL", "STOP_HIT") or t < since:
+            if ev not in ("FILL", "STOP_HIT") or t < since or (until and t > until):   # until: a report for a past day must not read the cycles that came after it
                 continue
             side = d.get("side") or "long"
             if only and side != only:

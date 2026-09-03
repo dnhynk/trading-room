@@ -66,11 +66,16 @@ def note(name, msg):
 
 def basket():
     """One engine per params["books"] key (or the single unpinned engine while there is no books)."""
-    kids = {}                                                # symbol (None = unpinned) -> dict(p, t0, backoff, next)
+    kids, idle = {}, None                                    # symbol (None = unpinned) -> dict(p, t0, backoff, next)
     while True:
         p = load_params()
         if p is None: time.sleep(2); continue                # unreadable params: keep the children we have, never guess a basket
-        want = [s for s in portfolio(p) if s] if p.get("books") else [None]
+        if p.get("books"): want = [s for s in portfolio(p) if s]
+        elif (p.get("hunt") or {}).get("on"):
+            want = []                                        # hunt owns `books` and has not opened one yet (or a hand edit emptied it): the unpinned engine would fall back
+            if idle != "hunt": note("cycle", "not starting the unpinned engine: hunt.on with an empty books"); idle = "hunt"   # to strat.symbol on the WHOLE wallet and the
+        else: want = [None]                                  # common (track A) sides — the opposite of this track's one coin, one side contract (RULES 트랙 B)
+        if want: idle = None
         for sym, k in list(kids.items()):
             if k["p"] is not None and k["p"].poll() is not None:
                 rc, dur = k["p"].returncode, time.time() - k["t0"]

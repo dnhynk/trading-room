@@ -116,6 +116,19 @@ class Ledger(unittest.TestCase):
         self.assertAlmostEqual(sum(l["qty"] for l in books[("AUSDT", "long")]), 35.0)              # ... and 35 of the core lot remain (LIFO would have eaten the unit first)
         self.assertEqual(geometry_of(done)["n"], 1); self.assertIsNone(geometry(since="2026-09-02 00:00", min_n=2))   # too few cycles: the constants stand
 
+class LedgerWindow(unittest.TestCase):
+    """bot.cycles.build(until=...): a report for a past day must not read the cycles that came after it (bot.phases' ledger attributed
+    every later cycle to the timeline's last phase)."""
+    LINES = Ledger.LINES
+
+    def setUp(self): Ledger.setUp(self)
+    def tearDown(self): Ledger.tearDown(self)
+
+    def test_until_cuts_the_events_at_the_report_boundary(self):
+        from bot import cycles
+        self.assertEqual(len(cycles.build(since="2026-09-02 00:00:00", sym="AUSDT")[0]), 1)                                  # the campaign closes at 10:20
+        self.assertEqual(cycles.build(since="2026-09-02 00:00:00", until="2026-09-02 10:10:00", sym="AUSDT")[0], [])         # cut before the closing trim: nothing completed
+
 class Slippage(unittest.TestCase):
     """bot.slip joins each fill to the mid its order saw at arrival (PLACE / TAKER .mid) by clientOid; cost is signed by the trade's direction."""
     LINES = [
