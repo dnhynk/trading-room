@@ -53,6 +53,10 @@ class Verdicts(unittest.TestCase):
         acts = apply(p, rows, v, {}, HUNT, st, 1000.0)
         self.assertEqual([a[:2] for a in acts], [("add", "A")])
         self.assertEqual(p["books"], {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "blowoff_atr": 8.0, "blowoff_frac": 0.5}})   # a long book carries the standing blow-off target
+        h2 = {**HUNT, "strat": {"cap_frac": 0.77, "unit_frac": 4.0, "lever": 20}}; p2 = dict(strat=dict(symbol="OLD"), books={}); st2 = dict(streak={"B:short": 2})
+        v2 = verdict([row("B", "markdown")], {}, h2, st2, 1000.0); apply(p2, [row("B", "markdown")], v2, {}, h2, st2, 1000.0)
+        self.assertEqual(p2["books"]["B"], {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "cap_frac": 0.77, "unit_frac": 4.0, "lever": 20})   # the track's risk profile rides on the book
+        self.assertNotIn("cap_frac", p2["strat"])                                                                                     # the common strat is untouched
         self.assertEqual((p["strat"]["symbol"], p["strat"]["side"], p["strat"]["sides"]), ("A", "long", ["long", "short"]))
         self.assertEqual(set(p["record"]), {"A", "B", "BTCUSDT"}); self.assertEqual(st["held"]["A"]["side"], "long")
 

@@ -36,6 +36,8 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             require_spot=1,      # a candidate must have a SPOT market (Bitget or Binance): a perp-only pump is a pure liquidation harvest that can vanish in an hour
             #                      (AKE, USELESS: no spot anywhere; 강고양이 picked STO over NOM for its spot liquidity; user approved 2026-09-03)
             blowoff_atr=8.0, blowoff_frac=0.5,   # written onto LONG hunt books: half the position rests at avg + 8 x ATR15 (strat.blowoff_*; first values)
+            strat={},            # the track's RISK PROFILE, written whole onto every hunt book (strat keys: unit_frac, cap_frac, daily_loss_frac, notional_frac,
+            #                      max_stops_day, lever, cap_min_atr ...). The common params.strat stays the basket's contract — the two tracks never share numbers
             min_vol=1e7,         # 24h quote volume floor (fills and footprint at this wallet)
             universe=1e7,        # the volume floor for pulling daily candles
             min_ratio=4.0,       # 24h volume over the median of the prior 7 UTC days: an episode (a fresh listing reads 99)
@@ -234,7 +236,7 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
             if _leave_coin(why): st.setdefault("cool", {})[s] = now + float(hunt["cooldown_h"]) * 3600
             st.get("held", {}).pop(s, None); acts.append(("drop", s, f"flat ({why or 'replaced'})"))
         sym, side = add; r = by[sym]
-        books[sym] = {"wallet_frac": 1.0, "sides": [side], "hunt": 1}
+        books[sym] = {"wallet_frac": 1.0, "sides": [side], "hunt": 1, **(hunt.get("strat") or {})}   # the track's risk profile rides on the book, not on params.strat
         if side == "long" and float(hunt.get("blowoff_atr") or 0) > 0:               # the standing blow-off target, long books only (the basket never sees it)
             books[sym].update(blowoff_atr=float(hunt["blowoff_atr"]), blowoff_frac=float(hunt.get("blowoff_frac") or 1.0))
         st.setdefault("held", {})[sym] = dict(peak=r.get("qv_shape") or r["qv"], climax=r.get("high48"), side=side, t=now); st["streak"] = {}

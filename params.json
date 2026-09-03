@@ -68,10 +68,10 @@
     "mode": "live",
     "adopt": false,
     "unit_qty": 70,
-    "unit_frac": 4.0,
-    "cap_frac": 0.77,
-    "daily_loss_frac": 1.0,
-    "notional_frac": 16.0,
+    "unit_frac": 1.5,
+    "cap_frac": 0.15,
+    "daily_loss_frac": 0.3,
+    "notional_frac": 6.5,
     "max_units": 4,
     "max_notional": 900,
     "step_add_pct": 0.5,
@@ -95,7 +95,7 @@
     "stop_buffer_atr": 0.3,
     "stop_trail": 1,
     "stop_cooldown_s": 300,
-    "max_stops_day": 6,
+    "max_stops_day": 3,
     "daily_loss_limit": 40,
     "buy_ttl_s": 90,
     "cancel_v": 1.0,
@@ -108,8 +108,8 @@
     "derisk_on_against": 0,
     "derisk_under_units": 0,
     "retrace_frac": 0.2,
-    "cap_min_atr": 30,
-    "lever": 20
+    "cap_min_atr": 0,
+    "lever": 10
   },
   "books": {
     "EGLDUSDT": {
@@ -119,7 +119,14 @@
       ],
       "hunt": 1,
       "blowoff_atr": 8.0,
-      "blowoff_frac": 0.5
+      "blowoff_frac": 0.5,
+      "unit_frac": 4.0,
+      "cap_frac": 0.77,
+      "daily_loss_frac": 1.0,
+      "notional_frac": 16.0,
+      "max_stops_day": 6,
+      "lever": 20,
+      "cap_min_atr": 30
     }
   },
   "sig": {
@@ -179,6 +186,15 @@
     "on": 1,
     "min_vol": 5000000.0,
     "universe": 5000000.0,
-    "max_atr": 2.0
+    "max_atr": 2.0,
+    "strat": {
+      "unit_frac": 4.0,
+      "cap_frac": 0.77,
+      "daily_loss_frac": 1.0,
+      "notional_frac": 16.0,
+      "max_stops_day": 6,
+      "lever": 20,
+      "cap_min_atr": 30
+    }
   }
 }
