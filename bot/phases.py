@@ -10,7 +10,7 @@ young Bitget listing):
                 markup), open-interest change %/h (a shakeout harvests longs -> OI falls on a green bar), funding. Evidence only, not
                 fed to `phase` until this table splits (NEXT 6.13; the script does not fit itself to one tape — CONCEPT).
 Nothing here trades or writes params; it reads logs/events.jsonl and the recordings."""
-import calendar, json, os, statistics, sys, time
+import bisect, calendar, json, os, statistics, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.cycles import build as build_cycles
 from bot.whale import timeline, load, WHALE
@@ -78,6 +78,17 @@ def flow_by_hour(files, sym):
                     b["oi1"] = oi; b["fund"] = float(r.get("fundingRate") or 0) * 100
     return hours
 
+def fund_from_flow(flow):
+    """fund_at(t_ms) for whale.timeline: the funding rate (%/8h) the recordings showed for that UTC hour, else the last one before it —
+    the ticker repeats it between pushes, so a quiet hour inherits. None when the recordings never carried one (then the squeeze and
+    fund_hot votes stay silent, as they did for every post-hoc row before this)."""
+    known = sorted(h for h, b in (flow or {}).items() if b.get("fund") is not None)
+    if not known: return None
+    def at(t_ms):
+        i = bisect.bisect_right(known, t_ms - t_ms % 3_600_000) - 1
+        return flow[known[i]]["fund"] if i >= 0 else None
+    return at
+
 def flow_table(tl, flow):
     """phase -> (hours with flow, mean CVD/h in base units, mean OI change %/h, mean funding %)."""
     acc = {}
@@ -93,12 +104,15 @@ def flow_table(tl, flow):
     return out
 
 def report(sym, end_ms, hours, since, files):
-    tl = timeline(sym, end_ms, hours, data=load(sym, end_ms, hours))
+    # the post-hoc walk reads as the live hunt did: funding from the recordings (squeeze / fund_hot) and a held state carried along the
+    # walk (dead). Without both, the ledger classified with a different classifier than the one that chose the side (audit 2026-09-03).
+    fl = flow_by_hour(files, sym) if files else {}
+    tl = timeline(sym, end_ms, hours, data=load(sym, end_ms, hours), fund_at=fund_from_flow(fl), track_held=True)
     for i, (t, ph, votes, f, nxt) in enumerate(tl):        # a next-1h column beside whale's next-4h (rows are one hour apart, step=1)
         f["next1h"] = round((tl[i + 1][3]["px"] / f["px"] - 1) * 100, 2) if i + 1 < len(tl) else None
     until = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_ms / 1000))   # events.jsonl stamps local time; the ledger stops where the phase timeline does
     done = [c for c in build_cycles(since=since, until=until, sym=sym)[0] if c["symbol"] == sym]
-    fwd = forward_table(tl); led = ledger_table(done, tl); flow = flow_table(tl, flow_by_hour(files, sym)) if files else {}
+    fwd = forward_table(tl); led = ledger_table(done, tl); flow = flow_table(tl, fl) if files else {}
     out = [f"### {sym}  ({len([r for r in tl])} hourly reads, {len(done)} live cycles; phase at each hour, Binance for a young listing)"]
     out.append(f"  {'phase':9}{'hours':>6}{'next1h':>8}{'next4h':>8} | forward move after the read")
     for ph in PHASES:

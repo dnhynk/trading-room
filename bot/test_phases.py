@@ -1,6 +1,6 @@
 """Invariants of the phase evidence tables (bot/phases.py).  python -m unittest bot.test_phases"""
 import unittest
-from bot.phases import phase_at, forward_table, ledger_table, flow_table, end_ms_of
+from bot.phases import phase_at, forward_table, ledger_table, flow_table, end_ms_of, fund_from_flow
 
 def tl_row(t_ms, ph, px, next1h=None, next4h=None):
     return (t_ms, ph, [], {"px": px, "next1h": next1h}, next4h)
@@ -50,6 +50,19 @@ def _ms(t):
 
 def cyc(t0, side, net, qty, entry):
     return dict(symbol="X", side=side, t0=t0, t1=t0, net=net, qty=qty, entry=entry, gross=net, fee=0.0)
+
+class Funding(unittest.TestCase):
+    """The post-hoc timeline takes its funding from the recordings, so squeeze / fund_hot can fire in the evidence table at all — with
+    ticker=None every historical row had fund None and those votes were unreachable (audit 2026-09-03)."""
+    def test_an_hour_carries_the_last_funding_at_or_before_it(self):
+        flow = {0: {"fund": 0.05}, 2 * H: {"fund": None}, 3 * H: {"fund": -0.12}}
+        at = fund_from_flow(flow)
+        self.assertEqual(at(H // 2), 0.05)                    # inside the recorded hour
+        self.assertEqual(at(2 * H + 5), 0.05)                 # an hour with no funding push inherits the last one
+        self.assertEqual(at(3 * H), -0.12)
+        self.assertIsNone(at(-1))                             # before anything was recorded
+        self.assertIsNone(fund_from_flow({}))                 # no recordings: the votes stay silent, as offline
+        self.assertIsNone(fund_from_flow({0: {"fund": None}}))
 
 class DayWindow(unittest.TestCase):
     """--day names a UTC day (the recordings and the nightly are keyed by UTC hour). The old code applied the local zone twice and in
