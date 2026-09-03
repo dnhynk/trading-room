@@ -2,7 +2,7 @@
 
 이 레포의 세션은 둘 중 하나다. 사용자가 말하지 않으면 감독 세션이다.
 - **감독 세션**(기본): `bot/BOOT.md`대로 부팅한다(메모리 → CONCEPT/RULES → preflight → Monitor). 매매의 95%는 결정론 엔진(`bot/cycle.py`)이 하고, 세션은 이상 이벤트 판단·종목/방향·params 한 줄 조정만 한다. 컨텍스트를 가볍게 유지한다 — 코드 수정은 하지 않고 사용자에게 수정 세션을 제안한다.
-- **수정 세션**(사용자가 "수정 세션" / "메커니즘 바꾸자"라고 열 때): 메모리 `cycle-harness-plan` → `bot/CONCEPT.md` → `bot/RULES.md` → `bot/NEXT.md`(미뤄둔 작업과 착수 조건)를 읽고 아래 "엔진 변경 절차"대로 일한다. 끝나면 메모리·RULES를 현재 계약으로 갱신하고 한 줄 보고 후 종료한다.
+- **수정 세션**(사용자가 "수정 세션" / "메커니즘 바꾸자"라고 열 때): 메모리 `cycle-harness-plan` → `bot/CONCEPT.md`(+ 트랙 B를 만지면 `bot/CONCEPT-B.md`) → `bot/RULES.md` → `bot/NEXT.md`(미뤄둔 작업과 착수 조건)를 읽고 아래 "엔진 변경 절차"대로 일한다. 끝나면 메모리·RULES를 현재 계약으로 갱신하고 한 줄 보고 후 종료한다.
 
 ## 두 세션이 동시에 있을 때
 - 감독 세션이 프로세스와 `params.json`의 주인이다. 수정 세션은 코드·문서·테스트만 만지고, 재기동은 포지션 0일 때 직접 하거나(재기동 전후를 보고) 감독 세션에 넘긴다. params 변경은 한 세션만, 사용자에게 말하고.
@@ -10,7 +10,7 @@
 - 메모리 갱신은 수정 세션이 한다. 감독 세션은 관측 사실(사고·수치)만 덧붙인다.
 
 ## 진실의 순서
-`bot/CONCEPT.md`(사용자의 자연어 전략, 최상위 계약) → `bot/RULES.md`(코드가 그것을 구현하는 방식) → `params.json`(숫자). 결정·감사·증거는 메모리 `cycle-harness-plan`. 기억이나 추측이 아니라 파일을 읽고 답한다.
+`bot/CONCEPT.md`(트랙 A = 순환매의 최상위 계약) · **`bot/CONCEPT-B.md`(트랙 B = 작전코인 세력대항, 순환매가 아니다 — 두 문서는 서로의 문장을 상속하지 않는다)** → `bot/RULES.md`(코드가 그것을 구현하는 방식) → `params.json`(숫자). 결정·감사·증거는 메모리 `cycle-harness-plan`. 기억이나 추측이 아니라 파일을 읽고 답한다.
 
 ## 계정 규칙 (Bitget 헤지 모드 + 크로스 마진(2026-08-30, 쌍검용; 주문은 계정의 marginMode를 따라간다), 사용자가 같은 계정을 가끔 손으로도 쓴다)
 - 엔진은 `params.json`의 (symbol, sides)를 배타 소유한다 — 2026-08-30 22:36부터 쌍검(`sides: ["long","short"]`, 사용자 승인). **종목은 바구니다**: `bot/select.py`(감시견 `select`)가 `books`를 `select.n`(4)종목 균등으로 유지한다 — 자격을 잃은 책은 `wind_down`으로 담기를 멈춰 flat이 되면 빼고(`BOOK_WIND_DOWN`/`BOOK_DROP`), 빈 슬롯은 점수 순으로 채운다(`BOOK_ADD`). **순위 때문에 들고 있는 종목을 갈아치우지는 않는다**(RULES scan·select 절). `params.json`의 `books`·`strat.symbol/side/sides`·`record`는 select가 쓰고, 나머지 키는 사람(감독 세션)이 쓴다. 엔진 주문은 clientOid `cycL-`/`cycS-`, 엔진 스탑은 그 방향의 pos_loss 플랜. 그 밖의 포지션·주문·플랜은 사용자 것이며 절대 건드리지 않는다.

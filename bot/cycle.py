@@ -297,7 +297,9 @@ class Book:
                                        trade_side="open" if role == "buy" else "close", post_only=True, client_oid=oid, sl=sl)
                 w["order_id"] = r.get("orderId"); w["preset_sl"] = sl
             except BitgetError as e:
-                self.ev("REJECT", role=role, px=px, qty=qty, err=str(e)[:160]); return
+                if str(e.code) == "22002": self.no_position(px, e); return   # "No position to close": the reduce-only side is empty, our lots are stale — resync,
+                self.ev("REJECT", role=role, px=px, qty=qty, err=str(e)[:160]); return   # do not re-submit (MUBARAK 2026-09-04 04:50-04:58: a hand close left the
+                #                                                                          standing blow-off order re-placed 205 times, ~1/s, for nine minutes)
             except Exception as e:                           # timeout etc.: the exchange may have accepted it — track it and settle by clientOid
                 w["unconfirmed"] = time.time(); self.ev("PLACE_UNCONFIRMED", role=role, px=px, qty=qty, oid=oid, err=f"{type(e).__name__}: {str(e)[:120]}")
         self.work[role] = w; self.replaced[role] = time.time()
@@ -314,7 +316,9 @@ class Book:
         try:
             await self.cy.rest(self.cy.b.market_order, self.symbol, "buy" if self.s > 0 else "sell", self.fq(qty), trade_side="close", client_oid=oid)
             self.ev("TAKER", qty=qty, oid=oid, mid=self.feat.mid)
-        except BitgetError as e: self.ev("REJECT", role="taker", qty=qty, err=str(e)[:160])
+        except BitgetError as e:
+            if str(e.code) == "22002": self.no_position(self.feat.mid, e)   # the same answer on the market path: nothing to close, so ask for a resync
+            else: self.ev("REJECT", role="taker", qty=qty, err=str(e)[:160])
         except Exception as e:                                # timeout: it may have executed — no second market order until its state is known (settle_orders)
             self.market_pending = dict(oid=oid, t=time.time(), qty=qty); self.ev("TAKER_UNCONFIRMED", qty=qty, oid=oid, err=f"{type(e).__name__}: {str(e)[:120]}")
 
@@ -406,10 +410,12 @@ class Book:
             self.stop_fail += 1; self.ev("STOP_SET_FAIL", px=px, n=self.stop_fail, err=f"{type(e).__name__}: {str(e)[:140]}")
 
     def no_position(self, px, e):
-        """43023 "Insufficient position": the exchange has no position on this side, so our lots are stale — there is nothing to
-        protect and this is not a stop failure. Ask for a resync (housekeeping, <=1s) and let check_mismatch adopt or clear them.
-        Counting it drove a 3/s REJECT + STOP_SET_FAIL + STOP_FAILED loop that market-closed nothing and HALTed the book until a
-        human wrote the STOP file (EGLD 2026-09-03 20:30, 577 of these in the ledger; audit NEXT 17e)."""
+        """The exchange says this side is empty — 43023 "Insufficient position" on a stop, 22002 "No position to close" on a
+        reduce-only order. Either way our lots are stale: there is nothing to protect and nothing to close, so this is neither a
+        stop failure nor an order rejection to retry. Ask for a resync (housekeeping, <=1s) and let check_mismatch adopt or clear
+        them. Retrying instead drove 1-3/s loops that achieved nothing: EGLD 2026-09-03 20:30 (STOP_SET_FAIL -> STOP_FAILED ->
+        HALT until a human wrote the STOP file; 577 in the ledger) and MUBARAK 2026-09-04 04:50-04:58 (a hand close left the
+        standing blow-off order re-submitted 205 times over nine minutes). Audit NEXT 17e."""
         self.cy.resync_due = True
         self.ev("STOP_NO_POSITION", px=px, our_qty=pos_stats(self.pos)[0], err=str(e)[:120])
 

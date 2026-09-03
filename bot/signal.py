@@ -77,7 +77,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
              derisk_on_against=True,                     # False: the AGAINST label (a trailing 90-min statistic, late by construction) only scales adds; de-risk keeps its timely triggers (latch, fresh break)
              derisk_under_units=True,                    # the weak-bounce cut also reaches a core that has units on top (booked against the core lot); False: only a lone core is cut (pre-2026-09-02)
-             cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_lock_atr=0.0, stop_trail_atr=0.0, stop_cooldown_s=300, max_stops_day=3,
+             cap_usdt=20, cap_per_unit=0, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_lock_atr=0.0, stop_trail_atr=0.0, stop_cooldown_s=300, max_stops_day=3,
              buy_ttl_s=90,                               # a real filter, not a backstop: rests beyond it pre-empt the next signal's lower fill (2026-08-30 tapes: 300/900/1800 s all worse even with the "left" cancel)
              cancel_v=1.0, tick=0.001, qstep=0.1)
 
@@ -887,7 +887,11 @@ class Strategy:
         stop = None
         if not qty: self.struct_stop = self.stop_px = self.best = self.blow_base = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
         else:
-            cap_px = avg - s * p["cap_usdt"] / max(qty, unit)   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
+            # cap_per_unit (트랙 B, CONCEPT-B "스탑의 두 층"): 0 = 한 캠페인의 돈 한도를 수량으로 나눈다 — 유닛이 늘수록 가격에서 조여지고,
+            # 그 조임이 캠페인당 스탑 확률을 사다리 깊이에 종속시켰다(1유닛 3.4% / 2유닛 9.5% / 3유닛 55%, 손익분기 ~10.5%).
+            # 1 = 한도를 유닛당으로 읽는다: 거리가 cap/unit 로 고정되어 깊어져도 조여지지 않고, 총 위험만 유닛 수에 비례한다
+            # (거래소 스탑은 방향당 하나뿐이므로 이것이 유닛별 손절의 총합 백스톱이다).
+            cap_px = avg - s * p["cap_usdt"] / (unit if p.get("cap_per_unit") else max(qty, unit))   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
             # ladder is ignored. Structure only when switched on, or riding a FAVOR one-way. A position without a premise takes the first
             # level that qualifies (a pivot confirms with a lag; an adopted or guarded exchange stop is not a premise and never blocks this).

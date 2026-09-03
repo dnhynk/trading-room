@@ -191,6 +191,23 @@ class Stops(unittest.TestCase):
         self.assertEqual(bk.stop["px"], 2.9); self.assertEqual(getattr(bk, "modify_fail", 0), 0)
         self.assertTrue(cy.resync_due); self.assertIn("STOP_NO_POSITION", kinds(cy)); self.assertNotIn("STOP_MODIFY_FAIL", kinds(cy))
 
+    def test_no_position_to_close_asks_for_a_resync_instead_of_re_submitting(self):
+        """22002 on the order path is the same fact as 43023 on the stop path: the side is empty. Re-submitting achieved nothing
+        for nine minutes after a hand close (MUBARAK 2026-09-04 04:50-04:58, 205 rejects)."""
+        cy, bk = book(lots=[[70, 3.0, "a"]]); cy.resync_due = False
+        def gone(*a, **kw): raise BitgetError("22002", "No position to close")
+        cy.b.limit_order = gone
+        asyncio.run(bk.place("trim", 3.1, 10.0))
+        self.assertTrue(cy.resync_due); self.assertIn("STOP_NO_POSITION", kinds(cy)); self.assertNotIn("REJECT", kinds(cy))
+        self.assertIsNone(bk.work["trim"])                      # nothing is tracked as working: the order never existed
+        cy2, bk2 = book(lots=[[70, 3.0, "a"]]); cy2.resync_due = False
+        cy2.b.market_order = gone
+        asyncio.run(bk2.taker(10.0))
+        self.assertTrue(cy2.resync_due); self.assertNotIn("REJECT", kinds(cy2))
+        cy3, bk3 = book(lots=[[70, 3.0, "a"]])                  # any other error still reports a plain rejection
+        cy3.b.limit_order = lambda *a, **kw: (_ for _ in ()).throw(BitgetError("40762", "order size exceeded"))
+        asyncio.run(bk3.place("trim", 3.1, 10.0)); self.assertIn("REJECT", kinds(cy3))
+
     def test_a_timed_out_stop_submission_is_looked_up_before_it_counts_as_a_failure(self):
         cy, bk = book(lots=[[70, 3.0, "a"]])
         def boom(*a, **kw): cy.b.plans.append(dict(planType="pos_loss", posSide="long", triggerPrice="2.900", orderId="P-late")); raise TimeoutError("read timed out")
