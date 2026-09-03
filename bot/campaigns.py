@@ -1,5 +1,5 @@
 """선정기 반사실 — logs/hunt-history.jsonl 의 모든 스캔에서 "그때 그 코인에 들어갔다면?"을 걸어가며 세는 읽기 전용 도구.
-    python -m bot.campaigns [--stop 10] [--hours 12] [--by off|ratio|run|atr|tw|age|spread|phase]
+    python -m bot.campaigns [--stop 10] [--hours 12] [--by off|ratio|run|atr|tw|age|spread|depth]
 
 각 스캔의 각 행에 **현재 live 설정으로 진입 자격을 다시 판정**하고(`flags_of`), 통과한 자리마다 캠페인을 열어 스캔마다
 `exit_flags` 를 건다. 진입가 대비 `--stop`% 역행이 먼저면 stop, 퇴출 조건이 먼저면 exit. p = stop / (stop + exit) 이고
@@ -24,8 +24,12 @@ BUCKETS = {"off": [(0, 3, "0-3%"), (3, 6, "3-6%"), (6, 12, "6-12%"), (12, 25, "1
            "atr": [(0.3, 0.5, "0.30-0.50"), (0.5, 0.8, "0.50-0.80"), (0.8, 1.3, "0.80-1.30"), (1.3, 9, ">=1.30")],
            "tw": [(15, 30, "15-30"), (30, 50, "30-50"), (50, 70, "50-70"), (70, 999, ">=70")],
            "age": [(0, 24, "<1d"), (24, 72, "1-3d"), (72, 168, "3-7d"), (168, 9e9, ">=7d")],
-           "spread": [(0, 5, "<5bp"), (5, 10, "5-10bp"), (10, 20, "10-20bp"), (20, 999, ">=20bp")]}
-KEY = {"off": "off", "ratio": "ratio", "run": "run", "atr": "atr_pct", "tw": "twoway24", "age": "age_h", "spread": "spread_bp"}
+           "spread": [(0, 5, "<5bp"), (5, 10, "5-10bp"), (10, 20, "10-20bp"), (20, 999, ">=20bp")],
+           # depth = 진입가가 직전 6스캔(약 1시간) 고점 아래로 몇 % 인가. 사용자 가설(2026-09-04): "평평한 구간의 아주 작은 눌림에
+           # 담아서 급락에 노출됐다" — 지금 표본으로는 순열 검정을 못 이겼다(NEXT 19). 에피소드가 쌓이면 이 열로 다시 묻는다.
+           "depth": [(0, 1, "<1%"), (1, 2, "1-2%"), (2, 3.5, "2-3.5%"), (3.5, 6, "3.5-6%"), (6, 999, ">=6%")]}
+KEY = {"off": "off", "ratio": "ratio", "run": "run", "atr": "atr_pct", "tw": "twoway24", "age": "age_h", "spread": "spread_bp",
+       "depth": "_depth"}
 
 def scans(path=None):
     out = []
@@ -71,7 +75,10 @@ def main():
         for sym, r in SC[i][1].items():
             if not DEEP(r) or not r.get("side") or flags_of(r, cfg): continue
             o = campaign(SC, sym, i, r["side"], cfg, stop, hours)
-            if o: rows.append(dict(sym=sym, kind=o[0], mv=o[1], h=o[2], fuel=o[3], why=o[4], **r))
+            if not o: continue
+            prior = [SC[k][1][sym]["px"] for k in range(max(0, i - 6), i + 1) if sym in SC[k][1] and SC[k][1][sym].get("px")]
+            d = (max(prior) / r["px"] - 1) * 100 if len(prior) > 2 else None       # 진입이 직전 ~1시간 고점 아래로 몇 % (long 기준)
+            rows.append(dict(sym=sym, kind=o[0], mv=o[1], h=o[2], fuel=o[3], why=o[4], _depth=d, **r))
     if not rows: print("no finished campaign in the horizon"); return
     st = sum(1 for r in rows if r["kind"] == "stop")
     print(f"\n진입 자리 중 결말이 관측된 것 {len(rows)} (stop -{stop:.0f}%, 지평 {hours:.0f}h)  코인 {len(set(r['sym'] for r in rows))}종")
