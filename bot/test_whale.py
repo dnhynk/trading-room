@@ -1,6 +1,6 @@
 """Invariants of the lifecycle phase reader (bot/whale.py).  python -m unittest bot.test_whale"""
 import unittest
-from bot.whale import footprints, phase, WHALE
+from bot.whale import footprints, phase, ignition, pre_qualifies, timeline, WHALE
 
 def bar(ts, o, c, wick=0.2, v=1000.0): return dict(ts=ts, o=o, h=max(o, c) + wick, l=min(o, c) - wick, c=c, v=v, qv=v)
 
@@ -106,6 +106,47 @@ class LegInProgress(unittest.TestCase):
     def test_the_price_is_the_last_15m_close(self):
         f = self._series(self._path((120, 8), (110, 6), (130, 8), (118, 6), (128, 6), (116, 6)), 130.0)
         self.assertEqual(f["px"], 116.0); self.assertAlmostEqual(f["off"], -(116.0 / f["high48"] - 1) * 100, 1)   # under the 48h high, from the 15m close
+
+class Audit0903(unittest.TestCase):
+    """2026-09-03 audit: the ratio baseline counts closed days like the scanner, an ignition under the ratio gate is found from hourly
+    candles alone, and a post-hoc timeline can say squeeze / dead only when it is given funding and a held state."""
+    def _days(self, qvs): return [dict(ts=1_700_000_000_000 + i * 86_400_000, o=100, h=100, l=100, c=100, v=1, qv=q) for i, q in enumerate(qvs)]
+
+    def test_the_ratio_baseline_is_the_last_seven_closed_days_and_three_closed_days_are_a_baseline(self):
+        ts = 1_700_000_000_000
+        hours = [bar(ts + i * 3_600_000, 100.0, 100.0, v=100.0) for i in range(60)]
+        bars15 = [bar(ts + i * 900_000, 100.0, 100.0, wick=0.1) for i in range(30)]
+        f = footprints(hours, bars15, self._days([1000.0] * 3), dict(qv=50_000.0, fund=None))
+        self.assertFalse(f["new"]); self.assertEqual(f["ratio"], 50.0)                                   # three closed days = a baseline (the scanner's rule); [-8:-1] read it as a listing
+        f = footprints(hours, bars15, self._days([1000.0] * 2), dict(qv=50_000.0, fund=None))
+        self.assertTrue(f["new"]); self.assertEqual(f["ratio"], 99.0)
+
+    def test_the_hourly_pre_read_finds_an_ignition_under_the_ratio_gate(self):
+        ts = 1_700_000_000_000
+        quiet = [bar(ts + i * 3_600_000, 100.0, 100.0, v=100.0) for i in range(60)]
+        burst = [bar(ts + (60 + i) * 3_600_000, 100.0 + 4 * i, 104.0 + 4 * i, v=2000.0) for i in range(3)]   # three closed hours of 20x volume into new highs
+        days = self._days([100_000.0] * 10)
+        f = footprints(quiet + burst, [], days, dict(qv=300_000.0, fund=None), None)                          # hourly only (bars15 = []): ratio 3x, under the 4x gate
+        self.assertLess(f["ratio"], 4.0); self.assertGreaterEqual(f["ign"], 5.0); self.assertGreater(f["up3"], 0); self.assertLessEqual(f["off_close"], 0.0)
+        self.assertTrue(ignition(f)); self.assertTrue(pre_qualifies(f)); self.assertEqual(phase(f)[0], "markup")
+        f2 = footprints(quiet + [bar(ts + 60 * 3_600_000, 100.0, 100.0, v=100.0)], [], days, dict(qv=300_000.0, fund=None), None)
+        self.assertFalse(pre_qualifies(f2)); self.assertNotEqual(phase(f2)[0], "markup")
+
+    def test_a_post_hoc_timeline_reads_squeeze_and_dead_only_when_given_funding_and_a_held_state(self):
+        ts = 1_700_000_000_000; hours = []; c = 100.0
+        for i in range(72): hours.append(bar(ts + i * 3_600_000, c, c, v=100.0))
+        for i in range(24): o = c; c = 100 + 50 * (i + 1) / 24; hours.append(bar(ts + (72 + i) * 3_600_000, o, c, v=100.0 + 40 * i))   # the pump: volume grows into the high
+        for i in range(30): o = c; c = c * 0.985; hours.append(bar(ts + (96 + i) * 3_600_000, o, c, v=20.0))                          # the markdown: -1.5%/h on dying volume
+        bars15 = []
+        for h in hours[60:]:
+            for j in range(4): bars15.append(bar(h["ts"] + j * 900_000, h["o"] + (h["c"] - h["o"]) * j / 4, h["o"] + (h["c"] - h["o"]) * (j + 1) / 4, wick=0.05, v=h["v"] / 4))
+        data = dict(h=hours, m15=bars15, d=self._days([2400.0] * 10), src="test"); end_ms = ts + len(hours) * 3_600_000
+        plain = [ph for _, ph, _, _, _ in timeline("X", end_ms, hours=40, data=data)]
+        self.assertIn("markdown", plain); self.assertNotIn("squeeze", plain); self.assertNotIn("dead", plain)   # offline: no funding, no held state
+        cold = [ph for _, ph, _, _, _ in timeline("X", end_ms, hours=40, data=data, fund_at=lambda t: -0.3)]
+        self.assertIn("squeeze", cold); self.assertNotIn("markdown", cold)                                         # funding fed in: every markdown row is a squeeze
+        held = [ph for _, ph, _, _, _ in timeline("X", end_ms, hours=40, data=data, track_held=True)]
+        self.assertEqual(held[-1], "dead"); self.assertNotEqual(held[0], "dead")                                   # the held state carries the peak volume: the collapse reads dead
 
 if __name__ == "__main__":
     unittest.main()

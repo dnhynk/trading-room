@@ -113,10 +113,34 @@ class Verdicts(unittest.TestCase):
         st = dict(held={"A": dict(side="short", exit="quiet18/40")}, streak={"A:long": 1})
         p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1, "exit": 1}})
         rows = [row("A", "markup", hint15="long", off=2.0)]                                   # the quiet coin now reads markup: a long candidate on paper
-        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["add"], ("A", "long"))
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertIsNone(v["top"]); self.assertIsNone(v["add"])   # a cooling coin is no candidate, on either side
         acts = apply(p, rows, v, {"A": True}, HUNT, st, 1000.0)
         self.assertEqual(acts, []); self.assertEqual(list(p["books"]), ["A"]); self.assertEqual(p["books"]["A"]["sides"], ["short"])   # stays as the flat placeholder
         self.assertNotIn("A", st.get("cool", {}))                                              # not dropped, so not cooled yet either
+
+    def test_a_quiet_leaver_does_not_hold_the_top_slot_so_the_next_coin_confirms_and_the_drop_happens(self):
+        """Deadlock (audit 2026-09-03): the streak is counted for the top candidate only, so a quiet leaver reading the other side with the
+        best churn froze the streak, its own drop / cooldown and the second-ranked coin, until its read changed."""
+        st = dict(held={"A": dict(side="short", exit="quiet18/40")}, streak={})
+        p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1, "exit": 1}})
+        rows = [row("A", "markup", hint15="long", off=2.0, twoway24=60.0), row("B", "markdown", twoway24=30.0)]   # the quiet coin has the best churn on paper
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["top"], ("B", "short")); self.assertEqual(st["streak"], {"B:short": 1})
+        self.assertEqual(apply(p, rows, v, {"A": True}, HUNT, st, 1000.0), [])                                        # B not confirmed yet: A stays as the flat placeholder
+        v = verdict(rows, p["books"], HUNT, st, 2000.0); self.assertEqual(v["add"], ("B", "short"))
+        acts = apply(p, rows, v, {"A": True}, HUNT, st, 2000.0)
+        self.assertEqual([a[:2] for a in acts], [("drop", "A"), ("add", "B")]); self.assertGreater(st["cool"]["A"], 2000.0 + 23 * 3600)
+
+    def test_the_risk_profile_is_synced_onto_an_existing_hunt_book_and_stale_keys_are_stripped(self):
+        """Audit 2026-09-03: hunt.strat was copied only when a book was created, so the 20:08 normalization reached the live EGLD book by hand."""
+        h2 = {**HUNT, "strat": {"cap_frac": 0.4, "unit_frac": 2.0, "max_units": 3}}
+        st = dict(held={"A": dict(side="long", peak=4e7, climax=150.2)})
+        p = dict(strat=dict(symbol="A", side="long"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "blowoff_atr": 8.0, "blowoff_frac": 0.5,
+                                                                    "cap_frac": 0.77, "unit_frac": 4.0, "max_units": 4, "max_stops_day": 6}})
+        rows = [row("A", "markup", hint15="long", off=2.0)]
+        v = verdict(rows, p["books"], h2, st, 1000.0); acts = apply(p, rows, v, {"A": False}, h2, st, 1000.0)
+        self.assertEqual([a[:2] for a in acts], [("profile", "A")]); self.assertIn("-max_stops_day", acts[0][2])
+        self.assertEqual(p["books"]["A"], {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "blowoff_atr": 8.0, "blowoff_frac": 0.5, "cap_frac": 0.4, "unit_frac": 2.0, "max_units": 3})
+        self.assertEqual(apply(p, rows, verdict(rows, p["books"], h2, st, 2000.0), {"A": False}, h2, st, 2000.0), [])   # in sync: nothing to report
 
     def test_a_phase_flip_exit_is_undone_when_the_read_comes_back_before_flat(self):
         st = dict(held={"A": dict(side="long", exit="phase:climax", peak=4e7, climax=150.2)})

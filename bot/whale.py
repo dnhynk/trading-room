@@ -96,7 +96,9 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
         prior = [x["qv"] for x in hours[-51:-3]]; med3 = statistics.median([sum(prior[j:j + 3]) for j in range(0, len(prior) - 2, 3)]) or 1e-9
         ign = round(sum(x["qv"] for x in hours[-3:]) / med3, 1); up3 = round(_pct(hours[-1]["c"], hours[-3]["o"]), 1)
     qv = float(ticker["qv"]) if ticker and ticker.get("qv") else sum(x["qv"] for x in h24)
-    prior = [d["qv"] for d in days[-8:-1]]; base = statistics.median(prior) if len(prior) >= 3 else 0.0
+    prior = [d["qv"] for d in days[-7:]]; base = statistics.median(prior) if len(prior) >= 3 else 0.0   # the 7 CLOSED days before now — every caller passes closed days
+    #                                                                                                       (the scanner's [:-1], the walk's _closed); [-8:-1] dropped one more, read 3 closed
+    #                                                                                                       days as a fresh listing and disagreed with the scanner's own 7-day gate (audit 2026-09-03)
     new = len(prior) < 3                                         # a fresh listing has no baseline: its whole life is the episode (ratio 99)
     peak = max(float((held or {}).get("peak") or 0.0), qv)
     return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), off_close=round(off_close, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
@@ -104,13 +106,22 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
                 ratio=99.0 if new else round(qv / base, 1), new=new, qv=qv, fund=(ticker or {}).get("fund"), dead=bool(held) and qv < p["dead_ratio"] * peak,
                 atr15_pct=round(atr15 / px * 100, 2) if atr15 else None, ign=ign, up3=up3)
 
+def ignition(f, p=WHALE):
+    """The last 3 closed hours' volume >= ign_x x the prior 48h's 3-hour median, rising, at or just under the highest close."""
+    return (f.get("ign") or 0) >= p["ign_x"] and (f.get("up3") or 0) > 0 and f.get("off_close", f["off"]) <= p["markup_tol"]
+
+def pre_qualifies(f, p=WHALE):
+    """From HOURLY candles alone (footprints with bars15 = []): a coin under the scanner's 24h-ratio gate that the reader could still call
+    markup — an ignition, or a run >= big_run (an episode whatever the baseline). hunt reads the full shape for these (audit 2026-09-03:
+    the ratio gate sat in front of footprints, so the ignition / big_run entries — SIREN at 0.8x — were dead code live)."""
+    return ignition(f, p) or f["run"] >= p["big_run"]
+
 def phase(f, p=WHALE):
     """(phase, votes). Ordered: dead > quiet > markdown/squeeze (the top is in and the structure is down) > climax (votes near the
     high) > markup (episode, run, near the high, structure not down) > unknown."""
     if f["dead"]: return "dead", ["dead"]
     if f["ratio"] < p["quiet_ratio"] and f["twoway24"] < p["twoway_dead"]: return "quiet", [f"ratio{f['ratio']}", f"twoway{f['twoway24']}"]
-    near0 = f.get("off_close", f["off"])
-    if (f.get("ign") or 0) >= p["ign_x"] and (f.get("up3") or 0) > 0 and near0 <= p["markup_tol"]:
+    if ignition(f, p):
         return "markup", [f"ignite{f['ign']}x", f"up3{f['up3']:+}"]           # a volume explosion into a fresh close-high starts a leg: the old leg's votes are moot
     down = f["off"] >= p["down_off"] and (f["hint15"] == "short" or bool(f.get("leg_down")))   # the structure is down: confirmed, or by the leg in progress
     far = (f["off"] >= p["far_off"] and f.get("off_close", 0.0) >= p["far_close"] and f["hint15"] is None
@@ -177,15 +188,19 @@ def load(sym, end_ms, hours=48, b=None, src=None):
             d = dict(h=bh, m15=binance_candles(sym, "15m", min(1500, 200 + 4 * hours + 8), end_ms), d=binance_candles(sym, "1d", 20, end_ms), src="binance")
     return d
 
-def timeline(sym, end_ms, hours=48, step=1, data=None, held=None, p=WHALE):
-    """[(t, phase, votes, footprints, next4h %)] walking forward from end - hours to end, each row from candles closed before t."""
+def timeline(sym, end_ms, hours=48, step=1, data=None, held=None, p=WHALE, fund_at=None, track_held=False):
+    """[(t, phase, votes, footprints, next4h %)] walking forward from end - hours to end, each row from candles closed before t.
+    fund_at(t_ms) -> funding %/8h (or None) feeds the squeeze / fund_hot votes (the recordings' ticker; None = offline, those votes stay
+    silent); track_held=True carries a held state along the walk (the peak 24h volume seen so far) so `dead` reads as it would for a
+    held coin — without both, a post-hoc timeline could never say squeeze or dead (audit 2026-09-03; bot.phases fills them)."""
     d = data or load(sym, end_ms, hours)
-    out = []
+    out = []; hs = dict(held) if held else ({} if track_held else None)
     for k in range(hours, -1, -step):
         t = end_ms - k * 3_600_000
         h = _closed(d["h"], t, 3_600_000); m = _closed(d["m15"], t, 900_000); dd = _closed(d["d"], t, 86_400_000)
         if len(h) < 6 or len(m) < 20: continue                    # a listing a few hours old still reads (48h windows just shorten)
-        f = footprints(h, m, dd, None, held, p); ph, votes = phase(f, p)
+        f = footprints(h, m, dd, dict(qv=None, fund=fund_at(t)) if fund_at else None, hs, p); ph, votes = phase(f, p)
+        if hs is not None: hs["peak"] = max(hs.get("peak") or 0.0, f["qv"])
         fut = [x for x in d["h"] if t <= x["ts"] < t + 4 * 3_600_000]
         nxt = _pct(fut[-1]["c"], h[-1]["c"]) if fut else None
         out.append((t, ph, votes, f, nxt))

@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import Bitget
 from bot.scan import PRODUCT
 from bot.signal import wilder_atr
-from bot.whale import footprints, phase as whale_phase, longer_history, WHALE
+from bot.whale import footprints, phase as whale_phase, longer_history, pre_qualifies, WHALE
 from bot.select import log, read_json, write_json, ev, flats_now, recent_engines, CHANNELS
 from bot.ws import load_params, PARAMS, load_states
 
@@ -49,6 +49,7 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             exit_twoway=8.0,     # wind down when the last-24h two-way path is under this
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
+BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
 
 def _pct(a, b): return (a / b - 1) * 100 if b else 0.0
 
@@ -138,7 +139,16 @@ def scan(hunt, held=(), st=None, b=None, log=log):
                          lever_max=int(float(contracts[s].get("maxLever") or 0)), min_notional=float(contracts[s].get("minTradeNum") or 0) * px,
                          tick_pct=round(float(contracts[s].get("priceEndStep") or 1) * 10 ** -int(contracts[s].get("pricePlace") or 0) / px * 100, 4)))
     deep = [r for r in rows if r["ratio"] >= hunt["min_ratio"] or r["symbol"] in held]
-    log(f"hunt: {len(deep)} with an episode (ratio >= {hunt['min_ratio']}x or new) or held; shapes ...")
+    for r in [r for r in rows if r not in deep]:               # under the ratio gate: one 1H call each for the hourly footprint — an ignition or a big run is an
+        s = r["symbol"]                                        # episode the 24h ratio cannot see (SIREN 0.8x at its ignition; audit 2026-09-03); the rest keep ign / run for the tables
+        try:
+            hours = b.candles(s, "1H", limit=120)[:-1]
+            if len(hours) < int(hunt["min_hours"]): continue
+            f = footprints(hours, [], dailies[s], dict(qv=r["qv"], fund=r["fund"]), None)
+        except Exception as e: log(f"  {s}: 1H failed {type(e).__name__}: {str(e)[:60]}"); continue
+        r.update({k: f[k] for k in ("high48", "run", "off", "off_close", "age_h", "twoway24", "ign", "up3")})
+        if pre_qualifies(f): r["pre"] = "big_run" if f["run"] >= WHALE["big_run"] else "ignition"; deep.append(r)
+    log(f"hunt: {len(deep)} with an episode (ratio >= {hunt['min_ratio']}x, new, an ignition or a big run) or held; shapes ...")
     for r in deep:
         s = r["symbol"]
         try:
@@ -150,7 +160,9 @@ def scan(hunt, held=(), st=None, b=None, log=log):
             log(f"  {s}: shape failed {type(e).__name__}: {str(e)[:60]}"); r.update(phase="unread", votes=[], side=None, twoway24=None, run=None, off=None, high48=None, atr_pct=None, hint15=None, dead=False)
         r["flags"] = flags_of(r, hunt)
     for r in rows:
-        if "flags" not in r: r.update(phase="shallow", votes=[], side=None, twoway24=None, run=None, off=None, high48=None, atr_pct=None, hint15=None, dead=False, flags=[f"ratio{r['ratio']:.1f}x"])
+        if "flags" not in r:
+            for k in ("twoway24", "run", "off", "high48"): r.setdefault(k, None)      # the hourly pre-read's numbers stay for the evidence tables
+            r.update(phase="shallow", votes=[], side=None, atr_pct=None, hint15=None, dead=False, flags=[f"ratio{r['ratio']:.1f}x"])
     ok = sorted([r for r in rows if not r["flags"]], key=lambda r: -(r["twoway24"] or 0))
     rest = sorted([r for r in rows if r["flags"]], key=lambda r: -r["ratio"])
     log(f"hunt: {len(ok)} eligible, {len(rest)} flagged, {time.time() - t0:.0f}s")
@@ -191,9 +203,11 @@ def verdict(rows, books, hunt, st, now):
             st.setdefault("xstreak", {})[cur] = st.get("xstreak", {}).get(cur, 0) + 1 if xf else 0
             if xf and st["xstreak"][cur] >= int(hunt["exit_confirm"]): wind = (cur, ",".join(xf)); hs["exit"] = wind[1]
     cool = st.get("cool") or {}
-    def free(r):   # not held, or the leaving book itself on the OTHER side (the lifecycle flip: a long wound down at the climax comes back short)
-        bk = books.get(r["symbol"])
-        return bk is None or (bk.get("wind_down") and r["side"] != (bk.get("sides") or [None])[0])
+    def free(r):   # not held, or the leaving book itself on the OTHER side (the lifecycle flip: a long wound down at the climax comes back short) —
+        bk = books.get(r["symbol"])   # unless it left for quiet / dead: that coin is cooling, and holding the top slot would freeze the streak, the drop and the cooldown (deadlock, audit 2026-09-03)
+        if bk is None: return True
+        if not bk.get("wind_down") or _leave_coin((st.get("held", {}).get(r["symbol"]) or {}).get("exit", "")): return False
+        return r["side"] != (bk.get("sides") or [None])[0]
     cands = [(r["symbol"], r["side"]) for r in rows if not r["flags"] and r.get("side") and free(r) and cool.get(r["symbol"], 0) <= now]
     top = cands[0] if cands else None
     key = f"{top[0]}:{top[1]}" if top else None
@@ -241,6 +255,14 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
             books[sym].update(blowoff_atr=float(hunt["blowoff_atr"]), blowoff_frac=float(hunt.get("blowoff_frac") or 1.0))
         st.setdefault("held", {})[sym] = dict(peak=r.get("qv_shape") or r["qv"], climax=r.get("high48"), side=side, t=now); st["streak"] = {}
         acts.append(("add", sym, f"{side} phase {r.get('phase')} votes {' '.join(r.get('votes') or [])} ratio {r['ratio']}x run {r.get('run')}% off {r.get('off')}% twoway {r.get('twoway24')} atr {r.get('atr_pct')} fund {r['fund']}"))
+    prof = hunt.get("strat") or {}                                          # the risk profile rides on EVERY hunt book, not only on the one being created: a profile edit
+    for s, bk in books.items():                                             # reaches the live book on the next scan (the engine hot-reloads; reductions apply at once — RULES
+        if not bk.get("hunt"): continue                                     # 사이징). Audit 2026-09-03: the 20:08 normalization reached the EGLD book only by hand
+        diff = {k: v for k, v in prof.items() if bk.get(k) != v}; stale = [k for k in bk if k not in BOOK_KEYS and k not in prof]
+        if diff or stale:
+            bk.update(diff)
+            for k in stale: bk.pop(k)
+            acts.append(("profile", s, " ".join([f"{k}={v}" for k, v in diff.items()] + [f"-{k}" for k in stale])))
     if books: p["books"] = books
     held = list(books)
     if held and sp.get("symbol") not in held: sp["symbol"] = held[0]
@@ -250,7 +272,7 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
     rec["BTCUSDT"] = ["candle1m"]; p["record"] = rec
     return acts
 
-ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP", "resume": "HUNT_RESUME"}
+ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP", "resume": "HUNT_RESUME", "profile": "HUNT_PROFILE"}
 
 def pid_alive(path):
     try: pid = int(open(path).read().strip())
