@@ -44,7 +44,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              step_add_max_pct=0.0,   # > 0: the ladder step never exceeds this % (post-crash ATR15 inflation widened it to 1.24% for hours; NEXT 1); 0 = no cap
              lever=10,               # the leverage the engine sets on its symbol at start / when flat (live; 0 = leave the exchange's setting). Not a size: the margin locked per unit, so the margin gate brakes every book alike
              margin_mode="crossed",  # the margin mode every book must run in (the exchange keeps it per symbol: HYPE/ZEC joined the basket ISOLATED, HYPE at 20x, and the liquidation guard became their stop — audit 7). Set when flat, alerted while positioned; None = leave it
-             pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_rest_pct=0,
+             pop_min_pct=0.4, unit_min_pct=0.15, full_exit_pct=3.0, trim_taker_after_s=10, trim_taker_slip_pct=0.1, trim_chase_ticks=0, trim_rest_pct=0,
              trim_retrace_atr=0.5,   # a top confirmed by retrace: peak above the trim gate, then back by >= this x ATR AND >= retrace_frac of the bounce
              retrace_frac=0.33,      # ... (peak - trough since the last fill) -> pull at once. The ATR term alone is a wiggle on a quiet tape (0.5 x ATR1m =
                                      # 0.02-0.06% on the 2026-09-02 basket) and made the retrace the main exit (63% of pulls) at the gate: a top has to give
@@ -871,7 +871,22 @@ class Strategy:
                     ev.append(("PULL_DROP", dict(dev_lot=round(dev_lot, 2)))); self.pull = None
                 elif t - self.pull["t"] >= p["trim_taker_after_s"] or s * (self.pull["px0"] - mid) / mid * 100 >= p["trim_taker_slip_pct"]:
                     trim = (round_tick(touch_in, tick), round(qty - self.pull["target"], 9), "taker", self.pull.get("lot"))   # waited long enough, or the stall is already turning: take it
-                else: trim = (round_tick(touch_out, tick), round(qty - self.pull["target"], 9), "maker", self.pull.get("lot"))
+                else:
+                    # trim_chase_ticks (2026-09-04): the maker pull concedes up to this many ticks while the taker clock runs, one tick
+                    # per taker_after/(ticks+1) seconds, so the last tick is given just before the conversion. Measured reason: the pulls
+                    # that converted were NOT far from the touch (0.6-2 bp, 5-16 ticks) but stuck behind the queue (2-40 ahead), and a new
+                    # price level is a fresh queue. The trade is one tick against the maker/taker execution gap (measured 12.3 bp on
+                    # MUBARAK: maker trim -5.25 vs taker +7.01), and a tick is worth 0.05 to 1.01 of the spread depending on the contract
+                    # — on ARB one tick IS the spread, so this must never cross: it stays one tick behind the taker side. 0 = off.
+                    px = touch_out
+                    ct = int(p.get("trim_chase_ticks") or 0)
+                    if ct > 0 and p["trim_taker_after_s"] > 0 and tick > 0:
+                        k = min(ct, int((t - self.pull["t"]) / (p["trim_taker_after_s"] / (ct + 1))))
+                        k = min(k, max(0, int(s * (touch_out - touch_in) / tick) - 1))   # the SPREAD decides how far a chase can go: at least one
+                        if k: px = touch_out - s * k * tick                              # tick of it must remain, so a contract whose tick is the
+                        #                                                                  whole spread (ARB: 1.01x) never chases at all and one
+                        #                                                                  whose tick is 5% of it (UAI) may walk most of the way
+                    trim = (round_tick(px, tick), round(qty - self.pull["target"], 9), "maker", self.pull.get("lot"))
             if trim is None and p["trim_rest_pct"] > 0 and min(lot_qty, sellable) > 0:
                 px = avg * (1 + s * p["trim_rest_pct"] / 100)
                 px = max(px, touch_out) if s > 0 else min(px, touch_out)

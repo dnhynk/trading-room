@@ -205,6 +205,35 @@ class MarketTape(unittest.TestCase):
         self.assertIsNone(hunt.market(types.SimpleNamespace(candles=boom), log=lambda *a: None))
         self.assertIsNone(hunt.market(self.stub([100.0, 100.0]), log=lambda *a: None))   # too few closed 1H bars to read
 
+class SecondOpinion(unittest.TestCase):
+    """AI 판독은 국면과 방향만 대체한다. 자격(통행료 veto)은 못 뒤집고, 실패하면 결정론이 그대로 선다."""
+    def run_with(self, out, rc=0):
+        real = hunt.subprocess.run
+        def fake(cmd, **kw):
+            i = cmd.index("-o"); open(cmd[i + 1], "w", encoding="utf-8").write(out)
+            return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
+        hunt.subprocess.run = fake
+        try: return hunt.ai_read([row("A", "unknown"), row("B", "markdown")], {**HUNT, "ai_read": 1}, log=lambda *a: None)
+        finally: hunt.subprocess.run = real
+
+    def test_the_reading_is_taken_only_for_known_symbols_and_known_phases(self):
+        r = self.run_with('{"reads":[{"symbol":"A","phase":"distribution","conf":88,"why":"fat wicks"},'
+                          '{"symbol":"B","phase":"nonsense"},{"symbol":"ZZZ","phase":"markup"}]}')
+        self.assertEqual(list(r), ["A"]); self.assertEqual(r["A"][0], "distribution")
+
+    def test_any_failure_keeps_the_deterministic_read(self):
+        self.assertEqual(self.run_with("not json at all"), {})          # 형식 오류
+        real = hunt.subprocess.run
+        def boom(*a, **kw): raise TimeoutError("codex timed out")
+        hunt.subprocess.run = boom
+        try: self.assertEqual(hunt.ai_read([row("A")], {**HUNT, "ai_read": 1}, log=lambda *a: None), {})
+        finally: hunt.subprocess.run = real
+
+    def test_the_ai_cannot_overturn_a_toll_veto(self):
+        thin = row("A", "unknown", qv=1e6)                              # 거래대금 바닥 아래
+        thin.update(phase="markup", side="long")                        # AI 가 markup 이라 해도
+        self.assertTrue([f for f in flags_of(thin, HUNT) if f.startswith("vol")])   # vol veto 는 그대로 선다
+
 class TheOtherWriter(unittest.TestCase):
     """pid_alive gates the only write of params.books, so both of its errors must be the safe one."""
     def setUp(self):

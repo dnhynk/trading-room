@@ -63,6 +63,10 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             #                      hour (median 1.32%/h, n=136) than the 8-15 rows it kept (0.89%/h, n=231), and twoway24 is not monotone
             #                      anywhere. The two questions it was standing in for are covered better: "the tape is gone" by vol/dead,
             #                      "the coin stopped moving" by exit_atr_min. > 0 turns it back on.
+            ai_read=0,           # 1: 국면을 AI 세션(`codex exec`)이 읽고 결정론 판독(`whale.phase`)은 phase_det/side_det 로 그림자가 된다
+            #                      (사용자 결정 2026-09-04). 자격 게이트는 AI 가 못 건드린다 — 대체하는 것은 국면과 방향뿐이다.
+            #                      실패하면 결정론으로 폴백한다. 판정은 며칠 뒤 `bot.campaigns`: 불일치한 행에서 밀려난 쪽이 옳았나.
+            ai_cmd="codex", ai_model="", ai_effort="", ai_timeout_s=240,
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
 BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
@@ -149,6 +153,63 @@ def market(b, sym="BTCUSDT", log=log):
                 h4=round(_pct(px, hours[-4]["c"]), 2), h24=round(_pct(px, hours[-24]["c"]), 2) if len(hours) >= 24 else None,
                 dd4=round(_pct(px, max(x["h"] for x in hours[-4:])), 2))
 
+AI_PHASES = ("markup", "distribution", "climax", "markdown", "squeeze", "dead", "quiet", "unknown")
+AI_PROMPT = """You read pump-coin lifecycle phases for a counter-operator trading bot. Below is one scan: every contract whose shape
+was read, as the numeric footprint the bot extracts. Judge each coin's CURRENT PHASE the way an experienced chart reader would.
+
+run = % rise of the episode, off = % under the 48h high, off_close = % under the highest CLOSE, age_h = hours since the episode
+began, twoway24/2h/1h = two-way path (churn), ratio = 24h volume / its own 7-day median (99 = fresh listing), ign = last 3h volume
+vs the prior 48h median 3h, up3 = 3h price change, atr_pct/atr15_pct = ATR(1m)/ATR(15m) as % of price, upwick = upper-wick share of
+the top bar, lower_high = the last swing high failed to exceed the previous one, vmax_at_high = the episode's biggest-volume bar
+sits at the high, vmax_share = that bar's share, post_red = red bars after it, exhaustion = rising price on shrinking bodies and dry
+volume, leg_down = an unconfirmed lower-low leg, hint15 = 15m structure, fund = funding %/8h, qv = 24h quote volume, dead = volume
+collapsed, phase/votes = THE BOT'S OWN READING, shown so that you can disagree.
+
+Phases: markup (the operator is still pushing, new money, near the highs) / distribution (the top is being sold INTO strength:
+price flat or grinding up while bodies shrink, upper wicks fatten, highs stop rising) / climax (the blow-off top just printed) /
+markdown (the operator is out, price is being marked down) / squeeze (late shorts are the next meal) / dead / quiet / unknown.
+
+The bot's reader has NO distribution phase at all and falls back to `unknown` whenever its 15m zigzag finds no pivot, which is 36%
+of its readings. That gap is the reason you are here. Do not copy `phase`; read the footprint yourself.
+
+Answer with ONE line of JSON and nothing else:
+{"reads":[{"symbol":"X","phase":"<one of the phases>","conf":0-100,"why":"<=12 words"}]}
+Every symbol below must appear exactly once."""
+
+def ai_read(rows, hunt, log=log):
+    """국면을 AI 세션이 다시 읽는다(`codex exec`, 사용자 결정 2026-09-04). 결정론 판독은 `phase_det`/`side_det` 로 남아
+    그림자가 된다 — 매 스캔 둘 다 `hunt-history` 에 기록되므로 나중에 "밀려난 쪽이 옳았나" 를 전방 가격으로 계산할 수 있다
+    (그 계산이 `bot.campaigns`). **자격(통행료 게이트)은 건드리지 않는다** — vol·ATR·레버·현물·펀딩·twoway 는 측정 가능한
+    veto 라 그대로다. AI 가 대체하는 것은 국면 판독과 그것이 정하는 방향뿐이다(메모리: 자격과 순위는 다른 질문).
+    실패·타임아웃·형식 오류에는 **아무것도 바꾸지 않는다** — 모델이 없다고 매매가 멈추면 안 된다. {} 를 돌려주면 호출자가 결정론을 쓴다."""
+    K = ("symbol", "phase", "votes", "run", "off", "off_close", "age_h", "twoway24", "twoway2h", "twoway1h", "ratio", "ign", "up3",
+         "atr_pct", "atr15_pct", "upwick", "lower_high", "vmax_at_high", "vmax_share", "post_red", "exhaustion", "leg_down", "hint15",
+         "fund", "qv", "new", "dead")
+    if not rows: return {}
+    body = json.dumps([{k: r.get(k) for k in K} for r in rows], ensure_ascii=False)
+    d = os.path.join(LOGS, "ai"); os.makedirs(d, exist_ok=True)
+    out = os.path.join(d, "read.json")
+    try:
+        if os.path.exists(out): os.remove(out)
+        cmd = [hunt.get("ai_cmd") or "codex", "exec", "--skip-git-repo-check", "-s", "read-only", "--cd", d, "-o", out]
+        if hunt.get("ai_model"): cmd += ["-m", str(hunt["ai_model"])]        # 기본은 ~/.codex/config.toml (gpt-5.6-sol / xhigh).
+        if hunt.get("ai_effort"): cmd += ["-c", f"model_reasoning_effort={hunt['ai_effort']}"]   # luna-max 등은 API 키 인증이라야 뜬다
+        p = subprocess.run(cmd + ["-"],
+                           input=AI_PROMPT + chr(10) + body, capture_output=True, text=True, errors="replace",
+                           timeout=float(hunt.get("ai_timeout_s") or 240))
+        raw = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
+    except Exception as e:
+        log(f"hunt: ai_read failed ({type(e).__name__}: {str(e)[:80]}) - keeping the deterministic read"); return {}
+    i, j = raw.find("{"), raw.rfind("}")
+    try: got = json.loads(raw[i:j + 1])["reads"]
+    except Exception as e:
+        log(f"hunt: ai_read unparsable ({type(e).__name__}); rc={p.returncode} {raw[:120]!r}"); return {}
+    want = {r["symbol"] for r in rows}
+    reads = {x["symbol"]: (x["phase"], x.get("conf"), str(x.get("why") or "")[:60])
+             for x in got if isinstance(x, dict) and x.get("symbol") in want and x.get("phase") in AI_PHASES}
+    log(f"hunt: ai_read {len(reads)}/{len(rows)} coins, {sum(1 for r in rows if reads.get(r['symbol'], (None,))[0] != r.get('phase'))} disagree")
+    return reads
+
 def scan(hunt, held=(), st=None, b=None, log=log):
     """Rows for every contract with 24h volume >= `universe` (daily candles for the ratio), the full shape for those with an episode
     (ratio >= min_ratio, a fresh listing counts) or held. Public REST only. Sorted: eligible by two-way path (desc), then by ratio."""
@@ -191,6 +252,13 @@ def scan(hunt, held=(), st=None, b=None, log=log):
         except Exception as e:
             log(f"  {s}: shape failed {type(e).__name__}: {str(e)[:60]}"); r.update(phase="unread", votes=[], side=None, twoway24=None, run=None, off=None, high48=None, atr_pct=None, hint15=None, dead=False)
         r["flags"] = flags_of(r, hunt)
+    if hunt.get("ai_read") and deep:
+        for sym, (ph, conf, why) in ai_read([r for r in deep if r.get("phase") not in (None, "unread")], hunt, log).items():
+            r = next(x for x in deep if x["symbol"] == sym)
+            r["phase_det"], r["side_det"] = r.get("phase"), r.get("side")      # 그림자: 결정론이 무엇이라 했는지 매 스캔 남는다
+            r["phase"], r["ai_conf"], r["ai_why"] = ph, conf, why
+            r["side"] = "long" if ph == "markup" else "short" if ph == "markdown" else None
+            r["flags"] = flags_of(r, hunt)                                     # 통행료 게이트는 새 국면 위에서 다시 — veto 는 AI 가 못 뒤집는다
     for r in rows:
         if "flags" not in r:
             for k in ("twoway24", "run", "off", "high48"): r.setdefault(k, None)      # the hourly pre-read's numbers stay for the evidence tables
