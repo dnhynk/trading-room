@@ -148,6 +148,9 @@ class Book:
         if st.get("day") == self.cy.day: self.realized, self.stops_today = b.get("realized", 0.0), b.get("stops_today", 0)
         elif self.pos["halt"] in ("DAILY_STOPS", "DAILY_LOSS"): self.pos["halt"] = None            # a new UTC day lifts yesterday's daily halts, restart or not
         if self.pos["lots"] and b.get("struct_stop"): self.strat.struct_stop = b["struct_stop"]   # frozen at open; a restart must not re-freeze it
+        if self.pos["lots"] and b.get("blow_base"): self.strat.blow_base = b["blow_base"]         # ... and so is the campaign's high-water position: without it a restart
+        #   after the blow-off target part-filled would take the REMAINDER as the campaign and rest blowoff_frac of that at the same price again (the defect fixed in f740edd,
+        #   re-entered through a restart). Campaign geometry that costs money survives a restart, like the stop ratchet; the rest of the Strategy soft state does not.
         if self.pos["lots"] and b.get("stop"): self.strat.stop_px = b["stop"]["px"]                # and the stop already set can only tighten
         if self.pos["lots"] and b.get("stop") and b["stop"].get("order_id") and self.mode == "live": self.stop = b["stop"]   # its fills are recognised at once; resync confirms it
         if b.get("cooldown_until"): self.pos["cooldown_until"] = b["cooldown_until"]              # the post-stop cooldown survives a restart
@@ -161,7 +164,7 @@ class Book:
         return dict(pos=dict(lots=self.pos["lots"], qty=rnd(qty), avg=rnd(avg), upl=rnd(upl), last=self.pos["last"], last_buy_px=self.pos["last_buy_px"],
                              last_trim_px=self.pos["last_trim_px"], halt=self.pos["halt"], pause=self.pos["pause"]),
                     realized=rnd(self.realized), working={r: (w and dict(px=w["px"], qty=w["qty"], filled=w["filled"], oid=w["oid"])) for r, w in self.work.items()},
-                    stop=self.stop, struct_stop=self.strat.struct_stop, stops_today=self.stops_today, cooldown_until=self.pos.get("cooldown_until"), preset_plan=self.preset_plan,
+                    stop=self.stop, struct_stop=self.strat.struct_stop, blow_base=self.strat.blow_base, stops_today=self.stops_today, cooldown_until=self.pos.get("cooldown_until"), preset_plan=self.preset_plan,
                     exch=self.exch, lever=self.lever, sizing=self.dyn, arm=self.strat.arm, pull=self.strat.pull, regime=self.strat.regime,
                     **{k: self.sp.get(k) for k in SIZED},   # 자본 비례 한도는 전부 실효값으로 — params 절은 파일 값이고 sizing은 덮어쓴 것만 담는다
                     unit_mult=self.pos.get("unit_mult", 1.0),

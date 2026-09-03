@@ -390,6 +390,21 @@ class LotRouting(unittest.TestCase):
         asyncio.run(bk2.on_fill("trim", 35, 3.02, 0.02, "cycL-t7", "taker", lot=None))                 # LIFO when no lot is named
         self.assertEqual(bk2.pos["lots"], [[70, 3.0, "a"], [35, 2.95, "b"]])
 
+class CampaignHighWater(unittest.TestCase):
+    """The blow-off target sells blowoff_frac of the campaign's LARGEST position. That high-water is Strategy soft state, so a restart
+    (this repo restarts positioned engines when the running build has a live defect) would take the REMAINDER as the campaign and rest
+    another frac of it at the same price — the defect of f740edd, re-entered through the restart. It is snapshotted and restored."""
+    def test_the_high_water_survives_a_restart_while_the_position_does(self):
+        cy, bk = book(lots=[[70, 3.0, "a"], [70, 2.9, "b"]]); bk.pos["avg"] = 2.95
+        bk.strat.blow_base = 140.0
+        self.assertEqual(bk.snapshot()["blow_base"], 140.0)
+        snap = bk.snapshot()
+        def state(lots): return dict(mode="live", day=cy.day, books={"long": {**snap, "pos": {**snap["pos"], "lots": lots}}})
+        cy2, bk2 = book(); bk2.load(state([[70, 3.0, "a"]]))                                 # the target sold half; the engine restarts here
+        self.assertEqual(bk2.strat.blow_base, 140.0)                                        # not 70: the campaign's share is already sold
+        cy3, bk3 = book(); bk3.load(state([]))
+        self.assertIsNone(bk3.strat.blow_base)                                              # a flat book starts a fresh campaign
+
 class StopLock(unittest.TestCase):
     def test_two_concurrent_stop_requests_place_one_pos_loss(self):
         cy, bk = book(lots=[[70, 3.0, "a"]])
