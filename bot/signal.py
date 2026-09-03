@@ -65,6 +65,11 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              cap_min_atr=0.0,   # > 0: the money cap must sit at least this many ATR(1m) under a one-unit entry — the unit shrinks so it does, the cap
              # (money) stays, never enlarges (`unit_under_cap`; resize and backtest size_from_equity). 0 = off. 30 live 2026-09-03 for the pump-coin
              # book: a sigma-23%/day coin put the 4-unit cap 2.5% under the ladder, half an hourly sigma, a noise stop (NEXT 8, RULES 사이징)
+             trim_market_atr=0.0, trim_market_frac=0.0, trim_market_only=0, trim_market_against=0, trim_market_core=0,   # market-referenced trim gate (2026-09-03, CONCEPT question: is the own-cost
+             # gate anchoring?): trim_market_atr > 0 lets a stall sell the LIFO unit once the bounce since the last fill, from its trough, is >= this x ATR15 whatever
+             # the unit's cost; trim_market_frac > 0: ... is >= this share of the excursion below the lot's reference (cost / avg) — a bounce that retraced
+             # that much of the move under it; _only 1 drops the cost gate for units altogether (stall and retrace paths read the bounce), _against 1 applies it only under the
+             # AGAINST label (the current-leg read with rg_leg_on), _core 1 extends it to the core lot (the average is no anchor either). All 0 = cost-anchored.
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: the round-trip fee, fee_rt_pct)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
@@ -646,6 +651,7 @@ class Strategy:
         self.best = None         # the campaign's best favourable mid since it opened (profit lock/trail); None while flat
         self.peak = None         # best favourable mid since the last fill (retrace-based top detection)
         self.trough = None       # worst mid since the last fill: peak - trough is the bounce a retrace is measured against
+        self.bpeak = None        # best favourable mid since the trough was set: the bounce the market-referenced gate measures (a decline from an earlier peak is not a bounce)
         self.struct_skip = False # STRUCT_SKIP reported once per position (a level may still qualify later)
         self.fail_n = 0          # trim-side stalls that failed to reach the LIFO lot's gate (gate relaxation); the lot's own history
         self.last_lot = None     # LIFO lot id at the last step: a new lot (buy, or the next lot after a sell-out) starts a fresh count
@@ -803,26 +809,41 @@ class Strategy:
                 if cut: lot_from = 0                                                     # booked against the core lot, not the LIFO unit
             if self.pull and qty <= self.pull["target"] + qs / 2: self.pull = None          # sold what the pull asked for (within half an exchange step)
             elif self.pull and qty > self.last_qty + 1e-9: ev.append(("PULL_DROP", dict(why="add", dev_lot=round(dev_lot, 2)))); self.pull = None   # a lot bought meanwhile is not the pull's to sell (its target is absolute): the next stall judges the new LIFO lot
-            if trim_sig in names and not self.pull and dev_lot < gate and p["gate_relax"] > 0:   # a stall the lot could not use: relax its gate
-                self.fail_n += 1; ev.append(("GATE_RELAX", dict(fails=self.fail_n, gate=round(floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n, 3), dev_lot=round(dev_lot, 2))))
-            # top confirmed by retrace: the best price since the last fill cleared the gate and price has come back by >= trim_retrace_atr x ATR
-            # and >= retrace_frac of the bounce it crowned (peak - trough since the last fill): a reversal of the move, not a wiggle at the gate
-            if qty != self.last_qty or self.peak is None: self.peak = self.trough = mid
+            # the bounce since the last fill, measured from its trough: the market's move, which the market-referenced gate reads instead of our cost
+            if qty != self.last_qty or self.peak is None: self.peak = self.trough = self.bpeak = mid
             else:
                 if s * (mid - self.peak) > 0: self.peak = mid
-                if s * (mid - self.trough) < 0: self.trough = mid
+                if s * (mid - self.trough) < 0: self.trough = self.bpeak = mid            # a new low restarts the bounce
+                elif s * (mid - self.bpeak) > 0: self.bpeak = mid
+            mk, mkf, a15 = p.get("trim_market_atr") or 0.0, p.get("trim_market_frac") or 0.0, f.get("atr15") or 0.0
+            mk_lot = ((mk > 0 and a15 > 0) or mkf > 0) and (not is_core or p.get("trim_market_core")) and (not p.get("trim_market_against") or self.regime == "AGAINST")
+            mk_only = bool(mk_lot and p.get("trim_market_only"))                          # cost is not an input for this lot at all
+            exc = s * (ref - self.trough)                                                  # the excursion under the lot's reference since the last fill
+            big = lambda up: (mk > 0 and a15 > 0 and up >= mk * a15) or (mkf > 0 and exc > 0 and up >= mkf * exc)   # a market-sized bounce
+            market = bool(mk_lot) and big(s * (mid - self.trough))
+            if trim_sig in names and not self.pull and dev_lot < gate and p["gate_relax"] > 0 and not mk_only:   # a stall the lot could not use: relax its gate
+                self.fail_n += 1; ev.append(("GATE_RELAX", dict(fails=self.fail_n, gate=round(floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n, 3), dev_lot=round(dev_lot, 2))))
+            # top confirmed by retrace: the best price since the last fill cleared the gate (market gate: the bounce it crowned was >= trim_market_atr x ATR15)
+            # and price has come back by >= trim_retrace_atr x ATR and >= retrace_frac of the bounce (peak - trough): a reversal of the move, not a wiggle at the gate
             back = max(p["trim_retrace_atr"] * atr, p["retrace_frac"] * s * (self.peak - self.trough)) if atr else None
-            retrace_top = (p["trim_retrace_atr"] > 0 and atr and s * (self.peak / ref - 1) * 100 >= g_rel
-                           and s * (self.peak - mid) >= back and dev_lot >= gate_top)
-            if ((trim_sig in names and (cut or dev_lot >= gate)) or retrace_top) and not self.pull and sellable >= qs - 1e-9:
+            crown_cost = (not mk_only) and s * (self.peak / ref - 1) * 100 >= g_rel and dev_lot >= gate_top
+            crown_mkt = bool(mk_lot) and big(s * (self.bpeak - self.trough))                   # the bounce since the trough, not the fall from an earlier peak
+            back_mkt = max(p["trim_retrace_atr"] * atr, p["retrace_frac"] * s * (self.bpeak - self.trough)) if atr else None
+            retrace_cost = p["trim_retrace_atr"] > 0 and atr and crown_cost and s * (self.peak - mid) >= back
+            retrace_mkt = p["trim_retrace_atr"] > 0 and atr and crown_mkt and s * (self.bpeak - mid) >= back_mkt
+            retrace_top = retrace_cost or retrace_mkt
+            stall_cost = (not mk_only) and (cut or dev_lot >= gate)
+            stall_hit = trim_sig in names and (stall_cost or market)
+            via_market = (stall_hit and not stall_cost) or (not stall_hit and bool(retrace_mkt) and not retrace_cost)   # a sale the cost gate would not have made
+            if (stall_hit or retrace_top) and not self.pull and sellable >= qs - 1e-9:
                 sell = sellable if (dev >= p["full_exit_pct"] or lot_from is not None) else min(lot_qty, sellable)
                 sell = min(qty, round(round(sell / qs) * qs, 9))                                  # whole exchange steps: a half of 76.1 is 38.0, never 38.05 (live 21:37: the 0.05 remainder was rejected every 5s and the zombie pull blocked every later trim)
                 if sell < qs - 1e-9: sell = 0.0
                 is_cut = lot_from is not None or (derisk and is_core and dev_lot < g_rel)           # the de-risk gate is in force only for a core cut on a weak bounce
-                self.pull = dict(t=t, qty=sell, target=qty - sell, gate=-p["derisk_pct"] if lot_from is not None else gate,
+                self.pull = dict(t=t, qty=sell, target=qty - sell, gate=-p["derisk_pct"] if lot_from is not None else (-1e9 if via_market else gate),
                                  ref=avg if lot_from is not None else ref, px0=touch_out, lot=lot_from)
                 ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=self.pull["ref"], qty=sell, all=sell >= qty - 1e-9, px=touch_out,
-                                             mode="derisk" if is_cut else "favor" if favor else ("retrace" if trim_sig not in names else "normal"),   # the gate in force
+                                             mode="derisk" if is_cut else "favor" if favor else "market" if via_market else ("retrace" if trim_sig not in names else "normal"),   # the gate in force
                                              path="stall" if trim_sig in names else "retrace", lot="core" if lot_from is not None else None,
                                              peak=self.peak)))
             if p.get("exit"):                                                              # the book is leaving (the premise broke — hunt: the phase turned): the WHOLE position

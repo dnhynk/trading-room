@@ -56,7 +56,11 @@ def report(day):
             # 09-02 audit; each line leads with total / stops / max_dd against the live dual run so the revert rule reads the risk columns, not the pnl alone
             for label, ov in (("derisk on0 (pct 3, lone-core cut)", ["--strat", "derisk_pct=3.0", "--strat", "derisk_under_units=0"]),
                               ("derisk on1 (pct 3, under-units cut)", ["--strat", "derisk_pct=3.0", "--strat", "derisk_under_units=1"]),
-                              ("retrace_frac 0.33", ["--strat", "retrace_frac=0.33"])):
+                              ("retrace_frac 0.33", ["--strat", "retrace_frac=0.33"]),
+                              # the cost-anchored trim gate vs a market-referenced one (NEXT 5, 2026-09-03: lost on 6 of 8 tapes, paid on the drift book only —
+                              # the cross-section decides whether either form ever comes back): below-cost stall sales after a half-excursion bounce; the bounce-size gate alone
+                              ("trim market frac 0.5 (below-cost bounce sale)", ["--strat", "trim_market_frac=0.5"]),
+                              ("trim market atr 1.5 only (bounce-size gate, cost ignored)", ["--strat", "trim_market_atr=1.5", "--strat", "trim_market_only=1"])):
                 line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short"] + ov).strip().split("\n") or [""])[-1]
                 out.append(f"counterfactual {label} (dual): {_vs(base, line)}" + line)
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break

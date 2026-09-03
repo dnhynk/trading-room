@@ -717,5 +717,31 @@ class StopLock(unittest.TestCase):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         r = st.step(F(t=110, mid=3.30, bid=3.299, ask=3.301), [], pos); self.assertAlmostEqual(r["stop"], 3.0 - 20 / 70, 3); self.assertIsNone(st.best)
 
+class MarketTrimGate(unittest.TestCase):
+    """trim_market_* (2026-09-03, measured and left OFF): a stall may sell a LIFO unit under its cost once the bounce since the last fill,
+    from its trough, is trim_market_atr x ATR15 (or trim_market_frac of the excursion under the lot); _only drops the cost gate; the default
+    keeps the cost gate. Two-lot book: core 70 @ 3.1, unit 70 @ 3.0 (F: atr15 0.06)."""
+    def _st(self, **kw):
+        st = Strategy(dict(side="long", unit_qty=70, stop_structural_on=0, derisk_pct=0, **kw)); pos = dict(lots=[[70, 3.1, "a"], [70, 3.0, "b"]], avg=3.05, last="buy", last_buy_px=3.0)   # derisk off as live
+        st.step(F(t=100, mid=3.0), [], pos); st.step(F(t=101, mid=2.90, bid=2.899, ask=2.901), [], pos)   # the unit goes 3.3% under water: trough 2.90
+        return st, pos
+    def test_default_keeps_the_cost_gate_under_water(self):
+        st, pos = self._st(); r = st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [dict(sig="POP_STALLING")], pos)   # a 0.07 (1.2 ATR15) bounce stalls 1% under the lot
+        self.assertFalse(any(e[0] == "PULL_TRIM" for e in r["events"])); self.assertTrue(any(e[0] == "GATE_RELAX" for e in r["events"]))
+    def test_market_gate_sells_the_unit_under_its_cost_after_a_market_sized_bounce(self):
+        st, pos = self._st(trim_market_atr=1.0); r = st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [dict(sig="POP_STALLING")], pos)
+        pt = [e for e in r["events"] if e[0] == "PULL_TRIM"]; self.assertEqual(len(pt), 1); self.assertEqual(pt[0][1]["mode"], "market"); self.assertLess(pt[0][1]["dev_lot"], 0)
+        self.assertEqual(r["trim"][1], 70); self.assertEqual(st.pull["gate"], -1e9)                       # one LIFO unit; never dropped on a wiggle (taker after the clock)
+        st, pos = self._st(trim_market_atr=2.0); r = st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [dict(sig="POP_STALLING")], pos)
+        self.assertFalse(any(e[0] == "PULL_TRIM" for e in r["events"]))                                  # 1.2 ATR15 < 2: not market-sized
+        st, pos = self._st(trim_market_frac=0.5); r = st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [dict(sig="POP_STALLING")], pos)
+        self.assertEqual([e[1]["mode"] for e in r["events"] if e[0] == "PULL_TRIM"], ["market"])         # 0.07 of the 0.10 excursion under the lot >= 0.5
+        st, pos = self._st(trim_market_atr=1.0, trim_market_against=1); r = st.step(F(t=102, mid=2.97, bid=2.969, ask=2.971), [dict(sig="POP_STALLING")], pos)
+        self.assertFalse(any(e[0] == "PULL_TRIM" for e in r["events"]))                                  # gated on the AGAINST label, which this tape never set
+    def test_market_only_ignores_cost_both_ways(self):
+        st = Strategy(dict(side="long", unit_qty=70, stop_structural_on=0, derisk_pct=0, trim_market_atr=2.0, trim_market_only=1)); pos = dict(lots=[[70, 3.1, "a"], [70, 3.0, "b"]], avg=3.05, last="buy", last_buy_px=3.0)
+        st.step(F(t=100, mid=3.0), [], pos); r = st.step(F(t=101, mid=3.01, bid=3.009, ask=3.011), [dict(sig="POP_STALLING")], pos)
+        self.assertFalse(any(e[0] == "PULL_TRIM" for e in r["events"])); self.assertFalse(any(e[0] == "GATE_RELAX" for e in r["events"]))   # +0.33% over cost would sell under the cost gate; 0.17 ATR15 bounce is not market-sized
+
 if __name__ == "__main__":
     unittest.main()
