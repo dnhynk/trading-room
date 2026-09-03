@@ -1,6 +1,6 @@
 {
   "record": {
-    "EGLDUSDT": [
+    "MUBARAKUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -12,19 +12,7 @@
       "ticker",
       "candle1m"
     ],
-    "ETHUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "HYPEUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "SPCXUSDT": [
+    "EGLDUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -36,19 +24,7 @@
       "ticker",
       "candle1m"
     ],
-    "XAGUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "ZECUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "MUBARAKUSDT": [
+    "BRUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -60,12 +36,18 @@
       "ticker",
       "candle1m"
     ],
+    "MAGMAUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "BTCUSDT": [
       "candle1m"
     ]
   },
   "strat": {
-    "symbol": "EGLDUSDT",
+    "symbol": "MUBARAKUSDT",
     "side": "long",
     "sides": [
       "long",
@@ -118,24 +100,24 @@
     "lever": 10
   },
   "books": {
-    "EGLDUSDT": {
+    "MUBARAKUSDT": {
       "wallet_frac": 1.0,
       "sides": [
         "long"
       ],
       "hunt": 1,
-      "blowoff_atr": 8.0,
-      "blowoff_frac": 0.5,
-      "unit_frac": 2.0,
-      "cap_frac": 0.4,
-      "daily_loss_frac": 0.6,
-      "notional_frac": 8.0,
-      "max_stops_day": 4,
+      "unit_frac": 1.5,
+      "cap_frac": 0.3,
+      "daily_loss_frac": 0.45,
+      "notional_frac": 4.5,
+      "max_stops_day": 3,
       "lever": 20,
       "cap_min_atr": 30,
       "max_units": 3,
       "stop_lock_atr": 2.0,
-      "stop_trail_atr": 1.5
+      "stop_trail_atr": 1.5,
+      "blowoff_atr": 8.0,
+      "blowoff_frac": 0.5
     }
   },
   "sig": {
@@ -197,11 +179,11 @@
     "universe": 5000000.0,
     "max_atr": 2.0,
     "strat": {
-      "unit_frac": 2.0,
-      "cap_frac": 0.4,
-      "daily_loss_frac": 0.6,
-      "notional_frac": 8.0,
-      "max_stops_day": 4,
+      "unit_frac": 1.5,
+      "cap_frac": 0.3,
+      "daily_loss_frac": 0.45,
+      "notional_frac": 4.5,
+      "max_stops_day": 3,
       "lever": 20,
       "cap_min_atr": 30,
       "max_units": 3,

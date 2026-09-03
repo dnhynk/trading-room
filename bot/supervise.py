@@ -56,7 +56,10 @@ def spawn(cmd, name):
     global JOB
     if JOB is None and os.name == "nt": JOB = job_object()
     with open(os.path.join(ROOT, "logs", f"{name}.log"), "a", encoding="utf-8") as log:
-        p = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT); owned = assign(JOB, p)
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}   # the child appends to the SAME file these two writers use as utf-8, but it picks its own
+        #                                                     encoding for the inherited handle — from a clean shell that is cp949, so one Korean traceback
+        #                                                     line (bot/cycle.py has Korean comments) made logs/<job>.log undecodable and killed the Monitor
+        p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT); owned = assign(JOB, p)
         log.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} SUPERVISOR start pid={p.pid} {' '.join(cmd)}{'' if owned else ' NOT IN JOB (outlives the supervisor)'}\n")
     return p
 

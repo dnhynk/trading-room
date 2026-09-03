@@ -88,6 +88,11 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
         leg_down = bool(piv) and piv[-1][1] == "H" and len(hs) >= 2 and hs[-1] <= hs[-2] and len(ls) > 0 and closes[-1] < ls[-1]
     h24 = hours[-24:]; o24 = h24[0]["o"]
     twoway24 = sum(abs(x["c"] - x["o"]) / o24 for x in h24) * 100 - abs(_pct(h24[-1]["c"], o24))
+    def short_tw(bars):     # the same measure over a SHORT window, RECORDED ONLY (NEXT 17f). twoway24's window is 24h and it moves
+        if len(bars) < 4: return None    # only on an hourly close, which made it the weakest predictor of the next hour's movement
+        o = bars[0]["o"]                 # (Spearman +0.379 vs ATR1m +0.628, 1758 rows / 35 coins). Whether min_twoway / quiet_frac
+        return round(sum(abs(x["c"] - x["o"]) / o for x in bars) * 100 - abs(_pct(bars[-1]["c"], o)), 2)   # move onto these waits for the table
+    twoway1h, twoway2h = short_tw(bars15[-4:]), short_tw(bars15[-8:])
     # ignition: the last 3 closed hours' volume against the median 3-hour volume of the 48 hours before them, and the price move over
     # those 3 hours (강고양이 SIREN 2026-03-22: "거래량도 터지고 ... 넣어도 안정권" — the entry the 24h ratio cannot see: SIREN's ratio was 0.8x
     # at ignition; on SIREN/STO/AKE hours with ign >= 5 and up3 > 0 were followed by +10..+20% in 4h vs +1..2% for quiet hours, in-sample)
@@ -102,7 +107,7 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     new = len(prior) < 3                                         # a fresh listing has no baseline: its whole life is the episode (ratio 99)
     peak = max(float((held or {}).get("peak") or 0.0), qv)
     return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), off_close=round(off_close, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
-                vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, leg_down=leg_down, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1),
+                vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, leg_down=leg_down, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1), twoway1h=twoway1h, twoway2h=twoway2h,
                 ratio=99.0 if new else round(qv / base, 1), new=new, qv=qv, fund=(ticker or {}).get("fund"), dead=bool(held) and qv < p["dead_ratio"] * peak,
                 atr15_pct=round(atr15 / px * 100, 2) if atr15 else None, ign=ign, up3=up3)
 

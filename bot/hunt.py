@@ -5,7 +5,8 @@ the side chosen by the coin's lifecycle PHASE (bot/whale.py).
 The basket selector (bot/scan.py + bot/select.py) is untouched and stays the contract; this module inherits its skeleton — scan ->
 record every scan (logs/hunt.json, logs/hunt-history.jsonl) -> verdict on `confirm` consecutive scans -> params.json["books"] ->
 wind-down -> flat -> drop -> the next coin. Two writers of `books` must never run at once: `hunt.on` = 1 makes this job the owner
-(bot.select must be stopped; the job refuses to write while logs/select.pid is alive), `hunt.on` = 0 keeps it a report-only scanner.
+(bot.select must be stopped; the job refuses to write while logs/select.pid names a LIVE select job — `pid_alive`, a pid number alone
+is not evidence), `hunt.on` = 0 keeps it a report-only scanner.
 
 THEORY (CONCEPT 실험 모드, 세력대항마): an operator runs a coin through phases and the phase decides our side —
   markup   -> LONG book: the cycle buys the shakeouts' deceleration (the sweep-and-reclaim) and trims into the pops;
@@ -42,11 +43,20 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             universe=1e7,        # the volume floor for pulling daily candles
             min_ratio=4.0,       # 24h volume over the median of the prior 7 UTC days: an episode (a fresh listing reads 99)
             min_twoway=15.0,     # 1h two-way path over the last 24h, %/day (TRUMP 20-36 on its good days, 12 on its dead one)
-            min_atr=0.15, max_atr=1.2,   # ATR(1m) % band the 1m rules were tuned in / gappy prints above (USELESS 1.49)
+            min_atr=0.30, max_atr=1.2,   # ATR(1m) % band the 1m rules were tuned in / gappy prints above (USELESS 1.49). The floor is
+            #                              where the cliff is (2026-09-04, 1758 rows): the next hour's movement is flat at ~2.5%/h above
+            #                              0.30 and falls through it (0.25-0.30 1.68%/h, 0.20-0.25 1.39, 0.15-0.20 1.32). It costs 8% of
+            #                              candidate rows (eligible ATR1m p10 = 0.31, p50 = 0.50). Was 0.15 (user: "문턱 좀 가까이 붙여")
+            exit_atr_min=0.30,   # a HELD coin whose ATR(1m) falls under this has stopped moving at the scale we trade: wind down (no market
+            #                      dump), same floor as entry so there is no gap. The CEILING stays an entry veto only — a held coin's ATR
+            #                      exploding is the pump itself (RULES). ATR1m is the best predictor we measured; twoway24 is the worst.
             min_fund=-0.05,      # funding %/8h floor for a short (negative = shorts pay; T -0.29 would tax a short 0.9%/day)
             max_fund=0.3,        # funding %/8h ceiling for a long (longs crowded and paying)
             min_lever=10,        # the contract must allow at least this leverage (AKE max 10)
-            exit_twoway=8.0,     # wind down when the last-24h two-way path is under this
+            exit_twoway=0.0,     # OFF (2026-09-04): this floor was inverted at its own threshold — rows under 8 moved MORE in the next
+            #                      hour (median 1.32%/h, n=136) than the 8-15 rows it kept (0.89%/h, n=231), and twoway24 is not monotone
+            #                      anywhere. The two questions it was standing in for are covered better: "the tape is gone" by vol/dead,
+            #                      "the coin stopped moving" by exit_atr_min. > 0 turns it back on.
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
 BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
@@ -82,10 +92,13 @@ def flags_of(r, hunt):
     return f
 
 def exit_flags(r, held, hunt):
-    """Why a held coin leaves: the phase turned against its side, the episode died, funding taxes it, or the tape went gappy."""
+    """Why a held coin leaves: the phase turned against its side, the episode died, it stopped moving, funding taxes it, or the tape
+    went gappy. The movement question is ATR(1m) — the churn measures are 24h windows that move once an hour (NEXT 17f)."""
     f = []; side = held.get("side") or "short"; ph = r.get("phase")
     if r["qv"] < hunt["min_vol"]: f.append(f"vol{r['qv'] / 1e6:.0f}M")
     if r.get("dead"): f.append("dead")
+    atr = r.get("atr_pct")                                          # absent = not evidence (an unread shape keeps the book)
+    if hunt.get("exit_atr_min") and atr is not None and atr < hunt["exit_atr_min"]: f.append(f"still{atr}")
     tw = r.get("twoway24") or 0.0; tw_peak = held.get("tw_peak") or 0.0
     if tw < hunt["exit_twoway"]: f.append(f"flat{tw}")                                          # absolute floor: no churn left to trade
     elif tw_peak >= hunt["min_twoway"] and tw < hunt["quiet_frac"] * tw_peak: f.append(f"quiet{tw:.0f}/{tw_peak:.0f}")   # the coin cooled off its own hot: chase
@@ -116,6 +129,19 @@ def spot_markets(b, log=log):
     except Exception as e: log(f"hunt: bitget spot list unavailable ({type(e).__name__})")
     if m: _SPOTS.update(t=time.time(), map=m)
     return m
+
+def market(b, sym="BTCUSDT", log=log):
+    """The tape every alt moves with, RECORDED ONLY (CONCEPT 트랙 B, 2026-09-04): a cascade's deceleration is somebody else's
+    liquidation, not the operator's shakeout, and `phase` cannot tell them apart — so every scan writes the market's move into
+    logs/hunt-history.jsonl and NOTHING reads it. The threshold waits for the nightly cross-section (NEXT 17b) to answer whether
+    the market's drawdown predicts THIS coin's tail. Moves are vs the close of N closed 1H bars ago; dd4 = under the 4h high."""
+    try: hours = b.candles(sym, "1H", limit=30)[:-1]; m15 = b.candles(sym, "15m", limit=20)[:-1]
+    except Exception as e: log(f"hunt: {sym} candles failed ({type(e).__name__})"); return None
+    if len(hours) < 4 or len(m15) < 2: return None
+    px = m15[-1]["c"]
+    return dict(sym=sym, px=px, m15=round(_pct(px, m15[-2]["c"]), 2), h1=round(_pct(px, hours[-1]["c"]), 2),
+                h4=round(_pct(px, hours[-4]["c"]), 2), h24=round(_pct(px, hours[-24]["c"]), 2) if len(hours) >= 24 else None,
+                dd4=round(_pct(px, max(x["h"] for x in hours[-4:])), 2))
 
 def scan(hunt, held=(), st=None, b=None, log=log):
     """Rows for every contract with 24h volume >= `universe` (daily candles for the ratio), the full shape for those with an episode
@@ -218,7 +244,8 @@ def verdict(rows, books, hunt, st, now):
     if resume: add = None                                                   # the book stays: nothing replaces it this scan
     return dict(refuse=None, cur=cur, wind=wind, add=add, top=top, resume=resume)
 
-def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol"))   # volume gone: dumping into thin books hurts — leave gently (stalls above cost, or the cap)
+def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
+#                                                                                      hurts and there is no hurry — leave gently (stalls above cost, or the cap)
 def _leave_coin(why): return _illiquid(why) or any(k in (why or "") for k in ("flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one
 #            everything else (a phase flip: climax / markdown / markup / squeeze / newhigh) is a same-coin side change — no cooldown, exit fast into a stall
 
@@ -274,23 +301,36 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
 
 ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP", "resume": "HUNT_RESUME", "profile": "HUNT_PROFILE"}
 
-def pid_alive(path):
-    try: pid = int(open(path).read().strip())
-    except Exception: return False
-    out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, errors="replace").stdout
-    return str(pid) in out
+def pid_alive(path, match=("bot.supervise select", "bot.select")):
+    """Why this job must not write params.books, or "" when it may. The pid must be alive AND its command line must be one of
+    `match`: a Windows pid is reused, and `tasklist /FI "PID eq N"` only says somebody holds that number — bot.select stopped
+    2026-09-02 23:52, hunt wrote books all the next day, and a stranger inheriting its pid raised HUNT_BLOCKED at 09-04 00:16.
+    Both forms are matched because logs/select.pid holds the SUPERVISOR's pid (`bot.supervise select`, supervise.main writes its
+    own), not the `bot.select` child's. An unreadable command line blocks: refusing to write is the recoverable error, two
+    writers of params.books is not."""
+    try:
+        with open(path) as f: pid = int(f.read().strip())
+    except Exception: return ""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+                             capture_output=True, text=True, errors="replace", timeout=60).stdout
+    except Exception as e:
+        return f"pid {pid} in {os.path.basename(path)} unreadable ({type(e).__name__}): blocking as if {match[0]} were alive"
+    hit = next((m for m in match if m in out), "")
+    return f"{hit} is running (pid {pid})" if hit else ""
 
 def main():
     once, dry = "--once" in sys.argv, "--dry" in sys.argv
     while True:
         p = load_params() or {}; hunt = {**HUNT, **(p.get("hunt") or {})}
         books = p.get("books") or {}; held = [s for s, bk in books.items() if bk.get("hunt")]
-        t0 = time.time(); st = read_json(os.path.join(LOGS, "hunt-state.json"), {})
-        try: rows = scan(hunt, held=tuple(held), st=st)
+        t0 = time.time(); st = read_json(os.path.join(LOGS, "hunt-state.json"), {}); b = Bitget("", "", "")
+        try: rows = scan(hunt, held=tuple(held), st=st, b=b)
         except Exception as e: log(f"hunt scan failed: {type(e).__name__}: {e}"); rows = None
         if rows:
             os.makedirs(LOGS, exist_ok=True)
-            rec = dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), hunt={k: v for k, v in hunt.items() if k != "exclude"}, whale=WHALE, rows=rows)
+            rec = dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), hunt={k: v for k, v in hunt.items() if k != "exclude"}, whale=WHALE,
+                       market=market(b), rows=rows)          # 기록만 — 아무도 읽지 않는다(CONCEPT 트랙 B, NEXT 17b)
             write_json(os.path.join(LOGS, "hunt.json"), rec)
             with open(os.path.join(LOGS, "hunt-history.jsonl"), "a", encoding="utf-8") as f: f.write(json.dumps(rec) + "\n")
             log("\n" + table(rows))
@@ -303,8 +343,9 @@ def main():
                rows=[[r["symbol"], r.get("phase"), r.get("side"), r["ratio"], r.get("run"), r.get("off"), r.get("twoway24"), r.get("atr_pct"), r["fund"], r.get("hint15"), " ".join(r["flags"])] for r in rows[:8]])
             if v["refuse"]: log(f"hunt: {v['refuse']}")
             elif owner:
-                if pid_alive(os.path.join(LOGS, "select.pid")):
-                    ev("HUNT_BLOCKED", alert=True, why="bot.select is running: two writers of params.books — stop it (or set hunt.on 0)")
+                blocked = pid_alive(os.path.join(LOGS, "select.pid"))
+                if blocked:
+                    ev("HUNT_BLOCKED", alert=True, why=f"{blocked}: two writers of params.books — stop it (or set hunt.on 0)")
                 else:
                     before = json.dumps(p, sort_keys=True)
                     acts = apply(p, rows, v, flats, hunt, st, now, recent=recent_engines(load_states(), now))

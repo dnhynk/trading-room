@@ -1,6 +1,7 @@
 """OMS invariants of bot/cycle.py (Book against a stub exchange).  python -m unittest bot.test_cycle -v"""
 import asyncio, time, unittest
 from types import SimpleNamespace
+from bot.bitget import BitgetError
 from bot.signal import Features, STRAT, book_params, pos_stats
 from bot.ws import load_params
 from bot import cycle
@@ -172,6 +173,24 @@ class Cancels(unittest.TestCase):
         self.assertIn(("cancel", "L2"), cy.b.calls); self.assertIsNotNone(bk.work["buy"]); self.assertTrue(bk.work["buy"]["cancel_pending"])
 
 class Stops(unittest.TestCase):
+    def test_the_exchange_saying_there_is_no_position_asks_for_a_resync_instead_of_escalating(self):
+        """43023: our lots are stale, so there is nothing to protect and nothing to market-close. Counting it as a stop failure
+        drove a 3/s STOP_SET_FAIL -> STOP_FAILED loop that HALTed the book (EGLD 2026-09-03 20:30, audit NEXT 17e)."""
+        cy, bk = book(lots=[[70, 3.0, "a"]]); cy.resync_due = False
+        def gone(*a, **kw): raise BitgetError("43023", "Insufficient position, can not set profit or stop loss")
+        cy.b.place_pos_tpsl = gone
+        asyncio.run(bk.set_stop(2.9))
+        self.assertEqual(bk.stop_fail, 0); self.assertIsNone(bk.stop)
+        self.assertTrue(cy.resync_due); self.assertIn("STOP_NO_POSITION", kinds(cy)); self.assertNotIn("STOP_SET_FAIL", kinds(cy))
+
+    def test_the_same_answer_to_a_modify_keeps_the_old_stop_and_counts_no_failure(self):
+        cy, bk = book(lots=[[70, 3.0, "a"]], stop=dict(px=2.9, order_id="P-old")); cy.resync_due = False
+        def gone(*a, **kw): raise BitgetError("43023", "Insufficient position, can not set profit or stop loss")
+        cy.b.modify_pos_tpsl = gone
+        asyncio.run(bk.set_stop(2.8))
+        self.assertEqual(bk.stop["px"], 2.9); self.assertEqual(getattr(bk, "modify_fail", 0), 0)
+        self.assertTrue(cy.resync_due); self.assertIn("STOP_NO_POSITION", kinds(cy)); self.assertNotIn("STOP_MODIFY_FAIL", kinds(cy))
+
     def test_a_timed_out_stop_submission_is_looked_up_before_it_counts_as_a_failure(self):
         cy, bk = book(lots=[[70, 3.0, "a"]])
         def boom(*a, **kw): cy.b.plans.append(dict(planType="pos_loss", posSide="long", triggerPrice="2.900", orderId="P-late")); raise TimeoutError("read timed out")

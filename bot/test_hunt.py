@@ -1,7 +1,8 @@
 """Invariants of the pump-coin hunting side pipeline (bot/hunt.py): phase names the side, the toll vetoes, one book at a time,
 phase exits rotate without cooldown, episode deaths cool down.  python -m unittest bot.test_hunt"""
-import unittest
-from bot.hunt import flags_of, exit_flags, verdict, apply, HUNT
+import os, shutil, tempfile, types, unittest
+from bot import hunt
+from bot.hunt import flags_of, exit_flags, verdict, apply, pid_alive, HUNT
 
 def row(sym, phase="markdown", **kw):
     r = dict(symbol=sym, px=129.0, qv=4e7, base7=4e6, ratio=10.0, new=False, chg24=-5.0, fund=0.01, oi=1e7, spread_bp=2.0, lever_max=25, min_notional=1.0,
@@ -42,7 +43,28 @@ class Flags(unittest.TestCase):
         self.assertEqual(exit_flags(row("A", "squeeze"), short, HUNT), ["phase:squeeze"])
         self.assertEqual(exit_flags(row("A", "markdown", px=151.0), short, HUNT), ["newhigh"])
         self.assertEqual(exit_flags(row("A", "markdown", dead=True), short, HUNT), ["dead"])
-        self.assertTrue(exit_flags(row("A", "markdown", twoway24=5.0), short, HUNT)[0].startswith("flat"))
+        self.assertEqual(exit_flags(row("A", "markdown", twoway24=5.0), short, HUNT), [])              # the churn floor is off (inverted); movement is ATR's question now
+        self.assertEqual(exit_flags(row("A", "markdown", atr_pct=0.2), short, HUNT), ["still0.2"])
+
+class StoppedMoving(unittest.TestCase):
+    """ATR(1m) is the movement question at the scale we trade — twoway24's 24h window was the weakest predictor (NEXT 17f)."""
+    def test_a_held_coin_under_the_atr_floor_leaves_but_gently(self):
+        held = dict(side="long", peak=1e8, climax=150.2)
+        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=0.29), held, HUNT), ["still0.29"])
+        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=0.30), held, HUNT), [])   # the floor is the entry floor: no gap
+        self.assertTrue(hunt._illiquid("still0.29"))          # wind down only: a book with nothing in it is not worth a market dump
+        self.assertTrue(hunt._leave_coin("still0.29"))        # ... and it cools down like a quiet leaver
+
+    def test_an_unread_atr_keeps_the_book_and_the_ceiling_is_still_entry_only(self):
+        held = dict(side="long", peak=1e8, climax=150.2)
+        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=None), held, HUNT), [])   # absence is not evidence
+        self.assertEqual(exit_flags(row("A", "markup", hint15="long", off=2.0, atr_pct=9.0), held, HUNT), [])    # a held coin's ATR exploding IS the pump
+        self.assertTrue(flags_of(row("A", "markup", hint15="long", off=2.0, atr_pct=9.0), HUNT))                 # ... but it never opens one
+
+    def test_the_inverted_churn_floor_is_off_and_turns_back_on_with_a_number(self):
+        held = dict(side="short", peak=1e8, climax=150.2)
+        self.assertEqual(exit_flags(row("A", "markdown", twoway24=1.0), held, HUNT), [])                          # exit_twoway 0 = off
+        self.assertEqual(exit_flags(row("A", "markdown", twoway24=1.0), held, {**HUNT, "exit_twoway": 8.0}), ["flat1.0"])
 
 class Verdicts(unittest.TestCase):
     def test_an_empty_book_adds_the_churn_leader_after_confirm_scans_with_the_phase_side(self):
@@ -162,6 +184,57 @@ class Verdicts(unittest.TestCase):
         v = verdict([row("C", "quiet")], p["books"], HUNT, st, 1000.0); self.assertIsNone(v["add"])
         apply(p, [row("C", "quiet")], v, {"A": True}, HUNT, st, 1000.0)
         self.assertEqual(list(p["books"]), ["A"])
+
+class MarketTape(unittest.TestCase):
+    """CONCEPT 트랙 B: the market's move is RECORDED and read by nothing — the threshold waits for the cross-section (NEXT 17b)."""
+    def stub(self, closes, highs=None):
+        bars = lambda xs, hs: [dict(o=x, h=(hs or xs)[i], l=x, c=x, qv=1.0) for i, x in enumerate(xs)]
+        return types.SimpleNamespace(candles=lambda sym, tf, limit=0: bars(closes, highs) + [dict(o=0, h=0, l=0, c=0, qv=0)])
+
+    def test_the_market_read_is_a_drawdown_from_the_4h_high_not_just_a_return(self):
+        m = hunt.market(self.stub([100.0] * 26 + [90.0], highs=[100.0] * 26 + [95.0]))
+        self.assertEqual(m["sym"], "BTCUSDT"); self.assertEqual(m["px"], 90.0)
+        self.assertEqual(m["h1"], 0.0)                     # vs the last CLOSED hour's close, which is still 100 ...
+        self.assertEqual(m["dd4"], -10.0)                  # ... but price is 10% under the 4h high: the cascade shows here
+
+    def test_an_unreachable_market_is_recorded_as_nothing_and_never_raises(self):
+        def boom(*a, **kw): raise TimeoutError("read timed out")
+        self.assertIsNone(hunt.market(types.SimpleNamespace(candles=boom), log=lambda *a: None))
+        self.assertIsNone(hunt.market(self.stub([100.0, 100.0]), log=lambda *a: None))   # too few closed 1H bars to read
+
+class TheOtherWriter(unittest.TestCase):
+    """pid_alive gates the only write of params.books, so both of its errors must be the safe one."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(); self.pidfile = os.path.join(self.dir, "select.pid"); self.real = hunt.subprocess.run
+    def tearDown(self):
+        hunt.subprocess.run = self.real; shutil.rmtree(self.dir, ignore_errors=True)
+    def pid(self, v):
+        with open(self.pidfile, "w") as f: f.write(v)
+
+    def cmdline(self, out):
+        hunt.subprocess.run = lambda *a, **k: types.SimpleNamespace(stdout=out) if out is not None else (_ for _ in ()).throw(OSError("powershell gone"))
+
+    def test_a_reused_pid_running_something_else_does_not_block(self):
+        self.pid("14976")                   # the pid is alive, but it is not bot.select: the 2026-09-04 00:16 HUNT_BLOCKED
+        self.cmdline('"C:\\Python313\\python.exe" -m bot.supervise hunt\n')
+        self.assertEqual(pid_alive(self.pidfile), "")
+        self.cmdline("\n"); self.assertEqual(pid_alive(self.pidfile), "")          # dead pid: no command line at all
+
+    def test_the_real_other_writer_blocks_in_both_of_its_forms(self):
+        self.pid("4242")
+        self.cmdline('"C:\\Python313\\python.exe" -m bot.supervise select\n')       # what select.pid actually holds: the supervisor
+        self.assertIn("bot.supervise select", pid_alive(self.pidfile))
+        self.cmdline('"C:\\Python313\\python.exe" -u -m bot.select\n')              # the child it spawns
+        self.assertIn("bot.select", pid_alive(self.pidfile))
+
+    def test_an_unreadable_command_line_blocks_rather_than_risking_two_writers(self):
+        self.pid("4242"); self.cmdline(None)
+        self.assertIn("unreadable", pid_alive(self.pidfile))
+
+    def test_no_pid_file_and_a_garbage_pid_file_do_not_block(self):
+        self.cmdline('"C:\\Python313\\python.exe" -m bot.supervise select\n')     # would block if the file were read at all
+        self.assertEqual(pid_alive(self.pidfile), "")
+        self.pid("not-a-pid"); self.assertEqual(pid_alive(self.pidfile), "")
 
 if __name__ == "__main__":
     unittest.main()

@@ -382,6 +382,7 @@ class Book:
             except Exception as e:
                 if isinstance(e, BitgetError) and str(e.code) == "40917":
                     self.ev("STOP_THROUGH", px=px, err=str(e)[:120]); await self.emergency_close("stop level already passed"); return
+                if isinstance(e, BitgetError) and str(e.code) == "43023": self.no_position(px, e); return
                 self.modify_fail = getattr(self, "modify_fail", 0) + 1
                 self.ev("STOP_MODIFY_FAIL", px=px, keep=self.stop["px"], n=self.modify_fail, err=f"{type(e).__name__}: {str(e)[:140]}")
             return
@@ -396,12 +397,21 @@ class Book:
         except Exception as e:
             if isinstance(e, BitgetError) and str(e.code) == "40917":       # "stop price must be < mark price": the market is already through our stop
                 self.ev("STOP_THROUGH", px=px, err=str(e)[:120]); await self.emergency_close("stop level already passed"); return
+            if isinstance(e, BitgetError) and str(e.code) == "43023": self.no_position(px, e); return
             if not isinstance(e, BitgetError):                               # timeout / network: the exchange may hold it — look before counting a failure
                 try:
                     ex = await self.find_pos_loss()
                     if ex: self.stop, self.stop_fail = ex, 0; self.ev("STOP_SET", px=ex["px"], order_id=ex["order_id"], via="confirmed after timeout"); return
                 except Exception as e2: self.cy.err("set_stop confirm", e2)
             self.stop_fail += 1; self.ev("STOP_SET_FAIL", px=px, n=self.stop_fail, err=f"{type(e).__name__}: {str(e)[:140]}")
+
+    def no_position(self, px, e):
+        """43023 "Insufficient position": the exchange has no position on this side, so our lots are stale — there is nothing to
+        protect and this is not a stop failure. Ask for a resync (housekeeping, <=1s) and let check_mismatch adopt or clear them.
+        Counting it drove a 3/s REJECT + STOP_SET_FAIL + STOP_FAILED loop that market-closed nothing and HALTed the book until a
+        human wrote the STOP file (EGLD 2026-09-03 20:30, 577 of these in the ledger; audit NEXT 17e)."""
+        self.cy.resync_due = True
+        self.ev("STOP_NO_POSITION", px=px, our_qty=pos_stats(self.pos)[0], err=str(e)[:120])
 
     def fallback_stop(self):
         """A stop level that needs no features: the stop already set (persisted across a restart) or the money cap below the average

@@ -66,9 +66,11 @@ def main():
             rep("WARN", f"[{q['symbol']}] {q['holdSide']}: {q['total']} on a contract no engine runs (the engine halts on this: OLD_POSITION)")
     hunt_on = bool((p.get("hunt") or {}).get("on"))       # hunt mode: bot.hunt owns books and bot.select must NOT run (two writers)
     jobs = ["record", "nightly", "sweep", "hunt" if hunt_on else "select"] + sorted(os.path.basename(f)[:-4] for f in glob.glob(os.path.join(LOGS, "cycle*.pid")))
-    def alive_pid(job):
-        pid = int(open(os.path.join(LOGS, f"{job}.pid")).read().strip())
-        return pid, str(pid) in subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, errors="replace").stdout
+    def alive_pid(job):                                 # a live pid NUMBER is not evidence that this job holds it: Windows reuses pids and
+        pid = int(open(os.path.join(LOGS, f"{job}.pid")).read().strip())   # logs/<job>.pid outlives its supervisor, so `tasklist /FI "PID eq N"`
+        cmd = subprocess.run(["powershell", "-NoProfile", "-Command",      # reported a stopped job as alive (bot.hunt.pid_alive reads select.pid the same way)
+                              f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"], capture_output=True, text=True, errors="replace", timeout=60).stdout
+        return pid, cmd.strip().endswith(f"bot.supervise {job.replace('-', ':', 1)}")   # supervise.main writes its OWN pid, under the file name it made by turning the colon into a dash
     for job in jobs:
         try:
             pid, alive = alive_pid(job)
@@ -78,12 +80,17 @@ def main():
         try: pid, alive = alive_pid("select")
         except Exception: alive = False
         rep("FAIL" if alive else "PASS", f"hunt mode: bot.select {'is RUNNING — two writers of params.books' if alive else 'stopped'}")
+        every = float((p.get("hunt") or {}).get("every_min") or 10)   # a hung selector writes no event, so only its silence shows it:
+        try: age = time.time() - os.path.getmtime(os.path.join(LOGS, "hunt.json"))   # nothing can write a phase exit and the exchange
+        except OSError: age = None                                                  # stop is all that is left (audit NEXT 17c)
+        rep("PASS" if age is not None and age <= every * 60 * 3 else "FAIL",
+            f"hunt last scan {'never' if age is None else f'{int(age)}s ago'} (every {every:.0f}m, stale over {every * 3:.0f}m)")
     try:
         lines = open(os.path.join(LOGS, "record.log"), encoding="utf-8").read().splitlines()
         last = [l for l in lines if " REC " in l][-1]; rep("INFO", f"recorder last stats: {last[:120]}")
     except Exception: rep("WARN", "recorder has no REC line yet")
     # track B too (test_hunt / test_whale / test_phases): without them the selector and the evidence tables can break while preflight says PASS
-    mods = ["bot.test_signal", "bot.test_cycle", "bot.test_select", "bot.test_tools", "bot.test_hunt", "bot.test_whale", "bot.test_phases"]
+    mods = ["bot.test_signal", "bot.test_cycle", "bot.test_select", "bot.test_tools", "bot.test_hunt", "bot.test_whale", "bot.test_phases", "bot.test_supervise"]
     r = subprocess.run([sys.executable, "-m", "unittest"] + mods, cwd=ROOT, capture_output=True, text=True)
     rep("PASS" if r.returncode == 0 else "FAIL", f"unit tests: {(r.stderr or r.stdout).strip().splitlines()[-1]}")
     fails = [m for lv, m in out if lv == "FAIL"]
