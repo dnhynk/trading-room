@@ -37,7 +37,7 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             #                      (AKE, USELESS: no spot anywhere; 강고양이 picked STO over NOM for its spot liquidity; user approved 2026-09-03)
             blowoff_atr=8.0, blowoff_frac=0.5,   # written onto LONG hunt books: half the position rests at avg + 8 x ATR15 (strat.blowoff_*; first values)
             strat={},            # the track's RISK PROFILE, written whole onto every hunt book (strat keys: unit_frac, cap_frac, daily_loss_frac, notional_frac,
-            #                      max_stops_day, lever, cap_min_atr ...). The common params.strat stays the basket's contract — the two tracks never share numbers
+            #                      max_stops_day, lever, cap_min_atr, stop_lock_atr, stop_trail_atr ...). The common params.strat stays the basket's contract — the two tracks never share numbers
             min_vol=1e7,         # 24h quote volume floor (fills and footprint at this wallet)
             universe=1e7,        # the volume floor for pulling daily candles
             min_ratio=4.0,       # 24h volume over the median of the prior 7 UTC days: an episode (a fresh listing reads 99)

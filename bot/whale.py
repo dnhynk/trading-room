@@ -51,7 +51,8 @@ def _pct(a, b): return (a / b - 1) * 100 if b else 0.0
 def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     """hours / bars15 / days = CLOSED candles oldest -> newest (>= 48 hours, >= 20 x 15m, >= 3 days); ticker = {qv, fund} or None
     (offline); held = the state kept for a held coin ({peak}) or None. Returns the footprint dict `phase` reads."""
-    px = hours[-1]["c"]
+    px = bars15[-1]["c"] if bars15 else hours[-1]["c"]   # where the market is: the last 15m CLOSE (an accepted level, at most 15 min old; the 1h close is up to
+    #                                                      an hour stale — EGLD 2026-09-03 19:00-19:30 fell 5% inside the hour, invisible to the hourly px)
     h48 = hours[-48:]; i_hi = max(range(len(h48)), key=lambda k: h48[k]["h"]); high48 = h48[i_hi]["h"]
     before = hours[max(0, len(hours) - 48 + i_hi - 72):len(hours) - 48 + i_hi + 1] or h48[:i_hi + 1]
     run = _pct(high48, min(x["l"] for x in before)); off = -_pct(px, high48); age_h = len(h48) - 1 - i_hi
@@ -71,11 +72,20 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
         vprior = statistics.mean([x["qv"] for x in prior]) or 1e-9
         exhaustion = fading and recent[-1]["qv"] < p["vol_dry"] * vprior            # ... and the latest bar's volume dried up
     atr15 = wilder_atr(bars15); hint15 = structure_side(bars15, atr15) if atr15 else None
-    lower_high = None
+    lower_high = leg_down = None
     if atr15 and len(bars15) >= 20:
         closes = [b["c"] for b in bars15]; th = max(1.0, 2 * atr15 / closes[-1] * 100) / 100
-        hs = [closes[i] for i, k in zigzag_pivots(closes, th) if k == "H"]
+        piv = zigzag_pivots(closes, th); hs = [closes[i] for i, k in piv if k == "H"]; ls = [closes[i] for i, k in piv if k == "L"]
         if len(hs) >= 2: lower_high = hs[-1] < hs[-2] and closes[-1] < hs[-1]   # a price above the last pivot high has no lower high (a fresh leg up)
+        # the leg in progress (user 2026-09-03: "하락 시작 표를 확정 피벗이 아니라 미확정 다리로 세"): pivots confirm one swing late — a leg's low
+        # needs a th bounce — so `hint15` cannot turn short during the first leg down (EGLD 19:30: -8% off a lower high, hint None). The leg
+        # from the last confirmed pivot already says it when that pivot is a high that failed to exceed the previous one (distribution) AND
+        # the leg has taken the price under the last confirmed low (support gone): the two-highs/two-lows rule with the leg standing in for
+        # its unconfirmed pivot. Either sign alone is not a vote: the either-or variant read six mid-pump pullbacks as markdown on the
+        # STO 03-31/04-01 and SYN 06-24/25 tapes, four of them followed by +5..+20% in 4h; the both-rule changes nothing on those five
+        # tapes (EGLD, AKE, STO, SYN, SIREN; 2026-09-03) and fires for EGLD at the break of 4.868. A leg down from a FRESH high is a
+        # pullback whatever it breaks (STO 04-01 00:00: under the last low, then +14.5%; EGLD 11:30: -10%, then +6%).
+        leg_down = bool(piv) and piv[-1][1] == "H" and len(hs) >= 2 and hs[-1] <= hs[-2] and len(ls) > 0 and closes[-1] < ls[-1]
     h24 = hours[-24:]; o24 = h24[0]["o"]
     twoway24 = sum(abs(x["c"] - x["o"]) / o24 for x in h24) * 100 - abs(_pct(h24[-1]["c"], o24))
     # ignition: the last 3 closed hours' volume against the median 3-hour volume of the 48 hours before them, and the price move over
@@ -90,7 +100,7 @@ def footprints(hours, bars15, days, ticker=None, held=None, p=WHALE):
     new = len(prior) < 3                                         # a fresh listing has no baseline: its whole life is the episode (ratio 99)
     peak = max(float((held or {}).get("peak") or 0.0), qv)
     return dict(px=px, high48=high48, run=round(run, 1), off=round(off, 1), off_close=round(off_close, 1), age_h=age_h, vmax_at_high=abs(i_v - i_hi) <= 2, post_red=post_red,
-                vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1),
+                vmax_share=round(vmax_share, 2), upwick=round(upwick, 2), lower_high=lower_high, leg_down=leg_down, exhaustion=exhaustion, hint15=hint15, twoway24=round(twoway24, 1),
                 ratio=99.0 if new else round(qv / base, 1), new=new, qv=qv, fund=(ticker or {}).get("fund"), dead=bool(held) and qv < p["dead_ratio"] * peak,
                 atr15_pct=round(atr15 / px * 100, 2) if atr15 else None, ign=ign, up3=up3)
 
@@ -102,11 +112,11 @@ def phase(f, p=WHALE):
     near0 = f.get("off_close", f["off"])
     if (f.get("ign") or 0) >= p["ign_x"] and (f.get("up3") or 0) > 0 and near0 <= p["markup_tol"]:
         return "markup", [f"ignite{f['ign']}x", f"up3{f['up3']:+}"]           # a volume explosion into a fresh close-high starts a leg: the old leg's votes are moot
-    down = f["off"] >= p["down_off"] and f["hint15"] == "short"
+    down = f["off"] >= p["down_off"] and (f["hint15"] == "short" or bool(f.get("leg_down")))   # the structure is down: confirmed, or by the leg in progress
     far = (f["off"] >= p["far_off"] and f.get("off_close", 0.0) >= p["far_close"] and f["hint15"] is None
            and f["run"] >= p["run_min"])                                                     # the top is in by distance alone: under the top AND under the highest close, structure unreadable, run behind it
     if down or far:
-        why = [f"off{f['off']}", "hint_short" if down else "far_off"]
+        why = [f"off{f['off']}", ("hint_short" if f["hint15"] == "short" else "leg_down") if down else "far_off"]
         if f["fund"] is not None and f["fund"] <= p["fund_cold"]: return "squeeze", why + [f"fund{f['fund']}"]
         return "markdown", why
     votes = []
@@ -194,10 +204,10 @@ def main():
     for sym in syms:
         data = load(sym, end_ms, hours, src=src)
         print(f"# {sym}  phase timeline, {hours}h to {time.strftime('%Y-%m-%d %H:%M', time.localtime(end_ms / 1000))} KST, candles from {data['src']} (closed before each row; next4h = what followed)")
-        print(f"{'time':12}{'phase':9}{'px':>10}{'ratio':>6}{'run':>6}{'off':>6}{'age':>4}{'vmax':>5}{'red':>4}{'upw':>5}{'lowhi':>6}{'hint':>6}{'2way':>6}{'next4h':>8}  votes")
+        print(f"{'time':12}{'phase':9}{'px':>10}{'ratio':>6}{'run':>6}{'off':>6}{'age':>4}{'vmax':>5}{'red':>4}{'upw':>5}{'lowhi':>6}{'leg':>5}{'hint':>6}{'2way':>6}{'next4h':>8}  votes")
         for t, ph, votes, f, nxt in timeline(sym, end_ms, hours, step, data=data):
             print(f"{time.strftime('%m-%d %H:%M', time.localtime(t / 1000)):12}{ph:9}{f['px']:>10.5g}{f['ratio']:>6.1f}{f['run']:>6.0f}{f['off']:>6.1f}{f['age_h']:>4}"
-                  f"{'Y' if f['vmax_at_high'] else '-':>5}{f['post_red']:>4}{f['upwick']:>5.2f}{str(f['lower_high'])[:5]:>6}{str(f['hint15']):>6}{f['twoway24']:>6.0f}"
+                  f"{'Y' if f['vmax_at_high'] else '-':>5}{f['post_red']:>4}{f['upwick']:>5.2f}{str(f['lower_high'])[:5]:>6}{'Y' if f.get('leg_down') else '-':>5}{str(f['hint15']):>6}{f['twoway24']:>6.0f}"
                   f"{(f'{nxt:+.1f}%' if nxt is not None else '-'):>8}  {' '.join(votes)}")
 
 if __name__ == "__main__":

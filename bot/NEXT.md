@@ -4,7 +4,7 @@
 
 ## 지금 live 설정 (2026-09-03 15:40 이후) — 이 위에서 판정한다
 
-- **live = 트랙 B(작전코인 헌팅, `hunt.on` 1)**: 감시견 record·cycle·nightly·sweep·hunt, select 는 세워 둠. 책은 hunt 가 하나만 쓴다(방향은 국면: markup 롱 / markdown 숏). 리스크 프로필 `hunt.strat`(unit_frac 4 · cap_frac 0.77 · daily 1.0 · notional 16 · stops 6 · lever 20 · cap_min_atr 30)은 hunt 가 책에 얹는다. 지갑은 소액(수십 달러): 사이클 부스러기는 센트 단위이고 결과는 국면(방향)이 낸다.
+- **live = 트랙 B(작전코인 헌팅, `hunt.on` 1)**: 감시견 record·cycle·nightly·sweep·hunt, select 는 세워 둠. 책은 hunt 가 하나만 쓴다(방향은 국면: markup 롱 / markdown 숏). 리스크 프로필 `hunt.strat`(unit_frac 2 · cap_frac 0.4 · daily 0.6 · notional 8 · stops 4 · lever 20 · cap_min_atr 30 · max_units 3 · 이익 잠금 2.0/1.5 ATR15; 2026-09-03 19:50 정상화(사용자: "너무 낮추진 말고"), 그 전 프로필 4 · 0.77 · 1.0 · 16 · 6 는 폐기)은 hunt 가 책에 얹는다. 지갑은 소액(수십 달러): 사이클 부스러기는 센트 단위이고 결과는 국면(방향)이 낸다.
 - **트랙 A(바구니)는 중지, 온전**: 공통 `strat`(1.5 / 0.15 / 0.3 / 6.5 / 3 / 10 / cap_min_atr 0)·`sig`·`select` 은 바구니 계약 그대로. 바구니 엔진 설정 = 체결 모델 세 규칙 · 코어 게이트 바닥 = 왕복 수수료 · `rg_leg_on` 1 · derisk 전부 끔 · `retrace_frac` 0.2 · lever 10. 확인(09-03 15:20): 테스트, `select --once --dry` 끝까지, 기준 테이프. 복귀 절차는 "트랙 B" 절 첫 줄.
 - **기준 테이프(`--fixed`, 공통 strat)**: 04–06(캐스케이드) **+1.33**(19 사이클, 손절 1, DD 8.9) · 07–10 **+4.67**(13, 0, 3.6) · 27h **+15.09**(103, 1, 8.9) · 08-31 **+7.38**(79, 0, 4.6). 기준 수치는 params 를 읽으므로 비교는 같은 params 에서만.
 
@@ -25,7 +25,7 @@
 | 날짜 | 열리는 것 | 누가 |
 | --- | --- | --- |
 | 09-04 금 09:10 | 첫 나이틀리 `phases` 표(hunt 책 하루치: 국면×방향 ledger, 목표 매도 체결 유무), `HUNT_*` 알림 복기 | 감독 세션이 읽음 |
-| **09-07 월 09:10 뒤** | 트랙 B: `hunt-history` 3~4일 = 점화 오발화율(전 종목 `ign`·`up3` × 다음 4h), climax/far/quiet 퇴출 뒤 실제 낙폭, 목표 매도 체결 비율·놓친 상승분, 회전 횟수와 flat 지연 → `WHALE`·`HUNT` 첫 값을 옮길지 | **다음 수정 세션** |
+| **09-07 월 09:10 뒤** | 트랙 B: `hunt-history` 3~4일 = 점화 오발화율(전 종목 `ign`·`up3` × 다음 4h), climax/far/quiet 퇴출 뒤 실제 낙폭, 목표 매도 체결 비율·놓친 상승분, 이익 잠금 스탑의 결과(`STOP_LOCK` 뒤 STOP_HIT 로 끝난 캠페인 vs 트림으로 끝난 캠페인, 잠금 뒤 최고가 분포 → lock 2.0·trail 1.5 를 옮길지), 회전 횟수와 flat 지연 → `WHALE`·`HUNT` 첫 값을 옮길지 | **다음 수정 세션** |
 | 재개 D+2 | 트랙 A: 첫 유효 튜너 리포트(§7) · §4 피처 분할(캠페인 300) · §6 6항 심볼별 기하 | 감독 세션 |
 | 재개 D+3 | 세 live 실험의 3일 규칙 첫 판정 | 감독 세션(params) |
 | 재개 D+5 | §6 2항 짝 표 · §3 sweep 5일 · §1 s8 분할 5일 · §8 첫 프로브 판정·군집 안정성·slow 재측정 | 수정 세션 |
@@ -165,8 +165,8 @@
 
 12. **hunt 의 기준선**: 7일 중앙값은 2주째 가는 작전(MAGMA, 02:31 ratio 1.8×)을 놓친다. 후보: 8~21일 전 중앙값, 또는 min(7일, 21일 중앙값). 판정은 hunt-history 에서 "놓친 코인이 뒤에 적격이 됐는가"로. TRUMP 도 2.7~3.0× 라 markup 을 못 받았다(급락 전 롱 재진입을 막은 쪽으로 작용).
 13. **세력대항마 단계(`bot/whale.py`·`bot/phases.py`, RULES 도구 절)**: 1·2단계 done. 1단계 = 캔들·티커 국면 판독(live). **2단계 = `bot.phases` 국면 증거표(야간, done)**: forward(국면 뒤 1h·4h 가격)·ledger(국면×방향 live 사이클 실적)·flow(녹화의 CVD·OI·펀딩). 문턱(`WHALE`·`HUNT`)은 이 표가 며칠 쌓인 뒤 움직인다 — 지금 숫자는 첫 값. **3단계(열림, 증거 게이트)**: (a) 국면별 사이즈 스케일 — `pos["unit_mult"]` 훅은 이미 있고(지금 `against_daily_mult` 가 씀) 국면을 태우려면 hunt 가 `books[sym]["unit_mult"]` 를 쓰면 되나, climax 표본이 작아(n=7) 숫자를 못 정한다. ledger 표가 "markup 롱이 나이 들수록 사이클당 순이 준다"를 보이면 착수. (b) sweep & reclaim 세 번째 검출기 — `bot.sweeps` 표가 계속 +0.13%/5m·MFE/MAE 1.65 면 shadow 신호로(s8 처럼). **지문 표** 다섯(주문 크기, 스푸핑/아이스버그, 털기 타이밍·OI 수확, 취소 비율)은 `bot.slip`/`bot.sweeps` 옆에 붙일 자리만 있다. **한계(그대로)**: 마감봉이라 마지막 신고가 직후 한 시간 안의 덤프는 못 읽음(TRUMP 08-29 04 UTC); `structure_side` 가 두 스윙 뒤라 markdown 이 늦다.
-14. **돈의 기하(열림, 사용자 리스크 선택)**: `hunt.strat` 의 cap_frac 0.77·unit_frac 4·max_units 4 로 사다리를 다 채우면 크로스 명목이 지갑의 6.8~16배가 되고 cap 손절이 청산가 1~3% 안쪽에 앉는다(청산 거리 ≈ W/N − 유지증거금; ATR 1.5%/분 코인이면 한 봉이 그 간격). 노브는 cap_frac·unit_frac·max_units. 기록: 엔진 `exit_t` 는 재기동에 리셋(600초 시계 재시작, 연성 상태 불변식); `hunt.on` 0 으로 끄면 wind_down/exit 책이 남으니 손으로 지운다.
-15. **트랙 B 문턱의 출처와 남은 검증**: `WHALE`(exhaustion 4봉/0.5, big_run 100, far_off 20/far_close 10, markup_tol 5, ign_x 5, top_off 15, down_off 10)과 `HUNT`(exit_confirm 1, quiet_frac 0.5, exit 600초/3 ATR, blowoff 8 ATR15/0.5, require_spot 1)는 전부 강고양이(DC 차트갤) 매매 6건(SIREN·STO·RAVE·SYN·AKE×2)·TRUMP·UAI·AKE 를 걸어가며 대조해 정한 **첫 값**이다 — 그 대조에서 확인된 것은 "현물 있는 코인의 점화 거래량에 진입, 청산은 목표가 또는 ADL(급등 꼬리 안)"이라는 행동뿐이고, 승자만 올린 글이라 표본 편향이 있다. 남은 검증(09-07): 점화 오발화율(전 종목 횡단면, `hunt-history` 의 `ign`·`up3`), 목표 매도의 체결 비율과 놓친 상승분(`bot.phases` ledger 에 blowoff 체결을 갈라 볼 것), climax/far/quiet 퇴출 뒤 실제 낙폭, 회전의 flat 지연. **어느 값도 한 테이프를 보고 옮기지 않는다** — 횡단면 표로만.
+14. **돈의 기하(2026-09-03 정상화)**: `hunt.strat` 를 cap_frac 0.4·unit_frac 2·max_units 3·notional 8·daily 0.6·stops 4 로 내렸다. 스탑 거리 = cap/qty 이므로 사다리가 깊어질수록 조여진다: 1유닛 −20% · 2유닛 −10% · 3유닛 −6.7%(ATR15 2.7% 코인에서 2.5 ATR15), 다 채운 크로스 명목 6배의 청산 거리(≈ W/N) −16% 보다 9%p 안쪽. 폐기한 0.77·4·4 는 4유닛에서 −4.8% = 1.7 ATR15 — 최대 손실을 잡음 거리에 두고 청산가 1~3% 안쪽에 앉았다(EGLD 09-03 19시 캠페인: 2유닛 미실현 −28% 자본, 스탑까지 −69%). cap_min_atr 30 은 첫 유닛만 지킨다. 노브는 cap_frac·unit_frac·max_units. 기록: 엔진 `exit_t` 는 재기동에 리셋(600초 시계 재시작, 연성 상태 불변식); `hunt.on` 0 으로 끄면 wind_down/exit 책이 남으니 손으로 지운다.
+15. **트랙 B 문턱의 출처와 남은 검증**: `WHALE`(exhaustion 4봉/0.5, big_run 100, far_off 20/far_close 10, markup_tol 5, ign_x 5, top_off 15, down_off 10, leg_down = 앞 고점 미돌파 이고 마지막 확정 저점 이탈인 진행 중 다리(둘 중 하나 변형은 STO·SYN 에서 기각), px = 15분 마감가)과 `HUNT`(exit_confirm 1, quiet_frac 0.5, exit 600초/3 ATR, blowoff 8 ATR15/0.5, require_spot 1, 이익 잠금 스탑 lock 2.0/trail 1.5 ATR15 — 1.5 는 sweeps 표의 사냥 깊이 상한 1.2 + 0.3 버퍼)는 전부 강고양이(DC 차트갤) 매매 6건(SIREN·STO·RAVE·SYN·AKE×2)·TRUMP·UAI·AKE 를 걸어가며 대조해 정한 **첫 값**이다 — 그 대조에서 확인된 것은 "현물 있는 코인의 점화 거래량에 진입, 청산은 목표가 또는 ADL(급등 꼬리 안)"이라는 행동뿐이고, 승자만 올린 글이라 표본 편향이 있다. 남은 검증(09-07): 점화 오발화율(전 종목 횡단면, `hunt-history` 의 `ign`·`up3`), 목표 매도의 체결 비율과 놓친 상승분(`bot.phases` ledger 에 blowoff 체결을 갈라 볼 것), climax/far/quiet 퇴출 뒤 실제 낙폭, 회전의 flat 지연. **어느 값도 한 테이프를 보고 옮기지 않는다** — 횡단면 표로만.
 
 ## 결정된 것 — 다시 제안하지 않는다 (근거는 RULES)
 

@@ -72,7 +72,7 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
              derisk_on_against=True,                     # False: the AGAINST label (a trailing 90-min statistic, late by construction) only scales adds; de-risk keeps its timely triggers (latch, fresh break)
              derisk_under_units=True,                    # the weak-bounce cut also reaches a core that has units on top (booked against the core lot); False: only a lone core is cut (pre-2026-09-02)
-             cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_cooldown_s=300, max_stops_day=3,
+             cap_usdt=20, stop_structural=None, stop_structural_on=1, stop_buffer_atr=0.3, stop_trail=1, stop_lock_atr=0.0, stop_trail_atr=0.0, stop_cooldown_s=300, max_stops_day=3,
              buy_ttl_s=90,                               # a real filter, not a backstop: rests beyond it pre-empt the next signal's lower fill (2026-08-30 tapes: 300/900/1800 s all worse even with the "left" cancel)
              cancel_v=1.0, tick=0.001, qstep=0.1)
 
@@ -643,6 +643,7 @@ class Strategy:
         self.struct_stop = None  # the open position's premise level (soft: a de-risk trigger, never the exchange stop; None while flat)
         self.prem_broken = False # latch: price has been beyond the premise level; cleared by a fill or a full recovery, like derisk_armed
         self.stop_px = None      # last stop returned; once set for a position it is never moved against the position
+        self.best = None         # the campaign's best favourable mid since it opened (profit lock/trail); None while flat
         self.peak = None         # best favourable mid since the last fill (retrace-based top detection)
         self.trough = None       # worst mid since the last fill: peak - trough is the bounce a retrace is measured against
         self.struct_skip = False # STRUCT_SKIP reported once per position (a level may still qualify later)
@@ -857,7 +858,7 @@ class Strategy:
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
+        if not qty: self.struct_stop = self.stop_px = self.best = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
         else:
             cap_px = avg - s * p["cap_usdt"] / max(qty, unit)   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
@@ -873,6 +874,21 @@ class Strategy:
                       and s * (round_tick(cand, tick) - round_tick(self.struct_stop, tick)) >= tick - 1e-12):    # a newly defended low, at least one tick tighter
                     self.struct_stop = cand; ev.append(("TRAIL", dict(level=lvl, stop=round_tick(cand, tick))))
             stop = cap_px
+            if p["stop_lock_atr"] > 0:
+                # profit lock (2026-09-03): a gain beyond noise never becomes a loss. Once the campaign's best mid is stop_lock_atr x ATR15 past
+                # the average, the exchange stop rises to breakeven (avg +- the round-trip fee) and, with stop_trail_atr, to the best mid minus
+                # stop_trail_atr x ATR15 when that is tighter (1.5 = the 1.2 ATR15 sweep-depth bound + the 0.3 structural buffer). The ratchet
+                # below keeps it from ever loosening; a restart restarts `best` but not the stop already set (fallback_stop / ADOPT_STOP).
+                if self.best is None or s * (mid - self.best) > 0: self.best = mid
+                if f.get("atr15") and s * (self.best - avg) >= p["stop_lock_atr"] * f["atr15"]:
+                    lock = avg * (1 + s * (p.get("fee_rt_pct") or 0) / 100)
+                    if p["stop_trail_atr"] > 0:
+                        trail = self.best - s * p["stop_trail_atr"] * f["atr15"]
+                        if s * (trail - lock) > 0: lock = trail
+                    if s * (lock - stop) > 0:
+                        stop = lock
+                        if self.stop_px is None or s * (round_tick(stop, tick) - round_tick(self.stop_px, tick)) >= tick - 1e-12:
+                            ev.append(("STOP_LOCK", dict(stop=round_tick(stop, tick), best=self.best, avg=round(avg, 6))))
             if self.stop_px is None and s * (mid - stop) <= 0:      # only a brand-new stop can be "wrong"; an existing one that price reaches is a stop hit, never moved
                 ev.append(("STOP_INVALID", dict(stop=stop, mid=mid)))
                 stop = cap_px if s * (mid - cap_px) > 0 else None

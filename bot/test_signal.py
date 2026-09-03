@@ -689,5 +689,33 @@ class ExitMode(unittest.TestCase):
         st, pos = self._st(); st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertEqual(st.exit_t, 100)
         pos["lots"] = []; st.step(F(t=101, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertIsNone(st.exit_t)
 
+class StopLock(unittest.TestCase):
+    """stop_lock_atr / stop_trail_atr (2026-09-03, hunt profile): a gain beyond noise never becomes a loss — the exchange stop rises to
+    breakeven once the best mid is lock x ATR15 past the average, trails the best mid at trail x ATR15 when tighter, and never loosens."""
+    def _st(self, side="long", **kw):
+        st = Strategy({**dict(side=side, unit_qty=70, cap_usdt=20, stop_structural_on=0, stop_lock_atr=2.0, stop_trail_atr=1.5, fee_rt_pct=0.1), **kw})
+        return st, dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+
+    def test_long_locks_at_two_atr_then_trails_and_never_loosens(self):
+        st, pos = self._st()
+        r = st.step(F(t=100, mid=3.05, bid=3.049, ask=3.051), [], pos)
+        self.assertAlmostEqual(r["stop"], 3.0 - 20 / 70, 3)                                        # +0.8 ATR15: still the money cap (2.714)
+        r = st.step(F(t=110, mid=3.13, bid=3.129, ask=3.131), [], pos)                               # +2.17 ATR15 (0.06): lock; trail 3.13 - 0.09 beats breakeven 3.003
+        self.assertAlmostEqual(r["stop"], 3.04, 3); self.assertEqual([e[0] for e in r["events"] if e[0] == "STOP_LOCK"], ["STOP_LOCK"])
+        r = st.step(F(t=120, mid=3.30, bid=3.299, ask=3.301), [], pos); self.assertAlmostEqual(r["stop"], 3.21, 3)   # the trail follows the best mid
+        r = st.step(F(t=130, mid=3.10, bid=3.099, ask=3.101), [], pos)
+        self.assertAlmostEqual(r["stop"], 3.21, 3); self.assertNotIn("STOP_LOCK", [e[0] for e in r["events"]])       # a pullback never loosens it (ratchet), no event
+        pos["lots"] = []; st.step(F(t=140, mid=3.10, bid=3.099, ask=3.101), [], pos); self.assertIsNone(st.best)      # flat forgets the campaign's best
+
+    def test_breakeven_alone_when_the_trail_is_off_and_a_short_mirrors(self):
+        st, pos = self._st(stop_trail_atr=0.0)
+        r = st.step(F(t=110, mid=3.13, bid=3.129, ask=3.131), [], pos); self.assertAlmostEqual(r["stop"], 3.003, 3)   # avg x (1 + 0.1% round trip)
+        st, pos = self._st(side="short")
+        r = st.step(F(t=110, mid=2.87, bid=2.869, ask=2.871), [], pos); self.assertAlmostEqual(r["stop"], 2.96, 3)    # 2.87 + 1.5 x 0.06, tighter than the cap 3.286
+
+    def test_off_by_default_the_basket_keeps_the_money_cap(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        r = st.step(F(t=110, mid=3.30, bid=3.299, ask=3.301), [], pos); self.assertAlmostEqual(r["stop"], 3.0 - 20 / 70, 3); self.assertIsNone(st.best)
+
 if __name__ == "__main__":
     unittest.main()

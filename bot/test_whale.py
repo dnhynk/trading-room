@@ -66,12 +66,46 @@ class Footprints(unittest.TestCase):
         for leg in ((-2, 10), (2, 5), (-2, 10), (2, 5), (-2, 10), (2, 5)):
             for _ in range(leg[1]): z += leg[0]; closes.append(z)
         bars15 = [bar(ts + i * 900_000, closes[i - 1] if i else 150.0, closes[i], wick=0.1) for i in range(len(closes))]
-        f = footprints(hours, bars15, days, dict(qv=50_000.0, fund=0.15))
+        end15 = lambda hrs: bars15 + [bar(ts + len(closes) * 900_000, closes[-1], hrs[-1]["c"], wick=0.1)]   # px is the last 15m close: close it where the hour closed
+        f = footprints(hours, end15(hours), days, dict(qv=50_000.0, fund=0.15))
         self.assertGreaterEqual(f["run"], 49.0); self.assertGreater(f["off"], 10.0); self.assertTrue(f["vmax_at_high"] or f["post_red"] >= 2)
         self.assertEqual(f["hint15"], "short"); self.assertTrue(f["lower_high"]); self.assertEqual(f["ratio"], 50.0)
         self.assertEqual(phase(f)[0], "markdown")                                                                      # off >= 10 with the structure down
-        f2 = footprints(hours[:-4], bars15, days, dict(qv=50_000.0, fund=0.15))                                       # two hours after the peak: still near it
+        f2 = footprints(hours[:-4], end15(hours[:-4]), days, dict(qv=50_000.0, fund=0.15))                                       # two hours after the peak: still near it
         self.assertLess(f2["off"], 15.0); self.assertEqual(phase(f2)[0], "climax")
+
+class LegInProgress(unittest.TestCase):
+    """leg_down (2026-09-03): the leg from the last confirmed pivot high counts as the structure turning down when that high failed to
+    exceed the previous one AND the leg is under the last confirmed low — before the pivot low confirms. One sign alone is a pullback."""
+    def _series(self, closes15, top):
+        ts = 1_700_000_000_000; hours = [bar(ts + i * 3_600_000, 100.0, 100.0, v=100.0) for i in range(72)]
+        hours += [bar(ts + (72 + i) * 3_600_000, 100.0 + (top - 100.0) * i / 5, 100.0 + (top - 100.0) * (i + 1) / 5, v=100.0) for i in range(5)]   # a run to `top`
+        hours.append(bar(ts + 77 * 3_600_000, top, closes15[-1], v=100.0))                                                                          # the last hour closes where the 15m does
+        days = [dict(ts=ts + i * 86_400_000, o=100, h=100, l=100, c=100, v=1, qv=1000.0) for i in range(10)]
+        bars15 = [bar(ts + i * 900_000, closes15[i - 1] if i else closes15[0], closes15[i], wick=0.1) for i in range(len(closes15))]
+        return footprints(hours, bars15, days, dict(qv=50_000.0, fund=None))
+
+    def _path(self, *legs):
+        z = 100.0; out = [z]
+        for to, n in legs:
+            for i in range(1, n + 1): out.append(round(z + (to - z) * i / n, 3))
+            z = to
+        return out
+
+    def test_a_failed_high_whose_leg_breaks_the_last_low_reads_markdown_before_the_pivot_low_confirms(self):
+        f = self._series(self._path((120, 8), (110, 6), (130, 8), (118, 6), (128, 6), (115, 8)), 130.0)   # H 120 < H 130 > H 128 (failed), the leg under L 118, no bounce yet
+        self.assertIsNone(f["hint15"]); self.assertTrue(f["leg_down"]); self.assertGreaterEqual(f["off"], 10.0)   # confirmed structure: highs down, lows up = unreadable
+        ph, why = phase(f); self.assertEqual(ph, "markdown"); self.assertIn("leg_down", why)
+
+    def test_one_sign_alone_is_a_pullback(self):
+        f = self._series(self._path((120, 8), (110, 6), (130, 8), (118, 6), (128, 6), (119, 6)), 130.0)   # a failed high, but the leg holds above the last low 118
+        self.assertFalse(f["leg_down"]); self.assertNotEqual(phase(f)[0], "markdown")
+        f = self._series(self._path((120, 8), (110, 6), (130, 8), (118, 6), (136, 6), (115, 8)), 136.0)   # a fresh high, then a shakeout under the last low (STO 04-01)
+        self.assertFalse(f["leg_down"]); self.assertGreaterEqual(f["off"], 10.0); self.assertNotEqual(phase(f)[0], "markdown")
+
+    def test_the_price_is_the_last_15m_close(self):
+        f = self._series(self._path((120, 8), (110, 6), (130, 8), (118, 6), (128, 6), (116, 6)), 130.0)
+        self.assertEqual(f["px"], 116.0); self.assertAlmostEqual(f["off"], -(116.0 / f["high48"] - 1) * 100, 1)   # under the 48h high, from the 15m close
 
 if __name__ == "__main__":
     unittest.main()
