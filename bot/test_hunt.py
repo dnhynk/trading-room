@@ -247,6 +247,30 @@ class SecondOpinion(unittest.TestCase):
         r = self.run_with('{"reads":[{"symbol":"A","phase":"distribution","conf":88,"why":"fat wicks"},'
                           '{"symbol":"B","phase":"nonsense"},{"symbol":"ZZZ","phase":"markup"}]}')
         self.assertEqual(list(r), ["A"]); self.assertEqual(r["A"][0], "distribution")
+        self.assertEqual(r["A"][3:], (1, 1))                    # 합의 1/1
+
+    def test_the_ensemble_votes_and_records_how_far_it_split(self):
+        """같은 입력에 답이 17% 흔들리는 것을 실측했다(2026-09-04) — 다수결이 그것을 흡수하고 합의율이 실측 신뢰도가 된다."""
+        outs = ['{"reads":[{"symbol":"A","phase":"markdown","conf":90},{"symbol":"B","phase":"markup","conf":70}]}',
+                '{"reads":[{"symbol":"A","phase":"markdown","conf":80},{"symbol":"B","phase":"quiet","conf":60}]}',
+                'garbage']                                      # 한 번 실패해도 나머지로 진행한다
+        real = hunt.subprocess.run; seq = iter(outs)
+        def fake(cmd, **kw):
+            i = cmd.index("-o")
+            with open(cmd[i + 1], "w", encoding="utf-8") as fh: fh.write(next(seq))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        hunt.subprocess.run = fake
+        try: r = hunt.ai_read([row("A", "markup"), row("B", "markup")], {**HUNT, "ai_read": 1, "ai_runs": 3}, log=lambda *a: None)
+        finally: hunt.subprocess.run = real
+        self.assertEqual(r["A"][0], "markdown"); self.assertEqual(r["A"][3:], (2, 2))    # 둘 다 같은 답
+        self.assertEqual(r["A"][1], 85)                                                  # 이긴 라벨의 평균 conf
+        self.assertEqual(r["B"][3:], (1, 2))                                             # 갈렸다: 합의 1/2 로 기록된다
+
+    def test_every_run_failing_keeps_the_deterministic_read(self):
+        real = hunt.subprocess.run
+        hunt.subprocess.run = lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("codex timed out"))
+        try: self.assertEqual(hunt.ai_read([row("A")], {**HUNT, "ai_read": 1, "ai_runs": 3}, log=lambda *a: None), {})
+        finally: hunt.subprocess.run = real
 
     def test_any_failure_keeps_the_deterministic_read(self):
         self.assertEqual(self.run_with("not json at all"), {})          # 형식 오류

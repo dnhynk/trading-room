@@ -6,7 +6,8 @@
 1. 메모리(자동 로드)에서 `cycle-harness-plan`, `symbol-selection-principles`, `regime-filter-is-circuit-breaker`, `script-evolves-on-its-own-evidence`, `user-aggressive-trading-preference`, `token-economy-long-sessions`를 읽는다. 그다음 `bot/CONCEPT.md`(자연어 전략 — 최상위 계약)와 `bot/RULES.md`(코드가 지금 그것을 어떻게 구현하는지)를 읽는다. 이 둘이 진실이고, 기억이나 추측으로 답하지 않는다.
 2. `python -m bot.preflight`로 프로세스·계좌·포지션·주문·테스트를 확인한다. **엔진은 심볼마다 하나이고 상태 파일도 심볼마다 하나다** — `logs/state-<SYMBOL>.json`(예: `state-TRUMPUSDT.json`)으로 방향별 포지션·주문·스탑·레짐·오류를, `logs/select.log` 마지막 `SELECT` 줄로 보유 종목·빈 슬롯·후보를 본다. 보유 심볼은 `params.json`의 `books` 블록이 진실이다(심볼마다 `wallet_frac`, 선택적 `mode`·`wind_down`).
 3. Monitor에 `python -u -m bot.watch_cycle 3600`을 persistent로 붙인다(알림·체결·재기동·야간 리포트·4시간마다 SELECT 판정·60분 HB만 온다).
-4. 사용자에게 한 줄로 상태를 보고하고 대기한다.
+4. 운영 이벤트는 채팅이 아니라 Slack으로 보낸다 — **`python -m bot.notify <payload.json>`**(`bot/notify.py`). 모양·제목 접두·자동 잔고 줄의 계약은 `CLAUDE.md`의 "감독 알림 채널" 절이다. 직접 curl을 쓰거나 알림 스크립트를 새로 만들지 않는다.
+5. 사용자에게 한 줄로 상태를 보고하고 대기한다.
 
 ## 프로세스 (분리 실행; pid는 `logs/<job>.pid`, 로그는 `logs/<job>.log`)
 감시견 5개(record·cycle·nightly·sweep·select) 고정 — **단, `params.hunt.on` 이 1 이면(숏 헌팅 실험 모드, RULES 도구 절 `bot.supervise hunt`) select 대신 `hunt` 감시견이 다섯 번째다: select 를 올리지 마라(두 쓰기자; preflight 가 FAIL 로 잡는다). `HUNT_ADD`/`HUNT_WIND_DOWN`/`HUNT_DROP` 은 `BOOK_*` 과 같은 뜻이고 `HUNT_BLOCKED` 는 select 가 살아 있다는 뜻이다.** **`cycle` 감시견이 `params.json`의 `books`를 읽어 심볼마다 자식 엔진 하나를 유지한다**(로그 `logs/cycle-<SYMBOL>.log`; `books`가 없으면 예전처럼 못박히지 않은 엔진 하나). select이 심볼을 더하면 엔진이 뜨고, 빼면 재기동하지 않는다(그 엔진은 스스로 종료한다). 손으로 하나만 고정하려면 `cycle:<SYMBOL>`을 따로 띄우되 **그 심볼이 `books` 안에 있어야 한다** — 밖이면 엔진이 시작을 거부하고(EXIT) 감시견도 다시 올리지 않는다. 프로세스 확인: `Get-CimInstance Win32_Process`에서 CommandLine이 `-m bot.cycle`(자식) 또는 `-m bot.supervise`(감시견)인 것.

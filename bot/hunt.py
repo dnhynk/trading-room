@@ -21,6 +21,7 @@ Rank among the eligible = 1h two-way path (churn) — the order for the empty sl
 Events: HUNT (every scan) in logs/events.jsonl; HUNT_ADD / HUNT_WIND_DOWN / HUNT_DROP / HUNT_BLOCKED also in logs/alerts.jsonl.
 State (streaks, cooldowns, the held coin's side / peak volume / climax high / exit reason) in logs/hunt-state.json."""
 import json, os, statistics, subprocess, sys, time
+from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import Bitget
 from bot.scan import PRODUCT
@@ -66,7 +67,7 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             ai_read=0,           # 1: 국면을 AI 세션(`codex exec`)이 읽고 결정론 판독(`whale.phase`)은 phase_det/side_det 로 그림자가 된다
             #                      (사용자 결정 2026-09-04). 자격 게이트는 AI 가 못 건드린다 — 대체하는 것은 국면과 방향뿐이다.
             #                      실패하면 결정론으로 폴백한다. 판정은 며칠 뒤 `bot.campaigns`: 불일치한 행에서 밀려난 쪽이 옳았나.
-            ai_cmd="codex", ai_model="", ai_effort="", ai_timeout_s=240,
+            ai_cmd="codex", ai_model="", ai_effort="", ai_timeout_s=240, ai_runs=1,   # ai_runs>1: 같은 입력을 병렬로 여러 번 읽고 다수결(합의율을 `ai_agree` 로 남긴다)
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
 BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
@@ -193,26 +194,47 @@ def ai_read(rows, hunt, log=log):
     if not rows: return {}
     body = json.dumps([{k: r.get(k) for k in K} for r in rows], ensure_ascii=False)
     d = os.path.join(LOGS, "ai"); os.makedirs(d, exist_ok=True)
-    out = os.path.join(d, "read.json")
-    try:
-        if os.path.exists(out): os.remove(out)
-        cmd = [hunt.get("ai_cmd") or "codex", "exec", "--skip-git-repo-check", "-s", "read-only", "--cd", d, "-o", out]
-        if hunt.get("ai_model"): cmd += ["-m", str(hunt["ai_model"])]        # 기본은 ~/.codex/config.toml (gpt-5.6-sol / xhigh).
-        if hunt.get("ai_effort"): cmd += ["-c", f"model_reasoning_effort={hunt['ai_effort']}"]   # luna-max 등은 API 키 인증이라야 뜬다
-        p = subprocess.run(cmd + ["-"],
-                           input=AI_PROMPT + chr(10) + body, capture_output=True, text=True, errors="replace",
-                           timeout=float(hunt.get("ai_timeout_s") or 240))
-        with open(out, encoding="utf-8") as fh: raw = fh.read()
-    except Exception as e:
-        log(f"hunt: ai_read failed ({type(e).__name__}: {str(e)[:80]}) - keeping the deterministic read"); return {}
-    i, j = raw.find("{"), raw.rfind("}")
-    try: got = json.loads(raw[i:j + 1])["reads"]
-    except Exception as e:
-        log(f"hunt: ai_read unparsable ({type(e).__name__}); rc={p.returncode} {raw[:120]!r}"); return {}
     want = {r["symbol"] for r in rows}
-    reads = {x["symbol"]: (x["phase"], x.get("conf"), str(x.get("why") or "")[:60])
-             for x in got if isinstance(x, dict) and x.get("symbol") in want and x.get("phase") in AI_PHASES}
-    log(f"hunt: ai_read {len(reads)}/{len(rows)} coins, {sum(1 for r in rows if reads.get(r['symbol'], (None,))[0] != r.get('phase'))} disagree")
+
+    def one(n):
+        """한 번의 판독. 실패·형식오류는 {} 이고 앙상블이 나머지로 진행한다."""
+        out = os.path.join(d, f"read{n}.json")
+        try:
+            if os.path.exists(out): os.remove(out)
+            cmd = [hunt.get("ai_cmd") or "codex", "exec", "--skip-git-repo-check", "-s", "read-only", "--cd", d, "-o", out]
+            if hunt.get("ai_model"): cmd += ["-m", str(hunt["ai_model"])]      # 없으면 ~/.codex/config.toml 기본값
+            if hunt.get("ai_effort"): cmd += ["-c", f"model_reasoning_effort={hunt['ai_effort']}"]
+            subprocess.run(cmd + ["-"], input=AI_PROMPT + chr(10) + body, capture_output=True, text=True,
+                           errors="replace", timeout=float(hunt.get("ai_timeout_s") or 240))
+            with open(out, encoding="utf-8") as fh: raw = fh.read()
+            i, j = raw.find("{"), raw.rfind("}")
+            return {x["symbol"]: (x["phase"], x.get("conf"), str(x.get("why") or "")[:60])
+                    for x in json.loads(raw[i:j + 1])["reads"]
+                    if isinstance(x, dict) and x.get("symbol") in want and x.get("phase") in AI_PHASES}
+        except Exception as e:
+            log(f"hunt: ai_read run {n} failed ({type(e).__name__}: {str(e)[:70]})"); return {}
+
+    # 같은 입력을 여러 번 읽고 다수결한다 — 같은 입력에 답이 17% 흔들리는 것을 실측했고(2026-09-04, 3회 중 15/18 만 완전 일치),
+    # 단일 호출은 그 흔들림을 그대로 실행에 넣는다(그때 MUBARAK 이 live 에서 climax, 3회 재실행에서는 3:0 markdown 이었다 —
+    # 둘 다 롱 퇴출이지만 markdown 만 숏 후보가 되므로 draw 하나가 방향을 바꾼다). 병렬이라 지연은 한 번과 같고 토큰만 N 배다.
+    runs = max(1, int(hunt.get("ai_runs") or 1))
+    if runs == 1: got = [one(1)]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=runs) as ex: got = list(ex.map(one, range(1, runs + 1)))
+    ok = [g for g in got if g]
+    if not ok: log("hunt: ai_read produced nothing - keeping the deterministic read"); return {}
+    reads = {}
+    for sym in want:
+        votes = [g[sym] for g in ok if sym in g]
+        if not votes: continue
+        c = Counter(v[0] for v in votes); ph, n_ph = c.most_common(1)[0]
+        confs = [v[1] for v in votes if v[0] == ph and isinstance(v[1], (int, float))]
+        why = next(v[2] for v in votes if v[0] == ph)
+        reads[sym] = (ph, round(sum(confs) / len(confs)) if confs else None, why, n_ph, len(votes))   # 합의 n/N 이 실측 신뢰도다
+    split = sum(1 for v in reads.values() if v[3] < v[4])
+    log(f"hunt: ai_read {len(reads)}/{len(rows)} coins from {len(ok)}/{len(got)} runs, "
+        f"{sum(1 for r in rows if reads.get(r['symbol'], (None,))[0] != r.get('phase'))} disagree, {split} split")
     return reads
 
 def scan(hunt, held=(), st=None, b=None, log=log):
@@ -258,10 +280,10 @@ def scan(hunt, held=(), st=None, b=None, log=log):
             log(f"  {s}: shape failed {type(e).__name__}: {str(e)[:60]}"); r.update(phase="unread", votes=[], side=None, twoway24=None, run=None, off=None, high48=None, atr_pct=None, hint15=None, dead=False)
         r["flags"] = flags_of(r, hunt)
     if hunt.get("ai_read") and deep:
-        for sym, (ph, conf, why) in ai_read([r for r in deep if r.get("phase") not in (None, "unread")], hunt, log).items():
+        for sym, (ph, conf, why, agree, n) in ai_read([r for r in deep if r.get("phase") not in (None, "unread")], hunt, log).items():
             r = next(x for x in deep if x["symbol"] == sym)
             r["phase_det"], r["side_det"] = r.get("phase"), r.get("side")      # 그림자: 결정론이 무엇이라 했는지 매 스캔 남는다
-            r["phase"], r["ai_conf"], r["ai_why"] = ph, conf, why
+            r["phase"], r["ai_conf"], r["ai_why"], r["ai_agree"] = ph, conf, why, f"{agree}/{n}"
             r["side"] = "long" if ph == "markup" else "short" if ph == "markdown" else None
             r["flags"] = flags_of(r, hunt)                                     # 통행료 게이트는 새 국면 위에서 다시 — veto 는 AI 가 못 뒤집는다
     for r in rows:
