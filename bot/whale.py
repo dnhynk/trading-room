@@ -25,6 +25,9 @@ WHALE = dict(episode_ratio=4.0,   # 24h volume / own 7-day median: an episode
              quiet_ratio=2.0,     # under this, with no churn, the coin is quiet
              run_min=25.0,        # % run into the 48h high from the low before it
              top_off=15.0,        # climax is read only this close (%) under the 48h high
+             ign_x=5.0,           # ignition: the last 3 closed hours' volume >= ign_x x the median 3h volume of the prior 48h, rising, at the close-high -> markup
+             #                      whatever the prior leg's structure or climax votes say (강고양이's SIREN/STO entries read climax/unknown because the previous
+             #                      small leg's lower-high/exhaustion votes were still on; user approved 2026-09-03)
              markup_tol=5.0,      # markup only within this % of the highest CLOSE (a fresh close-high or just under it): a bounce that has not reclaimed the top
              #                      is a pullback, not a markup (SYN 2026-06-26 03:00, -8% off the climax close, read markup then fell 13% more)
              down_off=10.0,       # markdown needs the price at least this far (%) under the high (with the 15m structure down) ...
@@ -96,6 +99,9 @@ def phase(f, p=WHALE):
     high) > markup (episode, run, near the high, structure not down) > unknown."""
     if f["dead"]: return "dead", ["dead"]
     if f["ratio"] < p["quiet_ratio"] and f["twoway24"] < p["twoway_dead"]: return "quiet", [f"ratio{f['ratio']}", f"twoway{f['twoway24']}"]
+    near0 = f.get("off_close", f["off"])
+    if (f.get("ign") or 0) >= p["ign_x"] and (f.get("up3") or 0) > 0 and near0 <= p["markup_tol"]:
+        return "markup", [f"ignite{f['ign']}x", f"up3{f['up3']:+}"]           # a volume explosion into a fresh close-high starts a leg: the old leg's votes are moot
     down = f["off"] >= p["down_off"] and f["hint15"] == "short"
     far = (f["off"] >= p["far_off"] and f.get("off_close", 0.0) >= p["far_close"] and f["hint15"] is None
            and f["run"] >= p["run_min"])                                                     # the top is in by distance alone: under the top AND under the highest close, structure unreadable, run behind it

@@ -5,7 +5,7 @@ from bot.hunt import flags_of, exit_flags, verdict, apply, HUNT
 
 def row(sym, phase="markdown", **kw):
     r = dict(symbol=sym, px=129.0, qv=4e7, base7=4e6, ratio=10.0, new=False, chg24=-5.0, fund=0.01, oi=1e7, spread_bp=2.0, lever_max=25, min_notional=1.0,
-             tick_pct=0.001, twoway24=30.0, net24=-3.0, run=50.0, off=14.0, off_close=14.0, high48=150.2, atr_pct=0.6, atr15_pct=2.0, hint15="short", dead=False,
+             tick_pct=0.001, twoway24=30.0, net24=-3.0, run=50.0, off=14.0, off_close=14.0, high48=150.2, atr_pct=0.6, atr15_pct=2.0, hint15="short", dead=False, spot="bitget",
              phase=phase, votes=[], flags=[])
     r.update(kw); r["side"] = "long" if r["phase"] == "markup" else "short" if r["phase"] == "markdown" else None
     r["flags"] = list(kw.get("flags", flags_of(r, HUNT))); return r
@@ -26,6 +26,8 @@ class Flags(unittest.TestCase):
         self.assertEqual(flags_of(row("A", "markup", fund=-0.3), HUNT), [])
         self.assertEqual(flags_of(row("A", "markup"), {**HUNT, "long_on": 0}), ["long_off"])
         self.assertEqual(flags_of(row("A", "markdown"), {**HUNT, "short_on": 0}), ["short_off"])
+        self.assertEqual(flags_of(row("A", "markdown", spot=None), HUNT), ["nospot"])                    # a perp-only pump (AKE, USELESS) is not a candidate
+        self.assertEqual(flags_of(row("A", "markdown", spot=None), {**HUNT, "require_spot": 0}), [])
 
     def test_exit_flags_read_the_side_and_the_phase(self):
         short = dict(side="short", peak=1e8, climax=150.2); long_ = dict(side="long", peak=1e8, climax=150.2)
@@ -50,7 +52,7 @@ class Verdicts(unittest.TestCase):
         v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual(v["add"], ("A", "long"))
         acts = apply(p, rows, v, {}, HUNT, st, 1000.0)
         self.assertEqual([a[:2] for a in acts], [("add", "A")])
-        self.assertEqual(p["books"], {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1}})
+        self.assertEqual(p["books"], {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "blowoff_atr": 8.0, "blowoff_frac": 0.5}})   # a long book carries the standing blow-off target
         self.assertEqual((p["strat"]["symbol"], p["strat"]["side"], p["strat"]["sides"]), ("A", "long", ["long", "short"]))
         self.assertEqual(set(p["record"]), {"A", "B", "BTCUSDT"}); self.assertEqual(st["held"]["A"]["side"], "long")
 
@@ -73,7 +75,7 @@ class Verdicts(unittest.TestCase):
         v = verdict([row("B", "markdown")], p2["books"], HUNT, st2, 4000.0); self.assertEqual(v["add"], ("B", "short"))
         acts = apply(p2, [row("B", "markdown")], v, {"A": True}, HUNT, st2, 4000.0)
         self.assertEqual([a[:2] for a in acts], [("drop", "A"), ("add", "B")]); self.assertNotIn("A", st2.get("cool", {}))     # phase exit: no cooldown
-        self.assertEqual(p2["books"], {"B": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}}); self.assertEqual(p2["strat"]["side"], "short")
+        self.assertEqual(p2["books"], {"B": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}}); self.assertEqual(p2["strat"]["side"], "short")   # a short book: no blow-off keys
 
     def test_an_episode_death_winds_down_gently_without_the_exit_flag(self):
         st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2)})

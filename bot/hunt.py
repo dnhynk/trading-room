@@ -33,6 +33,9 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             every_min=10, confirm=2, exit_confirm=1, long_on=1, short_on=1,   # opening risk waits `confirm` scans; leaving is fast (`exit_confirm`, CONCEPT: the
             #                                                                   risk-opening side bears the higher bar). Scan often — the churn we eat is minutes-scale
             quiet_frac=0.5,      # leave when the last-24h two-way path falls under this share of the peak seen while held: the action left THIS coin, chase a hotter one
+            require_spot=1,      # a candidate must have a SPOT market (Bitget or Binance): a perp-only pump is a pure liquidation harvest that can vanish in an hour
+            #                      (AKE, USELESS: no spot anywhere; 강고양이 picked STO over NOM for its spot liquidity; user approved 2026-09-03)
+            blowoff_atr=8.0, blowoff_frac=0.5,   # written onto LONG hunt books: half the position rests at avg + 8 x ATR15 (strat.blowoff_*; first values)
             min_vol=1e7,         # 24h quote volume floor (fills and footprint at this wallet)
             universe=1e7,        # the volume floor for pulling daily candles
             min_ratio=4.0,       # 24h volume over the median of the prior 7 UTC days: an episode (a fresh listing reads 99)
@@ -64,6 +67,7 @@ def flags_of(r, hunt):
     if r.get("atr_pct") is None or r["atr_pct"] > hunt["max_atr"] or r["atr_pct"] < hunt["min_atr"]: f.append(f"atr{r.get('atr_pct')}")
     if (r.get("lever_max") or 0) < hunt["min_lever"]: f.append(f"lever{r.get('lever_max')}")
     if (r.get("twoway24") or 0) < hunt["min_twoway"]: f.append(f"twoway{r.get('twoway24')}")
+    if hunt.get("require_spot") and not r.get("spot"): f.append("nospot")
     ph = r.get("phase")
     if ph == "markup":
         if not hunt["long_on"]: f.append("long_off")
@@ -92,12 +96,31 @@ def exit_flags(r, held, hunt):
         if r["fund"] is not None and r["fund"] < hunt["min_fund"]: f.append(f"fund{r['fund']:+.2f}%")
     return f                                                      # ATR is an entry question only: a held coin's ATR exploding is the pump itself
 
+_SPOTS = {"t": 0.0, "map": {}}
+def spot_markets(b, log=log):
+    """{symbol: "bitget" | "binance"} for USDT pairs with a live spot market, refreshed hourly. Binance is best-effort (unreachable = ignored)."""
+    if time.time() - _SPOTS["t"] < 3600 and _SPOTS["map"]: return _SPOTS["map"]
+    m = {}
+    try:
+        import json as _json, urllib.request
+        with urllib.request.urlopen("https://api.binance.com/api/v3/exchangeInfo", timeout=10) as r:
+            for s in _json.loads(r.read())["symbols"]:
+                if s.get("status") == "TRADING" and s.get("quoteAsset") == "USDT": m[s["symbol"]] = "binance"
+    except Exception as e: log(f"hunt: binance spot list unavailable ({type(e).__name__})")
+    try:
+        for s in b.get("/api/v2/spot/public/symbols", auth=False):
+            if s.get("status") == "online" and s.get("quoteCoin") == "USDT": m[s["symbol"]] = "bitget"
+    except Exception as e: log(f"hunt: bitget spot list unavailable ({type(e).__name__})")
+    if m: _SPOTS.update(t=time.time(), map=m)
+    return m
+
 def scan(hunt, held=(), st=None, b=None, log=log):
     """Rows for every contract with 24h volume >= `universe` (daily candles for the ratio), the full shape for those with an episode
     (ratio >= min_ratio, a fresh listing counts) or held. Public REST only. Sorted: eligible by two-way path (desc), then by ratio."""
     b = b or Bitget("", "", ""); t0 = time.time(); hs = (st or {}).get("held") or {}
     contracts = {c["symbol"]: c for c in b.get("/api/v2/mix/market/contracts", auth=False, productType=PRODUCT) if c.get("symbolStatus") == "normal"}
     tickers = {t["symbol"]: t for t in b.get("/api/v2/mix/market/tickers", auth=False, productType=PRODUCT)}
+    spots = spot_markets(b, log)
     pool = [s for s, t in tickers.items() if s in contracts and s not in hunt["exclude"] and (float(t.get("quoteVolume") or 0) >= hunt["universe"] or s in held)]
     log(f"hunt: {len(pool)} contracts with 24h volume >= {hunt['universe'] / 1e6:.0f}M; daily candles ...")
     rows, dailies = [], {}
@@ -107,7 +130,7 @@ def scan(hunt, held=(), st=None, b=None, log=log):
         except Exception as e: log(f"  {s}: 1D failed {type(e).__name__}"); continue
         dailies[s] = days; prior = [d["qv"] for d in days[-7:]]
         base = statistics.median(prior) if len(prior) >= 3 else 0.0
-        rows.append(dict(symbol=s, px=px, qv=qv, base7=base, ratio=99.0 if len(prior) < 3 else round(qv / base, 1), new=len(prior) < 3,
+        rows.append(dict(symbol=s, px=px, qv=qv, base7=base, ratio=99.0 if len(prior) < 3 else round(qv / base, 1), new=len(prior) < 3, spot=spots.get(s),
                          chg24=round(float(t.get("change24h") or 0) * 100, 1), fund=round(float(t.get("fundingRate") or 0) * 100, 3),
                          oi=float(t.get("holdingAmount") or 0) * px, spread_bp=round(_pct(float(t.get("askPr") or px), float(t.get("bidPr") or px)) * 100, 1),
                          lever_max=int(float(contracts[s].get("maxLever") or 0)), min_notional=float(contracts[s].get("minTradeNum") or 0) * px,
@@ -132,11 +155,11 @@ def scan(hunt, held=(), st=None, b=None, log=log):
     return ok + rest
 
 def table(rows, n=15):
-    out = [f"{'symbol':12}{'px':>10}{'qv24':>7}{'ratio':>7}{'chg24':>7}{'run':>6}{'off':>6}{'2way':>6}{'atr%':>6}{'fund':>7}{'lev':>4}{'hint':>6}  {'phase':9}{'side':6}flags | votes"]
+    out = [f"{'symbol':12}{'px':>10}{'qv24':>7}{'ratio':>7}{'chg24':>7}{'run':>6}{'off':>6}{'2way':>6}{'atr%':>6}{'ign':>5}{'fund':>7}{'lev':>4}{'spot':>5}{'hint':>6}  {'phase':9}{'side':6}flags | votes"]
     for r in rows[:n]:
         g = lambda k, d=0: r[k] if r.get(k) is not None else d
         out.append(f"{r['symbol']:12}{r['px']:>10.5g}{r['qv'] / 1e6:>6.0f}M{r['ratio']:>6.1f}x{r['chg24']:>+6.1f}%{g('run'):>6.0f}{g('off'):>6.1f}{g('twoway24'):>6.0f}"
-                   f"{g('atr_pct'):>6.2f}{r['fund']:>+7.3f}{r.get('lever_max') or 0:>4}{str(r.get('hint15')):>6}  {str(r.get('phase')):9}{str(r.get('side')):6}{' '.join(r['flags'])} | {' '.join(r.get('votes') or [])}")
+                   f"{g('atr_pct'):>6.2f}{g('ign'):>5.1f}{r['fund']:>+7.3f}{r.get('lever_max') or 0:>4}{(r.get('spot') or '-')[:4]:>5}{str(r.get('hint15')):>6}  {str(r.get('phase')):9}{str(r.get('side')):6}{' '.join(r['flags'])} | {' '.join(r.get('votes') or [])}")
     return "\n".join(out)
 
 def verdict(rows, books, hunt, st, now):
@@ -212,6 +235,8 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
             st.get("held", {}).pop(s, None); acts.append(("drop", s, f"flat ({why or 'replaced'})"))
         sym, side = add; r = by[sym]
         books[sym] = {"wallet_frac": 1.0, "sides": [side], "hunt": 1}
+        if side == "long" and float(hunt.get("blowoff_atr") or 0) > 0:               # the standing blow-off target, long books only (the basket never sees it)
+            books[sym].update(blowoff_atr=float(hunt["blowoff_atr"]), blowoff_frac=float(hunt.get("blowoff_frac") or 1.0))
         st.setdefault("held", {})[sym] = dict(peak=r.get("qv_shape") or r["qv"], climax=r.get("high48"), side=side, t=now); st["streak"] = {}
         acts.append(("add", sym, f"{side} phase {r.get('phase')} votes {' '.join(r.get('votes') or [])} ratio {r['ratio']}x run {r.get('run')}% off {r.get('off')}% twoway {r.get('twoway24')} atr {r.get('atr_pct')} fund {r['fund']}"))
     if books: p["books"] = books

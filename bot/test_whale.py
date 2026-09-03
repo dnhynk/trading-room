@@ -23,6 +23,13 @@ class Rules(unittest.TestCase):
         self.assertEqual(phase(fp(off=31.8, off_close=0.0, hint15=None, run=202.0, exhaustion=True))[0], "climax")   # exhaustion at the max close under a blow-off wick: the top (SYN 06-26 00:00)
         self.assertEqual(phase(fp(off=37.3, off_close=8.0, hint15=None, run=202.0))[0], "unknown")                   # a bounce 8% under the climax close is not a markup (SYN 06-26 03:00, then -13%)
         self.assertEqual(phase(fp(off=12.0, off_close=4.0, hint15="long", run=142.0))[0], "markup")                  # just under a fresh close-high: the markup continues
+
+    def test_ignition_at_a_fresh_close_high_overrides_the_old_legs_structure_and_climax_votes(self):
+        ph, votes = phase(fp(off=2.0, off_close=1.0, hint15="short", ratio=0.8, run=40.0, lower_high=True, exhaustion=True, ign=7.5, up3=12.0))
+        self.assertEqual(ph, "markup"); self.assertTrue(votes[0].startswith("ignite"))          # SIREN 03-22 12:00: ratio 0.8x, old structure short, votes from the prior leg — the volume explosion wins
+        self.assertEqual(phase(fp(off=2.0, off_close=1.0, hint15="short", ratio=0.8, run=40.0, lower_high=True, exhaustion=True, ign=3.0, up3=12.0))[0], "climax")   # no explosion: the old votes stand
+        self.assertEqual(phase(fp(off=2.0, off_close=1.0, hint15=None, ratio=0.8, run=40.0, ign=7.5, up3=-4.0))[0], "unknown")   # volume without a rise is not an ignition
+        self.assertEqual(phase(fp(off=35.0, off_close=31.0, hint15=None, ratio=3.0, run=142.0, ign=9.0, up3=15.0))[0], "markdown")   # a bounce 31% under the top on volume is a squeeze/bounce, not an ignition
         self.assertEqual(phase(fp(off=12.0, hint15=None, run=142.0))[0], "unknown")              # not far enough for the distance read, structure silent: nothing
         self.assertEqual(phase(fp(off=32.0, hint15="long", run=142.0))[0], "unknown")            # structure says up: distance alone does not call a markdown
         self.assertEqual(phase(fp(off=32.0, hint15=None, run=10.0))[0], "unknown")               # no run behind it: a drifter, not a pump's markdown

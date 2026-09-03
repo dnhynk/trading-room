@@ -1,5 +1,11 @@
 {
   "record": {
+    "EGLDUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "AKEUSDT": [
       "trade",
       "books15",
@@ -53,7 +59,7 @@
     ]
   },
   "strat": {
-    "symbol": "AKEUSDT",
+    "symbol": "EGLDUSDT",
     "side": "long",
     "sides": [
       "long",
@@ -106,12 +112,14 @@
     "lever": 20
   },
   "books": {
-    "AKEUSDT": {
+    "EGLDUSDT": {
       "wallet_frac": 1.0,
       "sides": [
         "long"
       ],
-      "hunt": 1
+      "hunt": 1,
+      "blowoff_atr": 8.0,
+      "blowoff_frac": 0.5
     }
   },
   "sig": {

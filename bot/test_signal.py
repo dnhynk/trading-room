@@ -671,6 +671,17 @@ class ExitMode(unittest.TestCase):
         r = st.step(F(t=130, mid=2.84, bid=2.839, ask=2.841), [], pos)                                          # 3 x ATR(0.02) = 0.06 under the flag
         self.assertEqual(r["trim"][2], "taker"); self.assertEqual([e[1]["path"] for e in r["events"] if e[0] == "PULL_TRIM"], ["adverse"])
 
+    def test_the_blow_off_target_rests_for_part_of_the_position_and_yields_to_a_stall_pull(self):
+        """blowoff_atr (2026-09-03, hunt long books): half the position rests as a maker at avg + 8 x ATR15; a stall pull takes the slot."""
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, blowoff_atr=8.0, blowoff_frac=0.5))
+        pos = dict(lots=[[70, 3.0, "a"], [70, 2.9, "b"]], avg=2.95, last="buy", last_buy_px=2.9)
+        r = st.step(F(t=100, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos)
+        self.assertEqual(r["trim"], (round(2.95 + 8 * 0.06, 10), 70, "maker", None))                  # 3.43, half of 140, resting above the market
+        r = st.step(F(t=200, mid=3.02, bid=3.019, ask=3.021, atr15=0.06), [dict(sig="POP_STALLING")], pos)   # a stall above the LIFO lot's cost: the pull wins the slot
+        self.assertEqual(r["trim"][2], "maker"); self.assertLess(r["trim"][0], 3.1)
+        st0 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos0 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        self.assertIsNone(st0.step(F(t=100, mid=2.92, bid=2.919, ask=2.921, atr15=0.06), [], pos0)["trim"])   # off by default: the basket never rests a target
+
     def test_without_the_flag_nothing_changes_and_a_flat_book_forgets_the_flag(self):
         st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
         r = st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [dict(sig="POP_STALLING")], pos)

@@ -51,6 +51,9 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
                                      # back a fixed share of the move it crowned to count as a reversal. 0 restores the ATR-only rule; trim_retrace_atr 0 disables both
              fee_rt_pct=None,        # round-trip fee (%) flooring an added unit's relaxed gate (a taker exit still pays): None = from the contract (OMS / backtest)
              wallet_frac=1.0,   # 이 엔진이 쓰는 지갑의 몫. 심볼 하나면 1.0, 포트폴리오면 심볼마다 나눠 합이 1.0 (params["books"][symbol])
+             blowoff_atr=0.0, blowoff_frac=0.5,   # > 0 (hunt long books only, user 2026-09-03): a resting reduce-only maker for blowoff_frac of the position at
+             # avg + blowoff_atr x ATR15 — the blow-off top is sold by a standing target (강고양이's exits: a planned level, or the exchange's ADL), which no
+             # stall read reaches inside a one-hour spike (AKE 0.045 -> 0.0167, SYN, SIREN). A stall pull takes precedence; the rest returns for the remainder
              exit=False, exit_after_s=600, exit_atr=3.0,   # exit: the campaign's premise broke (hunt: the phase turned against the book) — sell the WHOLE
              # position into the next stall / retrace top whatever the cost; no stall within exit_after_s, or the price exit_atr x ATR further
              # against us since the flag: taker. CONCEPT "전제가 깨지면 시장가로 던지지 않고 되돌림에 판다" with a floor under "되돌림" (2026-09-03)
@@ -846,6 +849,11 @@ class Strategy:
                 px = avg * (1 + s * p["trim_rest_pct"] / 100)
                 px = max(px, touch_out) if s > 0 else min(px, touch_out)
                 trim = (round_tick(px, tick), min(lot_qty, sellable), "maker", None)
+            if trim is None and p.get("blowoff_atr", 0) > 0 and f.get("atr15"):          # 급등 목표 매도: a standing target for part of the position (experiment mode)
+                px = avg + s * p["blowoff_atr"] * f["atr15"]
+                px = max(px, touch_out) if s > 0 else min(px, touch_out)
+                bq = min(qty, round(round(qty * p.get("blowoff_frac", 1.0) / qs) * qs, 9))
+                if bq >= qs - 1e-9: trim = (round_tick(px, tick), bq, "maker", None)
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
