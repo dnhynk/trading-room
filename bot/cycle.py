@@ -244,7 +244,7 @@ class Book:
             return
         for role in ("buy", "trim"):
             want, w = d[role], self.work[role]
-            if w and (w.get("cancel_pending") or w.get("unconfirmed")): continue    # its exchange state is being settled; no replacement until then
+            if w and (w.get("cancel_pending") or w.get("unconfirmed") or w.get("settling")): continue    # its exchange state is being settled (a cancel, a lost submission, or fills still in flight); no replacement until then
             if want is not None and role == "trim" and want[2] == "taker":
                 if w: await self.cancel(role); w = self.work[role]
                 if w or self.market_pending: continue            # the maker order rests until its cancel is confirmed, and a market order with a lost response is settled first
@@ -316,7 +316,8 @@ class Book:
                 gone = any(k in str(e).lower() for k in GONE)
                 w["cancel_fail"] = w.get("cancel_fail", 0) + 1
                 self.ev("CANCEL_FAIL", role=role, oid=w["oid"], n=w["cancel_fail"], gone=gone, err=str(e)[:160])
-                if gone: self.work[role] = None                       # the order is finished on the exchange; its fills (if any) arrive on the fill channel
+                if gone: w["settling"], w["settling_t"], w["cancel_pending"] = w["qty"], time.time(), None   # finished on the exchange: its fills (if any) are still in flight —
+                #                                                        hold the slot until they are booked (or the resync lets it go after 10 s), never re-order the remainder now
                 elif w["cancel_fail"] >= 5: self.ev("ERROR", where="cancel", msg=f"{role} order {w['oid']} cannot be cancelled; still tracked")
                 return                                                 # otherwise keep tracking it and retry on the next tick
             w["cancel_pending"] = time.time(); self.replaced[role] = time.time()     # keep it until the exchange confirms (orders channel / order_detail)
@@ -481,7 +482,8 @@ class Book:
         w = self.work[role]
         if w and w["oid"] == oid:
             w["filled"] += qty
-            if w["filled"] >= w["qty"] - self.cy.qstep / 2: self.work[role] = None
+            done = w["filled"] >= w["qty"] - self.cy.qstep / 2 or (w.get("settling") and w["filled"] >= w["settling"] - self.cy.qstep / 2)
+            if done: self.work[role] = None                    # every fill the exchange counted is booked: the slot is free again
         q, avg = pos_stats(self.pos)
         self.ev("FILL", role=role, qty=qty, px=px, fee=rnd(fee), pnl=rnd(pnl), scope=scope, pos_qty=rnd(q), avg=rnd(avg), realized=rnd(self.realized), oid=oid,
                 lot="core" if lot == 0 else None,   # a de-risk cut under units reduces the core lot, not the LIFO unit (bot.cycles follows this)
@@ -537,7 +539,11 @@ class Book:
         role = "buy" if kind == "b" else "trim"; w = self.work[role]; st = r.get("status")
         if w and w["oid"] == oid:
             w["order_id"] = w["order_id"] or r.get("orderId"); w["unconfirmed"] = None
-            if st in ("cancelled", "canceled", "filled"): self.work[role] = None
+            if st in ("cancelled", "canceled", "filled"):
+                acc = float(r.get("accBaseVolume") or 0)
+                if acc > w["filled"] + self.cy.qstep / 2:            # the exchange finished it before its fills reached us (the orders channel outran the fill
+                    w["settling"], w["settling_t"] = acc, time.time()   # channel by a second, EGLD 2026-09-03 16:38: 48.3 "filled" while 7.3 was booked -> the
+                else: self.work[role] = None                          # "remainder" 41.0 was re-ordered and both filled). Hold the slot until the fills are booked.
         elif w is None and st in ("live", "partially_filled", "new"):   # an order of ours the book forgot (restart, timeout): track it, never duplicate it
             self.work[role] = dict(oid=oid, order_id=r.get("orderId"), px=float(r["price"]), qty=float(r["size"]), filled=float(r.get("accBaseVolume") or 0), t=time.time())
             self.ev("ADOPT_ORDER", role=role, px=self.work[role]["px"], qty=self.work[role]["qty"], oid=oid, via="orders channel")
@@ -602,7 +608,8 @@ class Book:
                 except Exception as e: self.cy.err("resync cancel", e)
         for role in ("buy", "trim"):                       # tracked but not on the exchange and not settling: it is gone
             w = self.work[role]
-            if w and w["oid"] not in seen and not w.get("unconfirmed") and not w.get("cancel_pending") and time.time() - w["t"] > 10:
+            if w and w["oid"] not in seen and not w.get("unconfirmed") and not w.get("cancel_pending") and time.time() - w["t"] > 10 \
+                    and not (w.get("settling") and time.time() - w.get("settling_t", 0) < 10):   # a settling order's fills get 10 s to arrive before the slot is released
                 self.work[role] = None; self.ev("ORDER_GONE", role=role, oid=w["oid"], via="resync")
         found = preset = None
         for o in (await self.cy.rest(self.cy.b.pending_plan_orders, self.symbol)).get("entrustedList") or []:

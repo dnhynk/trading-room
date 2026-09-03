@@ -1,7 +1,7 @@
 """OMS invariants of bot/cycle.py (Book against a stub exchange).  python -m unittest bot.test_cycle -v"""
 import asyncio, time, unittest
 from types import SimpleNamespace
-from bot.signal import Features, STRAT, book_params
+from bot.signal import Features, STRAT, book_params, pos_stats
 from bot.ws import load_params
 from bot import cycle
 from bot.cycle import Book, valid_params, quantize_unit
@@ -119,6 +119,39 @@ class StopFills(unittest.TestCase):
         self.assertIsNone(bk.strat.step(cy.feat.f, [], bk.pos, {})["buy"])                 # PAUSE 면 arm 이 서 있어도 담기 주문은 없다
         asyncio.run(bk.on_algo(dict(planType="psl", status="executing", orderId="PLAN9", triggerPrice="2.9")))
         self.assertEqual(bk.unmatched_close, [])                                          # 이름이 붙으면 풀린다(다음 tick 이 pause 를 되돌린다)
+
+class SettlingFills(unittest.TestCase):
+    """2026-09-03 16:38 EGLD: the orders channel said 'filled' (acc 48.3) a second before the fill channel delivered 22.1 and 18.9; the book had
+    7.3 booked, re-ordered the 'remainder' 41.0, and both filled -> 89.3 contracts for a 48.3 unit. A finished order whose counted fills are not
+    yet booked holds its slot (settling) until they are."""
+    def test_a_filled_order_whose_fills_are_in_flight_holds_the_slot_until_they_are_booked(self):
+        cy, bk = book(); cy.qstep, cy.vp = 0.1, 1
+        async def quiet(sigs): pass
+        bk.tick = quiet                                                                       # the OMS alone: no strategy tick after fills
+        bk.work["buy"] = dict(oid="cycL-b1", order_id="L1", px=5.266, qty=48.3, filled=0.0, t=time.time())
+        asyncio.run(bk.on_fill("buy", 7.3, 5.266, 0.0077, "cycL-b1"))                        # the first fill lands
+        bk.on_order(dict(clientOid="cycL-b1", orderId="L1", status="filled", accBaseVolume="48.3", price="5.266", size="48.3"))   # the exchange: done, 48.3 counted
+        self.assertIsNotNone(bk.work["buy"]); self.assertEqual(bk.work["buy"]["settling"], 48.3)
+        d = dict(buy=(5.266, 41.0), trim=None, stop=None, no_stop=False, events=[])
+        asyncio.run(bk.reconcile(d))
+        self.assertFalse(any(c[0] == "limit" for c in cy.b.calls))                           # no second order for the "remainder"
+        asyncio.run(bk.on_fill("buy", 22.1, 5.266, 0.023, "cycL-b1")); asyncio.run(bk.on_fill("buy", 18.9, 5.266, 0.02, "cycL-b1"))
+        self.assertIsNone(bk.work["buy"]); self.assertAlmostEqual(pos_stats(bk.pos)[0], 48.3, 6)   # every counted fill booked: the slot is free, one unit
+        bk.on_order(dict(clientOid="cycL-b2", orderId="L2", status="filled", accBaseVolume="10", price="5.0", size="10"))   # a finished order we do not track: ignored
+        self.assertIsNone(bk.work["buy"])
+
+    def test_a_cancel_that_finds_the_order_gone_holds_the_slot_too(self):
+        cy, bk = book(); cy.qstep, cy.vp = 0.1, 1
+        bk.work["buy"] = dict(oid="cycL-b1", order_id="L1", px=5.266, qty=48.3, filled=7.3, t=time.time())
+        def gone(*a, **k): raise Exception("43001: The order does not exist")
+        cy.b.cancel_order = gone
+        asyncio.run(bk.cancel("buy"))
+        self.assertIsNotNone(bk.work["buy"]); self.assertEqual(bk.work["buy"]["settling"], 48.3); self.assertIsNone(bk.work["buy"]["cancel_pending"])
+        d = dict(buy=(5.266, 41.0), trim=None, stop=None, no_stop=False, events=[])
+        asyncio.run(bk.reconcile(d)); self.assertFalse(any(c[0] == "limit" for c in cy.b.calls))
+        async def quiet(sigs): pass
+        bk.tick = quiet
+        asyncio.run(bk.on_fill("buy", 41.0, 5.266, 0.04, "cycL-b1")); self.assertIsNone(bk.work["buy"])
 
 class Cancels(unittest.TestCase):
     def test_taker_waits_until_the_maker_cancel_is_confirmed(self):
