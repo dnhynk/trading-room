@@ -18,13 +18,7 @@
       "ticker",
       "candle1m"
     ],
-    "UAIUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "BRUSDT": [
+    "APRUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -68,7 +62,7 @@
     "pop_min_pct": 0.4,
     "unit_min_pct": 0.15,
     "full_exit_pct": 3.0,
-    "trim_taker_after_s": 10,
+    "trim_taker_after_s": 60,
     "trim_taker_slip_pct": 0.1,
     "trim_rest_pct": 0,
     "trim_retrace_atr": 0.5,
