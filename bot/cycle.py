@@ -210,12 +210,16 @@ class Book:
     def resize(self):
         """Equity-scaled sizing (compounding, and de-leveraging after losses): unit notional = wallet x unit_frac, cap = wallet x cap_frac,
         daily limit = wallet x daily_loss_frac, position notional cap = wallet x notional_frac (fractions already split per side). Wallet =
-        account equity minus unrealized pnl; recomputed only while flat, at most every 60s, moving the unit at most 25% per step. Fixed
-        params are the fallback — a fixed cap next to a scaling unit goes stale as the wallet compounds and starves the book."""
+        account equity minus unrealized pnl; recomputed at most every 60s, moving the unit at most 25% per step. With a position only
+        REDUCTIONS of the unit, the notional cap and the daily limit apply (a lowered profile, or a wallet shrunk by realized losses,
+        stops the ladder at once: fewer adds allowed, smaller ones); increases wait for flat, and the money cap is the campaign's — it is
+        never re-derived under an open position (the exchange stop tightens only by its own rules). 2026-09-03: the hunt profile was cut
+        4/0.77/16 -> 2/0.4/8 at 20:08 under a 2-unit EGLD long that never went flat, so the old 4x unit kept adding into the slide
+        (20:21, -3.9). Fixed params are the fallback — a fixed cap next to a scaling unit goes stale as the wallet compounds and starves the book."""
         self.sized_t = time.time()
         if not any(self.sp.get(k) for k in SIZED.values()) or self.cy.acct["equity"] is None: return
         qty, _ = pos_stats(self.pos); mid = self.feat.f.get("mid")
-        if qty or not mid: return
+        if not mid: return
         # 지갑은 계좌 전체다 — 엔진이 여럿이면 각자 자기 몫만 써야 한다(안 나누면 심볼 수만큼 노출이 배가 된다)
         wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
         if wallet <= 0: return                                    # an empty wallet sizes nothing and is no reference for the next resize (2026-09-03: a first SIZING at
@@ -230,6 +234,7 @@ class Book:
         if self.sp.get("cap_frac"): new["cap_usdt"] = round(wallet * self.sp["cap_frac"], 2)
         if self.sp.get("daily_loss_frac"): new["daily_loss_limit"] = round(wallet * self.sp["daily_loss_frac"], 2)
         if self.sp.get("notional_frac"): new["max_notional"] = round(wallet * self.sp["notional_frac"], 2)
+        if qty: new = {k: v for k, v in new.items() if k != "cap_usdt" and self.sp.get(k) is not None and v < self.sp[k]}   # positioned: reductions only, never the cap
         if any(abs(self.sp.get(k, 0) - v) > 0.02 * max(abs(v), 1e-9) for k, v in new.items()):   # only moves of >= 2%: no per-minute jitter
             self.dyn.update(new); self.sp.update(new); self.strat.p = self.sp
             atr, uq, cap = self.feat.f.get("atr"), self.sp.get("unit_qty"), self.sp.get("cap_usdt")

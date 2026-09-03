@@ -335,6 +335,26 @@ class Params(unittest.TestCase):
         bk.sp["cap_min_atr"] = 30; bk.feat.f = {"mid": 0.52, "atr": 0.52 * 0.001}; bk.sized_t = 0; bk.resize()
         self.assertEqual(bk.dyn["unit_qty"], 150)                                      # 한도가 이미 멀면(ATR 0.1% → 100 ATR) 늘리지 않는다
 
+    def test_a_lowered_profile_shrinks_the_unit_and_the_limits_under_an_open_position_but_never_the_cap(self):
+        """2026-09-03 20:08: hunt.strat was cut 4/0.77/1.0/16 -> 2/0.4/0.6/8 under a 2-unit EGLD long that never went flat, so the 4x unit
+        kept adding into the slide. Positioned: reductions of the unit (damped 25% a step), the notional cap and the daily limit apply at
+        once; the money cap stays the campaign's; increases wait for flat."""
+        cy, bk = book(lots=[[53.6, 5.139, "a"], [26.8, 5.062, "b"]]); cy.qstep, cy.vp = 0.1, 1
+        cy.acct = dict(equity=61.03, upl_all=-8.0, avail=40.0)                              # wallet = equity - upl = 69.03
+        old = dict(unit_qty=55.2, cap_usdt=53.15, daily_loss_limit=69.03, max_notional=1104.48)
+        bk.dyn = dict(old); bk.sp = {**bk.sp, **old, "unit_frac": 2.0, "cap_frac": 0.4, "daily_loss_frac": 0.6, "notional_frac": 8.0, "wallet_frac": 1.0}
+        bk.feat.f = {"mid": 5.0}; bk.sized_t = 0
+        bk.resize()
+        self.assertAlmostEqual(bk.sp["unit_qty"], 41.4, 1)                                   # toward 27.6, one 25% step at a time
+        self.assertEqual((bk.sp["daily_loss_limit"], bk.sp["max_notional"]), (41.42, 552.24))
+        self.assertEqual(bk.sp["cap_usdt"], 53.15)                                            # the stop distance is not re-derived under a position
+        bk.sp.update(unit_frac=4.0, cap_frac=0.77, daily_loss_frac=1.0, notional_frac=16.0); bk.sized_t = 0
+        bk.resize()
+        self.assertEqual((bk.sp["unit_qty"], bk.sp["cap_usdt"], bk.sp["daily_loss_limit"], bk.sp["max_notional"]), (41.4, 53.15, 41.42, 552.24))   # increases wait for flat
+        bk.pos["lots"] = []; bk.pos["avg"] = None; bk.sized_t = 0
+        bk.resize()
+        self.assertGreater(bk.sp["unit_qty"], 41.4); self.assertEqual((bk.sp["daily_loss_limit"], bk.sp["max_notional"]), (69.03, 1104.48))
+
     def test_wrong_types_of_file_only_and_optional_keys_are_rejected(self):
         bad = valid_params({**STRAT, "daily_loss_limit": "40", "stop_structural": "oops", "adopt": "false", "symbol": "TRUMPUSDT"}, {})
         self.assertEqual(bad, ["adopt", "daily_loss_limit", "stop_structural"])
