@@ -48,6 +48,12 @@
       "ticker",
       "candle1m"
     ],
+    "MUBARAKUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
     "ARBUSDT": [
       "trade",
       "books15",
@@ -120,13 +126,14 @@
       "hunt": 1,
       "blowoff_atr": 8.0,
       "blowoff_frac": 0.5,
-      "unit_frac": 4.0,
-      "cap_frac": 0.77,
-      "daily_loss_frac": 1.0,
-      "notional_frac": 16.0,
-      "max_stops_day": 6,
+      "unit_frac": 2.0,
+      "cap_frac": 0.4,
+      "daily_loss_frac": 0.6,
+      "notional_frac": 8.0,
+      "max_stops_day": 4,
       "lever": 20,
       "cap_min_atr": 30,
+      "max_units": 3,
       "stop_lock_atr": 2.0,
       "stop_trail_atr": 1.5
     }

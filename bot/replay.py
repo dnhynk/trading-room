@@ -55,7 +55,9 @@ def run(files, sym, sig, show_all, by=(), quiet=False, day=None):
     for path in files:
         for recv, raw in lines(path):
             if f'"instId":"{sym}"' not in raw or '"local"' in raw: continue
-            out = feat.feed(json.loads(raw))
+            try: j = json.loads(raw)
+            except ValueError: continue                  # torn line: skip
+            out = feat.feed(j)
             if feat.f.get("t") and (not mids or mids[-1][0] != feat.f["t"]): mids.append((feat.f["t"], feat.f["mid"]))
             sigs += out
     idx = {t: i for i, (t, _) in enumerate(mids)}

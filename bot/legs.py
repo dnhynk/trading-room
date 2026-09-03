@@ -28,7 +28,9 @@ def collect(files, sym, sig):
     for path in files:
         for recv, raw in lines(path):
             if f'"instId":"{sym}"' not in raw or '"local"' in raw: continue
-            out = feat.feed(json.loads(raw)); f = feat.f
+            try: j = json.loads(raw)
+            except ValueError: continue                  # torn line: skip
+            out = feat.feed(j); f = feat.f
             if f.get("t") and f.get("atr") and (not secs or secs[-1][0] != f["t"]):
                 secs.append((f["t"], f["mid"], f["atr"], f["v"], f.get("atr15") or f["atr"]))
             for x in out:

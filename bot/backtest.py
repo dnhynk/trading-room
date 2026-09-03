@@ -89,7 +89,9 @@ def condense(path, sym):
     key = f'"instId":"{sym}"'; recs = {}
     for raw in lines(path):
         if key not in raw or '"local"' in raw: continue
-        j = json.loads(raw); ch = j["arg"]["channel"]; data = j.get("data")
+        try: j = json.loads(raw)
+        except ValueError: continue                      # a torn line (two writers, a crash mid-write) is skipped, never fatal
+        ch = j["arg"]["channel"]; data = j.get("data")
         if not data: continue
         ts = int(j.get("ts") or 0)
         if ch == "books15": ts = int(data[0].get("ts") or ts)

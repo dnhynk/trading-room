@@ -22,7 +22,8 @@
 CONCEPT/RULES 문장 먼저 → `bot/signal.py`·`bot/cycle.py` 최소 diff → `python -m unittest bot.test_signal bot.test_cycle` → `python -m bot.backtest data/ws/pub-20260829-0[4-6].jsonl.gz`(기준 테이프; 현재 수치는 RULES.md) → `-m bot.cycle` 자식만 Stop-Process(감시견이 5초 뒤 올림; 포지션·스탑·사이즈는 state.json에 남음) → `python -m bot.preflight`. 코드 변경 없는 재기동 금지. `mode`·`sides`(쌍검) 변경은 사용자 승인 후 포지션 0에서만(live 엔진은 플랫이 될 때까지 스스로 보류한다); 심볼과 방향은 select 규칙(RULES 도구 절)이 정한다 — 손으로 바꾸려면 select를 세우고 한다. 숫자는 전부 휴리스틱이고 근거는 야간 리포트·replay·tune(리포트 우선, `--apply`는 승인 후).
 
 ## 운영 메모 (Windows)
-- 감시견 5개는 PowerShell `Start-Process -WindowStyle Hidden`으로 분리 실행: `python -m bot.supervise record|cycle|nightly|sweep|select`. pid는 `logs/<job>.pid`, 로그는 `logs/<job>.log`. `cycle` 감시견은 `books`의 심볼마다 자식 엔진 하나를 띄운다(`logs/cycle-<SYMBOL>.log`) — 심볼이 늘어도 감시견은 5개다.
+- 감시견 5개는 PowerShell `Start-Process -WindowStyle Hidden`으로 분리 실행: `python -m bot.supervise record|cycle|nightly|sweep|select`(트랙 B 는 select 대신 `hunt`). pid는 `logs/<job>.pid`, 로그는 `logs/<job>.log`. `cycle` 감시견은 `books`의 심볼마다 자식 엔진 하나를 띄운다(`logs/cycle-<SYMBOL>.log`) — 심볼이 늘어도 감시견은 5개다.
+- **감시견을 세우면 자식도 같이 죽는다**(job object, 2026-09-03 빌드부터). 그 전 빌드로 뜬 감시견을 세울 땐 자식(`-u -m bot.ws record` 등)이 살아남으니 같은 명령에서 자식까지 세운다 — 고아 recorder 가 새 recorder 와 같은 테이프를 쓰면 중복·깨진 줄이 생긴다(2026-09-03 15:30~20:02 에 당함).
 - 자식 프로세스 찾기: `Get-CimInstance Win32_Process`에서 CommandLine이 `-m bot.cycle`이고 `supervise`가 아닌 것.
 - **파괴적 명령은 안전 확인과 같은 명령 안에서 한다**(2026-09-02에 당함: flat 확인 assert를 앞 명령에 두고 `Stop-Process`를 뒷 명령에 뒀더니, assert가 실패했는데도 kill이 그대로 나가 포지션을 든 엔진이 죽었다 — 감시견이 6초 만에 복구하고 스탑도 되살아났지만 운이 좋았다). 그리고 **CommandLine 글롭은 그 명령을 실행 중인 셸 자신도 잡는다** — 필터에 심볼을 넣으면 그 문자열이 든 bash/powershell까지 매칭된다. `-m bot.cycle <SYM>`으로 정확히 맞추고 `bash`·`powershell` 제외.
 - Git Bash heredoc에 한글을 넣으면 깨진다 — 파일은 Write/Edit 도구로.

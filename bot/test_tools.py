@@ -1,5 +1,5 @@
 """Invariants of the evidence tools (bot/replay.py hold-vs-sell, bot/capture.py direction capture).  python -m unittest bot.test_tools"""
-import unittest
+import os, unittest
 from bot.replay import hold_pnl
 from bot.capture import capture, held_at
 
@@ -191,6 +191,25 @@ class BacktestSizing(unittest.TestCase):
         with open(cp, "w", encoding="utf-8") as f: json.dump(dict(qstep=0.001, tick=0.01), f)
         try: self.assertEqual(backtest.contract_meta("TESTQUSDT")["qstep"], 0.001)
         finally: os.remove(cp)
+
+class SupervisorJob(unittest.TestCase):
+    """bot.supervise puts every child in a Windows job object that dies with the supervisor (2026-09-03: a recorder orphaned by a
+    Stop-Process on its supervisor wrote duplicate tapes for 4.5 h next to the new recorder)."""
+    @unittest.skipUnless(os.name == "nt", "Windows job objects")
+    def test_a_child_dies_when_the_supervisor_job_handle_closes(self):
+        import ctypes, subprocess, sys, time
+        from bot import supervise
+        job = supervise.job_object(); self.assertTrue(job)
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            self.assertTrue(supervise.assign(job, p)); time.sleep(0.2); self.assertIsNone(p.poll())
+            ctypes.windll.kernel32.CloseHandle.argtypes = [ctypes.c_void_p]; ctypes.windll.kernel32.CloseHandle(job)   # the supervisor dying closes its last handle
+            for _ in range(50):
+                if p.poll() is not None: break
+                time.sleep(0.1)
+            self.assertIsNotNone(p.poll())
+        finally:
+            if p.poll() is None: p.kill()
 
 if __name__ == "__main__":
     unittest.main()

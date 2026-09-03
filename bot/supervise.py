@@ -5,7 +5,8 @@ params["books"] (that engine refuses to start; restarting it would only loop). W
 `cycle` with no symbol is the basket supervisor: while params.json has `books` it keeps exactly one engine per book symbol
 (`python -m bot.cycle SYMBOL`, logs/cycle-SYMBOL.log) and reconciles on every params change — a symbol bot/select.py added gets an
 engine, and a symbol it removed is not restarted (that engine exits by itself, and select only removes a book that is flat). Without
-`books` it runs the single unpinned engine exactly as before. `cycle:SYMBOL` still pins one engine by hand."""
+`books` it runs the single unpinned engine exactly as before. `cycle:SYMBOL` still pins one engine by hand. Every child is put in a
+Windows job object that dies with this supervisor, so stopping a supervisor never leaves its child running unsupervised."""
 import os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.ws import load_params, portfolio, outside_books
@@ -22,10 +23,41 @@ def gone(sym):
     """books 밖 심볼에 못박힌 엔진은 스스로 나간다(cycle.py) — 다시 올리면 5초마다 시작·종료를 되풀이하며 알림만 쌓인다."""
     return bool(sym) and outside_books(load_params(), sym)
 
+JOB = None                                               # this supervisor's job object (Windows), created at the first spawn
+
+def job_object():
+    """Windows: a job whose processes are killed when the last handle to it closes — i.e. when this supervisor exits or is killed.
+    Without it Stop-Process on a supervisor orphans its child: on 2026-09-03 the 08-29 recorder outlived its supervisor and a second
+    recorder wrote the same tapes for 4.5 hours (every payload twice, lines torn at the 64 KB buffer boundaries). None where unsupported."""
+    if os.name != "nt": return None
+    import ctypes
+    class Basic(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64), ("LimitFlags", ctypes.c_uint32),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32), ("SchedulingClass", ctypes.c_uint32)]
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", ctypes.c_uint64 * 6), ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+    k = ctypes.windll.kernel32
+    k.CreateJobObjectW.restype = ctypes.c_void_p; k.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    k.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    k.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    h = k.CreateJobObjectW(None, None); info = Extended(); info.BasicLimitInformation.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not h or not k.SetInformationJobObject(h, 9, ctypes.byref(info), ctypes.sizeof(info)): return None   # 9 = JobObjectExtendedLimitInformation
+    return h
+
+def assign(job, p):
+    """Put child `p` into `job`; False when it could not be (then it would outlive the supervisor — the start line says so)."""
+    if os.name != "nt": return True
+    import ctypes
+    return bool(job) and bool(ctypes.windll.kernel32.AssignProcessToJobObject(job, int(p._handle)))
+
 def spawn(cmd, name):
+    global JOB
+    if JOB is None and os.name == "nt": JOB = job_object()
     with open(os.path.join(ROOT, "logs", f"{name}.log"), "a", encoding="utf-8") as log:
-        p = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-        log.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} SUPERVISOR start pid={p.pid} {' '.join(cmd)}\n")
+        p = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT); owned = assign(JOB, p)
+        log.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} SUPERVISOR start pid={p.pid} {' '.join(cmd)}{'' if owned else ' NOT IN JOB (outlives the supervisor)'}\n")
     return p
 
 def note(name, msg):
