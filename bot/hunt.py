@@ -67,7 +67,7 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             ai_read=0,           # 1: 국면을 AI 세션(`codex exec`)이 읽고 결정론 판독(`whale.phase`)은 phase_det/side_det 로 그림자가 된다
             #                      (사용자 결정 2026-09-04). 자격 게이트는 AI 가 못 건드린다 — 대체하는 것은 국면과 방향뿐이다.
             #                      실패하면 결정론으로 폴백한다. 판정은 며칠 뒤 `bot.campaigns`: 불일치한 행에서 밀려난 쪽이 옳았나.
-            ai_cmd="codex", ai_model="", ai_effort="", ai_timeout_s=240, ai_runs=1,   # ai_runs>1: 같은 입력을 병렬로 여러 번 읽고 다수결(합의율을 `ai_agree` 로 남긴다)
+            ai_cmd="codex", ai_model="", ai_effort="", ai_timeout_s=240, ai_runs=1, ai_charts=0,   # ai_charts=N: 적격+보유 최대 N종의 차트 PNG 를 붙인다. ai_runs>1: 같은 입력을 병렬로 여러 번 읽고 다수결(합의율을 `ai_agree` 로 남긴다)
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
 BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
@@ -178,11 +178,15 @@ markdown (the operator is out, price is being marked down) / squeeze (late short
 The bot's reader has NO distribution phase at all and falls back to `unknown` whenever its 15m zigzag finds no pivot, which is 36%
 of its readings. That gap is the reason you are here. Do not copy `phase`; read the footprint yourself.
 
+Charts may be attached: each is one coin, titled with its symbol, top panel 1H bars for the episode arc and bottom panel 5m bars
+with volume for the scale we actually trade. **When a chart is attached for a coin, read the chart first and let the footprint
+only confirm it** - the footprint numbers are what the bot's own reader already extracted, so they cannot show you what it missed.
+
 Answer with ONE line of JSON and nothing else:
 {"reads":[{"symbol":"X","phase":"<one of the phases>","conf":0-100,"why":"<=12 words"}]}
 Every symbol below must appear exactly once."""
 
-def ai_read(rows, hunt, log=log):
+def ai_read(rows, hunt, log=log, held=()):
     """국면을 AI 세션이 다시 읽는다(`codex exec`, 사용자 결정 2026-09-04). 결정론 판독은 `phase_det`/`side_det` 로 남아
     그림자가 된다 — 매 스캔 둘 다 `hunt-history` 에 기록되므로 나중에 "밀려난 쪽이 옳았나" 를 전방 가격으로 계산할 수 있다
     (그 계산이 `bot.campaigns`). **자격(통행료 게이트)은 건드리지 않는다** — vol·ATR·레버·현물·펀딩·twoway 는 측정 가능한
@@ -196,12 +200,27 @@ def ai_read(rows, hunt, log=log):
     d = os.path.join(LOGS, "ai"); os.makedirs(d, exist_ok=True)
     want = {r["symbol"] for r in rows}
 
+    # 이미지: 발자국 숫자는 규칙 판독기가 캔들에서 뽑아낸 특징값이라, 그것만 주면 AI 는 같은 재료를 다시 저울질할 뿐 규칙이 못 보는
+    # 것을 볼 수 없다(사용자 지적 2026-09-04 "사진을 봐야지"). 차트는 원래의 모양 그 자체다. 다만 종목마다 한 장이라 전부 붙이면
+    # 프롬프트가 수십 배가 되므로 **판단이 실제로 갈리는 자리** — 적격 후보와 보유 코인 — 에만 붙인다.
+    shots = []
+    if hunt.get("ai_charts"):
+        from bot.chart import draw
+        pick = [r["symbol"] for r in rows if not r.get("flags") or r["symbol"] in (held or ())][:int(hunt.get("ai_charts") or 0)]
+        for sym in pick:
+            try:
+                f = draw(sym)
+                if f: shots.append(f)
+            except Exception as e: log(f"hunt: chart {sym} failed ({type(e).__name__})")
+        if shots: log(f"hunt: {len(shots)} charts for {[os.path.basename(x)[:-4] for x in shots]}")
+
     def one(n):
         """한 번의 판독. 실패·형식오류는 {} 이고 앙상블이 나머지로 진행한다."""
         out = os.path.join(d, f"read{n}.json")
         try:
             if os.path.exists(out): os.remove(out)
             cmd = [hunt.get("ai_cmd") or "codex", "exec", "--skip-git-repo-check", "-s", "read-only", "--cd", d, "-o", out]
+            for f in shots: cmd += ["-i", f]
             if hunt.get("ai_model"): cmd += ["-m", str(hunt["ai_model"])]      # 없으면 ~/.codex/config.toml 기본값
             if hunt.get("ai_effort"): cmd += ["-c", f"model_reasoning_effort={hunt['ai_effort']}"]
             subprocess.run(cmd + ["-"], input=AI_PROMPT + chr(10) + body, capture_output=True, text=True,
@@ -280,7 +299,7 @@ def scan(hunt, held=(), st=None, b=None, log=log):
             log(f"  {s}: shape failed {type(e).__name__}: {str(e)[:60]}"); r.update(phase="unread", votes=[], side=None, twoway24=None, run=None, off=None, high48=None, atr_pct=None, hint15=None, dead=False)
         r["flags"] = flags_of(r, hunt)
     if hunt.get("ai_read") and deep:
-        for sym, (ph, conf, why, agree, n) in ai_read([r for r in deep if r.get("phase") not in (None, "unread")], hunt, log).items():
+        for sym, (ph, conf, why, agree, n) in ai_read([r for r in deep if r.get("phase") not in (None, "unread")], hunt, log, held).items():
             r = next(x for x in deep if x["symbol"] == sym)
             r["phase_det"], r["side_det"] = r.get("phase"), r.get("side")      # 그림자: 결정론이 무엇이라 했는지 매 스캔 남는다
             r["phase"], r["ai_conf"], r["ai_why"], r["ai_agree"] = ph, conf, why, f"{agree}/{n}"
