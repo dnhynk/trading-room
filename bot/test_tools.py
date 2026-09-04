@@ -263,3 +263,47 @@ class SelectorCounterfactual(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiBook(unittest.TestCase):
+    """run_multi (2026-09-04): the FCFS basket replayed — several books on one clock sharing SimPool, cycle.Pool's rules without the file."""
+    def test_the_pool_admits_cap_books_holds_while_positioned_or_armed_and_refuses_on_the_days_loss(self):
+        from types import SimpleNamespace
+        from bot.backtest import SimPool
+        class B:
+            def __init__(self, lim=None, day=0.0): self.day_realized = day; self.strat = SimpleNamespace(p=dict(daily_loss_limit=lim))
+        pool = SimPool(1); a, b = pool.handle("A", B()), pool.handle("B", B())
+        self.assertEqual((a.claim(), b.claim(), a.claim()), ("", "pool", "")); self.assertEqual(pool.refused, 1)   # first come; ours stays ours
+        a.tend(True, False); self.assertTrue(a.mine); a.tend(False, True); self.assertTrue(a.mine)             # positioned, then armed: kept
+        a.tend(False, False); self.assertFalse(a.mine); self.assertEqual(b.claim(), "")                        # flat and idle: released, the next book takes it
+        c, d = SimPool(2).handle("C", B()), None
+        p2 = c.pool; d = p2.handle("D", B()); e = p2.handle("E", B())
+        self.assertEqual((c.claim(), d.claim(), e.claim()), ("", "", "pool"))                                   # cap 2
+        p3 = SimPool(1); f = p3.handle("F", B(lim=60.0, day=-40.0)); g = p3.handle("G", B(day=-25.0))
+        self.assertEqual(p3.day_loss(), -65.0); self.assertEqual(f.claim(), "pool_daily")                      # the day's loss across every book, at the asker's limit
+        self.assertEqual(g.claim(), "")                                                                         # a book without a limit is not guarded
+
+    def test_books_are_merged_on_one_clock_and_a_tie_goes_to_the_earlier_book(self):
+        from bot.backtest import _merge, _hour_key
+        a = [(100, "a1"), (102, "a2"), (105, "a3")]; b = [(101, "b1"), (102, "b2")]
+        self.assertEqual([(s, sec[1]) for s, sec in _merge([("A", a), ("B", b)])], [("A", "a1"), ("B", "b1"), ("A", "a2"), ("B", "b2"), ("A", "a3")])
+        self.assertEqual([(s, sec[1]) for s, sec in _merge([("B", b), ("A", a)])][1:3], [("B", "b1"), ("B", "b2")])   # the same second: spec order
+        self.assertEqual(_hour_key("D:/x/pub-20260903-11.jsonl.gz"), "pub-20260903-11"); self.assertEqual(_hour_key("pub-20260829.jsonl"), "pub-20260829")
+        self.assertLess(_hour_key("pub-20260903-23.jsonl"), _hour_key("pub-20260904-00.jsonl.gz"))                # slots sort in time
+
+    def test_run_multi_steps_every_book_and_reports_the_pool(self):
+        """Two synthetic books over the same seconds: both step, the pool's totals add up, and run_files' sizing path is the one used."""
+        from bot import backtest
+        secs = lambda p0: [[7200 + i, p0, p0 + 0.02, [[p0, 5.0]], [[p0 + 0.02, 5.0]], None, [], []] for i in range(5)]
+        old = backtest.load_seconds, backtest.seed_history, backtest.latest_equity, backtest.contract_meta, backtest.load_params
+        backtest.load_seconds = lambda path, sym: secs(100.0 if sym == "AUSDT" else 50.0)
+        backtest.seed_history = lambda sym, start: (None, None, None); backtest.latest_equity = lambda: 700.0
+        backtest.contract_meta = lambda sym: dict(qstep=0.01); backtest.load_params = lambda: {}
+        try:
+            m = backtest.run_multi([dict(sym="AUSDT", side="long", files=["pub-20260903-11.jsonl"]), dict(sym="BUSDT", side="short", files=["pub-20260903-11.jsonl"])],
+                                   strat=dict(unit_frac=1.5, max_notional=1e9), pool_cap=1, equity=700.0)
+        finally: backtest.load_seconds, backtest.seed_history, backtest.latest_equity, backtest.contract_meta, backtest.load_params = old
+        self.assertEqual(sorted(m["books"]), ["AUSDT:long", "BUSDT:short"]); self.assertEqual(m["pool"]["book_seconds"], 10); self.assertEqual(m["pool"]["cap"], 1)
+        self.assertEqual((m["books"]["AUSDT:long"]["side"], m["books"]["BUSDT:short"]["side"]), ("long", "short"))
+        self.assertAlmostEqual(m["books"]["AUSDT:long"]["sizing"]["unit_qty"], 10.5, 6)                              # 700 x 1.0 (wallet/cap) x 1.5 / 100.01, as a whole-wallet book
+        self.assertEqual((m["pool"]["total"], m["pool"]["campaigns"], m["pool"]["refused"]), (0.0, 0, 0))     # a flat tape: nothing traded, nothing refused

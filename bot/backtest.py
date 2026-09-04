@@ -1,5 +1,6 @@
 """Offline run of the whole engine (Features + Strategy + the dry-run fill model) over recordings — the tuner's objective.
   python -m bot.backtest FILE... [--sym TRUMPUSDT] [--equity E | --fixed] [--qstep Q] [--sides long,short] [--follow 15m|1h|brk|regime] [--sig k=v ...] [--strat k=v ...]
+  python -m bot.backtest --books SPEC.json [--pool 1] [--equity E] [--sig k=v ...] [--strat k=v ...]     # the FCFS basket: several books, one clock, one pool
 --sym runs another recorded symbol from the same tape with that symbol's own contract step and the sizing live would give it (see
 Sizing below); a symbol outside params.books is sized as one of select.n books.
 --sides long,short runs a long book and a short book on the same feature stream (쌍검술); default = strat.side only.
@@ -27,8 +28,14 @@ resize offline, so the campaign geometry is frozen at the start. --fixed keeps t
 max_notional instead (the equity-independent reference numbers in RULES 도구 절). Running another symbol without its contract step
 and a matched notional rounded ZEC to TRUMP-sized units before this (RULES 도구 절).
 Output: realized pnl net of fees, open pnl at the end, cycles (trim fills), adds, stops, max drawdown of realized+open, time in market,
-and the sizing the run used."""
-import gzip, json, os, pickle, sys, time
+and the sizing the run used.
+--books replays the track-B basket (RULES 트랙 B, NEXT 22) as hunt would have held it: SPEC.json = [{"sym", "side", "files", "strat"?}, ...],
+one book per entry over its own files (the hours its coin was eligible), every book sized on wallet/pool at its first quote, all stepped on
+one clock (hourly tapes merged by hour, then by exchange second; a tie goes to the earlier book) and sharing a capital pool that lets
+`--pool` campaigns run at once — a book's first unit asks the pool, adds never do, a positioned or armed book holds it, a flat one releases
+it, the day's realized loss across every book at a book's daily limit refuses new campaigns (SimPool = cycle.Pool without the file).
+Output: one line per book, then the pool's totals (P&L, campaigns, stops, refused first units, combined max drawdown)."""
+import gzip, heapq, json, os, pickle, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.signal import Features, Strategy, STRAT, SPLIT_KEYS, apply_fill, pos_stats, book_params, sim_match, sim_book, unit_under_cap, wilder_atr
 from bot.ws import load_params, load_states, strat_for
@@ -243,7 +250,10 @@ class Engine:
         d = bk.strat.step(f, sigs, bk.pos, working)
         for kind, kw in d["events"]:
             if kind in ("FLOW_EXIT", "EXIT_ARMED"): self.events.append((f["t"], kind, bk.side, kw))   # the campaign's own exit verdicts (NEXT 21 grid)
+            elif kind == "SKIP" and str(kw.get("why", "")).startswith("pool"): self.events.append((f["t"], "POOL_SKIP", bk.side, kw["why"]))   # a first unit the pool refused (run_multi)
         self.reconcile(bk, d, f["t"])
+        h = bk.pos.get("pool")
+        if h is not None and hasattr(h, "tend"): h.tend(bool(pos_stats(bk.pos)[0]), bool(bk.strat.arm or bk.work["buy"]))   # keep the pool while positioned or armed, release it flat (cycle housekeeping)
 
     def reconcile(self, bk, d, t):
         qty, _ = pos_stats(bk.pos)
@@ -288,47 +298,49 @@ class Engine:
     def run(self, seconds):
         """Per condensed second N, in live order: the first message of N closes N-1 -> the tick decides on N-1's features with N-1's
         book (queue snapshots, taker touch) -> N's prints hit the orders that existed at the start of N -> N's book arrives."""
-        arg = {"instType": "USDT-FUTURES", "instId": "X"}
-        for sec, bid, ask, bids, asks, mark, trades, rows in seconds:
-            day = sec // 86400
-            if self.day is not None and day != self.day:            # UTC day rollover, as live
-                for bk in self.books.values():                      # same policy as live Book.day_close: fresh budget, daily halts lift
-                    bk.stops_today, bk.day_realized = 0, 0.0
-                    if bk.pos["halt"] in ("DAILY_STOPS", "DAILY_LOSS"): bk.pos["halt"] = None
-            self.day = day
-            ts = sec * 1000 + 500; fed_rows = False
-            if rows and self.feat.sec is None:      # candle history must be in before the clock starts (ATR, warm-up of the 30-min window)
-                self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts)); fed_rows = True
-            sigs = self.feat._clock(sec) if self.feat.mid is not None else []     # close N-1 on N-1's book and flow only (live: the first message of N does this)
-            if self.follow: self.follow_step(sec)
-            if sigs or self.feat.f.get("t") != self.last_t: self.last_t = self.feat.f.get("t"); self.tick(sigs)
-            if trades:
-                self.sim_trades(trades, sec)
-                self.feat.feed(dict(arg={**arg, "channel": "trade"}, action="update", data=[dict(price=str(p), size=str(q), side=s) for p, q, s in trades], ts=ts))
-            if bids and asks:
-                self.sim_book(bids, asks, sec)                           # N's book: what the level lost beyond N's prints was cancelled; a crossed touch cancels (this second) or fills
-                self.feat.feed(dict(arg={**arg, "channel": "books15"}, data=[dict(bids=bids, asks=asks, ts=str(ts))], ts=ts))
-            if rows and not fed_rows: self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts))
-            if mark: self.feat.feed(dict(arg={**arg, "channel": "ticker"}, data=[dict(markPrice=str(mark))], ts=ts))
-            f = self.feat.f; eq = 0.0; held = False
-            for bk in self.books.values():
-                qty, avg = pos_stats(bk.pos); bk.upl = bk.s * (f["mid"] - avg) * qty if qty and f.get("mid") else 0.0
-                eq += bk.realized + bk.upl; held = held or bool(qty)
-            self.peak = max(self.peak, eq); self.max_dd = max(self.max_dd, self.peak - eq)
-            if f.get("mid") and (self.min_mid is None or sec - self.min_mid[0] >= 60):
-                if self.min_mid is not None:
-                    d = (f["mid"] - self.min_mid[1]) / self.min_mid[1] * 100; key = "up" if d > 0 else "dn"
-                    for sd, bk in self.books.items():
-                        c = self.cap.setdefault(sd, dict(up_all=0.0, up_held=0.0, dn_all=0.0, dn_held=0.0)); c[key + "_all"] += abs(d)
-                        if pos_stats(bk.pos)[0]: c[key + "_held"] += abs(d)
-                self.min_mid = (sec, f["mid"])
-            hint = self.feat.side_hint or "none"
-            for sd, bk in self.books.items():
-                dr = bk.realized - self.last_real.get(sd, 0.0)
-                if dr: self.last_real[sd] = bk.realized; self.by_hint[f"{sd}|{hint}"] = self.by_hint.get(f"{sd}|{hint}", 0.0) + dr
-            self.n += 1; self.in_mkt += 1 if held else 0
+        for s in seconds: self.step(*s)
         return self.metrics()
 
+    def step(self, sec, bid, ask, bids, asks, mark, trades, rows):
+        """One condensed second — run's loop body, so run_multi can interleave several engines' seconds on one clock."""
+        arg = {"instType": "USDT-FUTURES", "instId": "X"}
+        day = sec // 86400
+        if self.day is not None and day != self.day:            # UTC day rollover, as live
+            for bk in self.books.values():                      # same policy as live Book.day_close: fresh budget, daily halts lift
+                bk.stops_today, bk.day_realized = 0, 0.0
+                if bk.pos["halt"] in ("DAILY_STOPS", "DAILY_LOSS"): bk.pos["halt"] = None
+        self.day = day
+        ts = sec * 1000 + 500; fed_rows = False
+        if rows and self.feat.sec is None:      # candle history must be in before the clock starts (ATR, warm-up of the 30-min window)
+            self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts)); fed_rows = True
+        sigs = self.feat._clock(sec) if self.feat.mid is not None else []     # close N-1 on N-1's book and flow only (live: the first message of N does this)
+        if self.follow: self.follow_step(sec)
+        if sigs or self.feat.f.get("t") != self.last_t: self.last_t = self.feat.f.get("t"); self.tick(sigs)
+        if trades:
+            self.sim_trades(trades, sec)
+            self.feat.feed(dict(arg={**arg, "channel": "trade"}, action="update", data=[dict(price=str(p), size=str(q), side=s) for p, q, s in trades], ts=ts))
+        if bids and asks:
+            self.sim_book(bids, asks, sec)                           # N's book: what the level lost beyond N's prints was cancelled; a crossed touch cancels (this second) or fills
+            self.feat.feed(dict(arg={**arg, "channel": "books15"}, data=[dict(bids=bids, asks=asks, ts=str(ts))], ts=ts))
+        if rows and not fed_rows: self.feat.feed(dict(arg={**arg, "channel": "candle1m"}, data=rows, ts=ts))
+        if mark: self.feat.feed(dict(arg={**arg, "channel": "ticker"}, data=[dict(markPrice=str(mark))], ts=ts))
+        f = self.feat.f; eq = 0.0; held = False
+        for bk in self.books.values():
+            qty, avg = pos_stats(bk.pos); bk.upl = bk.s * (f["mid"] - avg) * qty if qty and f.get("mid") else 0.0
+            eq += bk.realized + bk.upl; held = held or bool(qty)
+        self.peak = max(self.peak, eq); self.max_dd = max(self.max_dd, self.peak - eq)
+        if f.get("mid") and (self.min_mid is None or sec - self.min_mid[0] >= 60):
+            if self.min_mid is not None:
+                d = (f["mid"] - self.min_mid[1]) / self.min_mid[1] * 100; key = "up" if d > 0 else "dn"
+                for sd, bk in self.books.items():
+                    c = self.cap.setdefault(sd, dict(up_all=0.0, up_held=0.0, dn_all=0.0, dn_held=0.0)); c[key + "_all"] += abs(d)
+                    if pos_stats(bk.pos)[0]: c[key + "_held"] += abs(d)
+            self.min_mid = (sec, f["mid"])
+        hint = self.feat.side_hint or "none"
+        for sd, bk in self.books.items():
+            dr = bk.realized - self.last_real.get(sd, 0.0)
+            if dr: self.last_real[sd] = bk.realized; self.by_hint[f"{sd}|{hint}"] = self.by_hint.get(f"{sd}|{hint}", 0.0) + dr
+        self.n += 1; self.in_mkt += 1 if held else 0
     def metrics(self):
         per = {}
         for sd, bk in self.books.items():
@@ -338,19 +350,39 @@ class Engine:
         return dict(pnl=round(tot, 3), open_pnl=round(opn, 3), total=round(tot + opn, 3), cycles=sum(v["cycles"] for v in per.values()),
                     adds=sum(v["adds"] for v in per.values()), campaigns=sum(v["campaigns"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
                     in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"),
-                    flow_exits=sum(1 for e in self.events if e[1] == "FLOW_EXIT"),
+                    flow_exits=sum(1 for e in self.events if e[1] == "FLOW_EXIT"), pool_skips=sum(1 for e in self.events if e[1] == "POOL_SKIP"),
                     by_hint={k: round(v, 3) for k, v in sorted(self.by_hint.items())},
                     follow=dict(hint=self.follow, flips=self.flips, share={k: round(v / max(self.n, 1), 3) for k, v in self.active_s.items()}) if self.follow else None,
                     capture={sd: dict(up=round(c['up_held'] / c['up_all'], 3) if c['up_all'] else 0.0, dn=round(c['dn_held'] / c['dn_all'], 3) if c['dn_all'] else 0.0) for sd, c in self.cap.items()})
 
 
-def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=None, sides=None, follow=None, equity=None, fixed=False):
-    """params.json is the base as live sees it — `strat_for(params, sym)` (the book's wallet_frac / sides on the common strat) — with
-    sig/strat overrides on top; sides default to strat.sides; follow="15m"|"1h" runs both sides with the structure hint choosing which
-    one may trade (flat-only flips). qstep defaults to the symbol's contract step; equity-scaled params are frozen into fixed sizes at
-    the first mid from `equity` (default: the latest state file's) unless `fixed`, or unless the override already fixes them."""
-    p = load_params() or {}
-    sig = {**(p.get("sig") or {}), **(sig or {})}; base = strat_for(p, sym)
+class SimPool:
+    """cycle.Pool without the file, for run_multi: `cap` books may hold a campaign at once. A book asks through its handle (pos["pool"])
+    at its first unit; adds never ask (Strategy); a positioned or armed book keeps its claim and a flat one releases it (Engine.tick_book,
+    as the live housekeeping); the day's realized loss summed over every book at or under the asking book's daily limit refuses new
+    campaigns (pool_daily). `refused` counts the first units turned away."""
+    def __init__(self, cap): self.cap, self.claims, self.books, self.refused = max(int(cap), 1), [], [], 0
+    def handle(self, sym, book): self.books.append(book); return PoolHandle(self, sym, book)
+    def day_loss(self): return sum(bk.day_realized for bk in self.books)
+
+class PoolHandle:
+    def __init__(self, pool, sym, book): self.pool, self.sym, self.book = pool, sym, book
+    @property
+    def mine(self): return self.sym in self.pool.claims
+    def claim(self):
+        if self.mine: return ""
+        lim = self.book.strat.p.get("daily_loss_limit")
+        if lim and self.pool.day_loss() <= -float(lim): self.pool.refused += 1; return "pool_daily"
+        if len(self.pool.claims) >= self.pool.cap: self.pool.refused += 1; return "pool"
+        self.pool.claims.append(self.sym); return ""
+    def tend(self, positioned, armed):
+        if positioned and not self.mine: self.pool.claims.append(self.sym)                     # adopt: the position is the fact (parity with cycle.Pool)
+        elif self.mine and not positioned and not armed: self.pool.claims.remove(self.sym)
+
+def _prepare(p, files, sym, strat, qstep, equity, fixed):
+    """What a live start would give `sym` on these files: the strat sized from `equity` (unless fixed), the contract step, the seed and
+    the first file that carries the symbol — shared by run_files and run_multi."""
+    base = strat_for(p, sym)
     if p.get("books") and sym not in p["books"]:                   # not a book: size it as one of the basket's slots, not as the whole wallet
         base["wallet_frac"] = 1.0 / max(int((p.get("select") or {}).get("n") or len(p["books"])), 1)
     strat = {**base, **(strat or {})}
@@ -366,6 +398,17 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
         atr = wilder_atr(seed[0][-100:]) if seed[0] else None
         if equity and mid: strat = size_from_equity(strat, equity, mid, qstep, atr)
         else: print(f"sizing: no equity ({equity}) or no quote on the tape; the file's fixed sizes apply", file=sys.stderr)
+    return strat, qstep, seed, loaded, first, equity
+
+def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=None, sides=None, follow=None, equity=None, fixed=False):
+    """params.json is the base as live sees it — `strat_for(params, sym)` (the book's wallet_frac / sides on the common strat) — with
+    sig/strat overrides on top; sides default to strat.sides; follow="15m"|"1h" runs both sides with the structure hint choosing which
+    one may trade (flat-only flips). qstep defaults to the symbol's contract step; equity-scaled params are frozen into fixed sizes at
+    the first mid from `equity` (default: the latest state file's) unless `fixed`, or unless the override already fixes them."""
+
+    p = load_params() or {}
+    sig = {**(p.get("sig") or {}), **(sig or {})}
+    strat, qstep, seed, loaded, first, equity = _prepare(p, files, sym, strat, qstep, equity, fixed)
     eng = Engine(sig, strat, qstep=qstep, sides=["long", "short"] if follow else sides, follow=follow)
     if first: eng.seed(*seed)
     for path in files: eng.run(loaded[path] if path in loaded else load_seconds(path, sym))
@@ -374,8 +417,59 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
     if events: m["events"] = eng.events
     return m
 
+def _hour_key(path):
+    """The tape's clock slot: pub-YYYYMMDD-HH (hourly) or pub-YYYYMMDD (daily); books are merged slot by slot, in order."""
+    n = os.path.basename(path)
+    for ext in (".gz", ".jsonl"):
+        if n.endswith(ext): n = n[:-len(ext)]
+    return n
+
+def _merge(entries):
+    """entries = [(sym, seconds), ...] in spec order -> (sym, second) in exchange-second order, ties in spec order (the earlier book
+    steps first and so asks the pool first)."""
+    def tagged(order, sym, secs): return ((sec[0], order, sym, sec) for sec in secs)      # bound per stream (a nested genexp would late-bind sym/order to the last book)
+    return ((sym, sec) for _, _, sym, sec in heapq.merge(*(tagged(o, s, x) for o, (s, x) in enumerate(entries)), key=lambda t: (t[0], t[1])))
+
+def run_multi(spec, sig=None, strat=None, pool_cap=1, equity=None, fixed=False, events=False):
+    """Several books on one clock sharing one capital pool — the FCFS basket (RULES 트랙 B, NEXT 22) replayed as hunt would have held it.
+    spec = [{"sym", "side", "files", "strat"?}, ...]: a book exists over its own files (the hours its coin was eligible), each sizes on
+    wallet/pool_cap (`equity` frozen at its first quote, as run_files) under the common `strat` overrides and then its own, and the pool
+    (SimPool) lets `pool_cap` campaigns run at once. Books are merged by their tape's hour, then by exchange second; a tie goes to the
+    earlier book in spec. Returns {"pool": totals, "books": {sym: metrics}} — pool totals: realized / open / total P&L, campaigns, stops,
+    refused first units, the combined equity's max drawdown, book-seconds. Books are keyed "SYM:side"."""
+    p = load_params() or {}
+    sig = {**(p.get("sig") or {}), **(sig or {})}
+    pool = SimPool(pool_cap); engs, byhour, sizing = {}, {}, {}
+    for b in spec:
+        sym, side = b["sym"], b["side"]
+        st = {"wallet_frac": 1.0 / max(int(pool_cap), 1), **(strat or {}), **(b.get("strat") or {})}
+        st, qstep, seed, loaded, first, eq = _prepare(p, b["files"], sym, st, None, equity, fixed)
+        eng = Engine(sig, st, qstep=qstep, sides=[side])
+        if first: eng.seed(*seed)
+        for bk in eng.books.values(): bk.pos["pool"] = pool.handle(sym, bk)                  # the pool is per coin (one book per coin at a time, as hunt)
+        key = f"{sym}:{side}"                                                                  # a coin may hold a short window and a long window (EGLD, MUBARAK): two books
+        engs[key] = eng; sizing[key] = dict(qstep=qstep, equity=None if fixed else eq, **{k: st.get(k) for k in SIZED})
+        for path in b["files"]: byhour.setdefault(_hour_key(path), []).append((key, sym, path, loaded.get(path)))
+    peak = dd = 0.0; n = 0
+    for key in sorted(byhour):
+        entries = [(k, secs if secs is not None else load_seconds(path, sym)) for k, sym, path, secs in byhour[key]]
+        for k, sec in _merge(entries):
+            engs[k].step(*sec); n += 1
+            eq_all = sum(bk.realized + bk.upl for e in engs.values() for bk in e.books.values())
+            peak = max(peak, eq_all); dd = max(dd, peak - eq_all)
+    books = {}
+    for k, e in engs.items():
+        m = e.metrics(); m["side"] = next(iter(e.books)); m["sizing"] = sizing[k]
+        if events: m["events"] = e.events
+        books[k] = m
+    tot = dict(cap=pool.cap, pnl=round(sum(m["pnl"] for m in books.values()), 3), open_pnl=round(sum(m["open_pnl"] for m in books.values()), 3))
+    tot["total"] = round(tot["pnl"] + tot["open_pnl"], 3)
+    tot.update(campaigns=sum(m["campaigns"] for m in books.values()), cycles=sum(m["cycles"] for m in books.values()), stops=sum(m["stops"] for m in books.values()),
+               refused=pool.refused, max_dd=round(dd, 3), book_seconds=n, books=len(books))
+    return dict(pool=tot, books=books)
+
 if __name__ == "__main__":
-    args = sys.argv[1:]; files, sym, sig, strat, sides, follow, qstep, equity, fixed = [], "TRUMPUSDT", {}, {}, None, None, None, None, False
+    args = sys.argv[1:]; files, sym, sig, strat, sides, follow, qstep, equity, fixed, books, pool = [], "TRUMPUSDT", {}, {}, None, None, None, None, False, None, 1
     i = 0
     while i < len(args):
         a = args[i]
@@ -385,9 +479,17 @@ if __name__ == "__main__":
         elif a == "--fixed": fixed = True; i += 1                     # the file's unit_qty / cap_usdt / limits, whatever the fractions say (reference numbers)
         elif a == "--sides": sides = args[i + 1].split(","); i += 2
         elif a == "--follow": follow = args[i + 1]; i += 2
+        elif a == "--books": books = args[i + 1]; i += 2                # the FCFS basket: a JSON spec of books (sym, side, files[, strat])
+        elif a == "--pool": pool = int(args[i + 1]); i += 2              # ... and its capital pool's cap
         elif a in ("--sig", "--strat"):
             k, v = args[i + 1].split("="); (sig if a == "--sig" else strat)[k] = float(v) if v.replace(".", "", 1).replace("-", "", 1).isdigit() else v; i += 2
         else: files.append(a); i += 1
+    if books:
+        with open(books, encoding="utf-8") as fh: spec = json.load(fh)
+        t0 = time.time(); m = run_multi(spec, sig, strat, pool_cap=pool, equity=equity, fixed=fixed)
+        for k, bm in m["books"].items():
+            print(f"  {k.split(':')[0]:12} {bm['side']:5} total {bm['total']:+8.3f} campaigns {bm['campaigns']:2d} cycles {bm['cycles']:3d} stops {bm['stops']} dd {bm['max_dd']:6.2f} refused {bm['pool_skips']:3d} unit {bm['sizing'].get('unit_qty')}")
+        print(json.dumps(m["pool"]), f"({time.time() - t0:.0f}s)"); sys.exit(0)
     if not files: print(__doc__); sys.exit(0)
     t0 = time.time(); m = run_files(files, sym, sig, strat, events=True, qstep=qstep, sides=sides, follow=follow, equity=equity, fixed=fixed); ev = m.pop("events")
     for e in ev[-12:]: print("  ", time.strftime("%m-%d %H:%M:%S", time.gmtime(e[0] or 0)), *e[1:])
