@@ -72,6 +72,14 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              # AGAINST label (the current-leg read with rg_leg_on), _core 1 extends it to the core lot (the average is no anchor either). All 0 = cost-anchored.
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: the round-trip fee, fee_rt_pct)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
+             entry_v=0, entry_flow=0, entry_decay=0, entry_mult=0.0, add_mult=0.0, entry_random=0.0, entry_seed=0,   # entry QUALITY (2026-09-04, track B tapes,
+             # next-bar-open outcomes). A confirmed entry = the velocity rule's stall (entry_v: the 1m rule fires at the candle close, after the reversal began — dec
+             # median 0.55 vs 0.15, +0.14% vs +0.84% at 15 min on markdown shorts) with the last 10 s of aggressor flow turned against the move (entry_flow: bs10 < 0.5
+             # after a pop for a short, > 0.5 after a dip for a long — v & flow +1.30% / +1.22% both sides, 8/8 and 6/6 coins, threshold-insensitive 0.4-0.6) and,
+             # optionally, the aggressor volume that made the move fading (entry_decay: buy_decay / sell_decay — helped shorts only). An UNCONFIRMED entry arms
+             # entry_mult x the unit when it opens a campaign and add_mult x the unit when it adds to one (0 = not at all): the first unit's quality decided the
+             # stops on the grid (all entries 11 stops, first unit gated 1, half-size first units still 11), the adds' quality only the P&L — so risk is gated at the
+             # first unit and expected value is sized at the adds. Trims keep every detector (the closing side keeps the lower bar). All 0 = bit-identical
              against_daily_mult=0.5,                     # unit multiplier when the book's side runs against the daily trend
              against_regime_mult=0.0,                    # > 0: an AGAINST regime scales the unit by this instead of vetoing adds (a size scale, never a veto)
              core_units=1, favor_pop_mult=2.0, derisk_pct=3.0, derisk_on_breakdown=True, derisk_core_frac=0.5,
@@ -739,17 +747,31 @@ class Strategy:
             return None                                              # the money cap is the exchange stop itself: an add above it moves that stop up (loss at the stop stays = cap), never down
         if self.arm and self.arm_filled >= self.arm[2] - 1e-9: ev.append(("DISARM", dict(why="filled"))); self.arm = None   # a completed unit frees the next signal
         if buy_sig in names:
+            # entry quality (2026-09-04): confirmed = the velocity rule's stall (entry_v) with the last 10 s of aggressor flow turned against the move (entry_flow)
+            # [and the volume that made the move fading (entry_decay)]. An unconfirmed entry is vetoed, or sized entry_mult x (opening a campaign) / add_mult x (adding)
+            src_ok = not p.get("entry_v") or any(x.get("src") == "v" for x in sigs if x["sig"] == buy_sig)
+            flow_ok = not p.get("entry_flow") or (f.get("bs10") is not None and s * (f["bs10"] - 0.5) > 0)
+            decay_ok = not p.get("entry_decay") or bool(f.get("sell_decay") if s > 0 else f.get("buy_decay"))
+            fails = [w for w, ok in (("src:v", src_ok), ("flow", flow_ok), ("decay", decay_ok)) if not ok]
+            if p.get("entry_random") and not fails:                      # measurement only (NEXT 19: a filter must beat vetoing the same share of entries at random):
+                import random                                            # skip this entry with probability entry_random, deterministic per second and entry_seed
+                if random.Random(f"{t}:{p.get('entry_seed', 0)}").random() < p["entry_random"]: fails = ["random"]
+            eunit = unit
+            if fails:
+                m = p.get("add_mult") if qty else p.get("entry_mult")   # the quality tier's size: 0 = none
+                if m: eunit = round(max(round(unit * m / qs) * qs, qs), 9); fails = []
             why = None
             if blocked: why = blocked
-            elif caps_why(unit): why = caps_why(unit)
+            elif fails: why = fails[0]
+            elif caps_why(eunit): why = caps_why(eunit)
             elif qty and pos.get("last") == "trim" and s * (pos["last_trim_px"] - mid) / mid * 100 < p["gap_rebuy_pct"]: why = "gap_rebuy"   # anti-churn of the inventory cycle only: a flat book has nothing to cycle
             elif pos.get("last") == "buy" and s * (pos["last_buy_px"] - mid) / mid * 100 < step: why = f"step_add({step:.2f}%)"
-            elif pos.get("avail") is not None and pos.get("lever") and pos["avail"] < unit * mid / pos["lever"] * 1.2: why = "margin"
+            elif pos.get("avail") is not None and pos.get("lever") and pos["avail"] < eunit * mid / pos["lever"] * 1.2: why = "margin"
             ok, how = confirmed()
             if not why and not ok: why = "unconfirmed"
-            if why: ev.append(("SKIP", dict(sig=buy_sig, why=why, mid=mid, avail=pos.get("avail"), unit=unit, ceiling=round(p["max_units"] * unit, 9))))   # unit / ceiling: a max_units skip is readable at a glance (MAGMA 2026-09-04 16:10)
+            if why: ev.append(("SKIP", dict(sig=buy_sig, why=why, mid=mid, avail=pos.get("avail"), unit=eunit, ceiling=round(p["max_units"] * unit, 9))))   # unit / ceiling: a max_units skip is readable at a glance (MAGMA 2026-09-04 16:10)
             elif self.arm: ev.append(("SKIP", dict(sig=buy_sig, why="armed", mid=mid)))
-            else: self.arm = (t + p["buy_ttl_s"], mid, unit); self.arm_filled = 0.0; ev.append(("ARM", dict(mid=mid, until=self.arm[0], unit=unit, confirm=how or None)))
+            else: self.arm = (t + p["buy_ttl_s"], mid, eunit); self.arm_filled = 0.0; ev.append(("ARM", dict(mid=mid, until=self.arm[0], unit=eunit, confirm=how or None, scaled=eunit != unit or None)))
         buy = None
         if self.arm:
             rem = round(self.arm[2] - self.arm_filled, 9)

@@ -52,6 +52,58 @@ def F(**kw):
     f = dict(t=100, mid=3.0, bid=2.999, ask=3.001, v=0.1, a=0.1, bko=False, brk=False, atr=0.02, atr15=0.06, htf_lows=[2.85], htf_highs=[3.15])
     f.update(kw); return f
 
+class EntryGate(unittest.TestCase):
+    """Entry quality (2026-09-04, track B): a confirmed entry is the velocity rule's stall (`entry_v`) with the last 10 s of aggressor flow
+    turned against the move (`entry_flow`), optionally with the volume that made the move fading (`entry_decay`). An unconfirmed entry is
+    vetoed or sized entry_mult x (first unit) / add_mult x (add). All 0 = the old behaviour; trims listen to every detector."""
+    def flat(self): return dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, pause=False)
+
+    def test_entries_listen_to_one_detector_and_trims_to_every_one(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_v=1)); pos = self.flat()
+        r = st.step(F(bs10=0.7), [dict(sig="DIP_SLOWING", src="1m")], pos)
+        self.assertIsNone(st.arm); self.assertEqual([e[1]["why"] for e in r["events"] if e[0] == "SKIP"], ["src:v"])
+        st.step(F(t=101, bs10=0.7), [dict(sig="DIP_SLOWING", src="v")], pos); self.assertIsNotNone(st.arm)
+        st2 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_v=1))
+        pos2 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0)
+        r = st2.step(F(mid=3.03, bid=3.029, ask=3.031), [dict(sig="POP_STALLING", src="1m")], pos2)      # a 1m stall still sells the unit
+        self.assertIsNotNone(r["trim"])
+        st3 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos3 = self.flat()   # all off: the 1m rule arms as before
+        st3.step(F(bs10=0.2), [dict(sig="DIP_SLOWING", src="1m")], pos3); self.assertIsNotNone(st3.arm)
+
+    def test_the_flow_gate_needs_the_last_ten_seconds_against_the_move_on_either_side(self):
+        for side, sig, good, bad in (("long", "DIP_SLOWING", 0.7, 0.3), ("short", "POP_STALLING", 0.3, 0.7)):
+            st = Strategy(dict(side=side, unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_flow=1)); pos = self.flat()
+            r = st.step(F(bs10=bad), [dict(sig=sig, src="v")], pos)
+            self.assertIsNone(st.arm, side); self.assertIn("flow", [e[1]["why"] for e in r["events"] if e[0] == "SKIP"])
+            st.step(F(t=200, bs10=good), [dict(sig=sig, src="v")], pos); self.assertIsNotNone(st.arm, side)
+            st4 = Strategy(dict(side=side, unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_flow=1)); pos4 = self.flat()
+            st4.step(F(), [dict(sig=sig, src="v")], pos4); self.assertIsNone(st4.arm)                 # no flow reading at all is not "against the move"
+
+    def test_the_decay_gate_reads_the_side_that_made_the_move(self):
+        st = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_decay=1)); pos = self.flat()
+        st.step(F(buy_decay=False, sell_decay=True), [dict(sig="POP_STALLING", src="v")], pos); self.assertIsNone(st.arm)   # the pop was made by buyers: their decay is the one that counts
+        st.step(F(t=200, buy_decay=True), [dict(sig="POP_STALLING", src="v")], pos); self.assertIsNotNone(st.arm)
+
+    def test_the_first_unit_is_gated_and_adds_are_sized_by_quality(self):
+        """The first unit's quality decided the stops on the 2026-09-04 grid (11 -> 1), the adds' quality only the P&L: risk is gated at the
+        campaign's first unit (entry_mult 0), expected value is sized at the adds (add_mult m for an unconfirmed add, the whole unit for a confirmed one)."""
+        p = dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_v=1, entry_flow=1, add_mult=0.5)
+        st = Strategy(p); pos = self.flat()
+        st.step(F(bs10=0.7), [dict(sig="DIP_SLOWING", src="1m")], pos); self.assertIsNone(st.arm)                       # flat, unconfirmed: nothing (entry_mult 0)
+        st.step(F(t=101, bs10=0.7), [dict(sig="DIP_SLOWING", src="v")], pos); self.assertEqual(st.arm[2], 70.0)         # flat, confirmed: the whole unit
+        pos2 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0, pause=False)
+        st2 = Strategy(p); r = st2.step(F(mid=2.9, bid=2.899, ask=2.901, bs10=0.2), [dict(sig="DIP_SLOWING", src="1m")], pos2)
+        self.assertEqual(st2.arm[2], 35.0); self.assertTrue([e for e in r["events"] if e[0] == "ARM"][0][1]["scaled"])   # positioned, unconfirmed add: half
+        st3 = Strategy(p); st3.step(F(mid=2.9, bid=2.899, ask=2.901, bs10=0.8), [dict(sig="DIP_SLOWING", src="v")], pos2); self.assertEqual(st3.arm[2], 70.0)   # confirmed add: whole
+        st4 = Strategy({**p, "add_mult": 1.0}); st4.step(F(mid=2.9, bid=2.899, ask=2.901, bs10=0.2), [dict(sig="DIP_SLOWING", src="1m")], pos2); self.assertEqual(st4.arm[2], 70.0)   # add_mult 1: adds as before
+
+    def test_an_unconfirmed_first_unit_can_be_a_smaller_unit_instead_of_none(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_flow=1, entry_mult=0.5)); pos = self.flat()
+        r = st.step(F(bs10=0.2), [dict(sig="DIP_SLOWING", src="v")], pos)
+        self.assertEqual(st.arm[2], 35.0); self.assertTrue([e for e in r["events"] if e[0] == "ARM"][0][1]["scaled"])     # flow against the entry: half a unit
+        st2 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_flow=1, entry_mult=0.5)); pos2 = self.flat()
+        st2.step(F(bs10=0.8), [dict(sig="DIP_SLOWING", src="v")], pos2); self.assertEqual(st2.arm[2], 70.0)              # confirmed: the whole unit
+
 class Accounting(unittest.TestCase):
     def test_exchange_style_average_and_lifo_lots(self):
         pos = dict(lots=[], last=None)

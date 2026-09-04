@@ -63,6 +63,15 @@ def report(day):
                               ("trim market atr 1.5 only (bounce-size gate, cost ignored)", ["--strat", "trim_market_atr=1.5", "--strat", "trim_market_only=1"])):
                 line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short"] + ov).strip().split("\n") or [""])[-1]
                 out.append(f"counterfactual {label} (dual): {_vs(base, line)}" + line)
+            # entry quality (2026-09-04, track B — RULES 담기 확인 절): the live hunt book opens a campaign only on a stall the velocity rule read with the flow
+            # turned and the volume fading, and adds half units on unconfirmed stalls. Two readouts on the book's own side(s): the gate off (every stall opens,
+            # adds whole — the pre-09-04 book) and the gate without the decay condition. The revert rule in NEXT's live 실험 표 reads these lines.
+            bsides = ",".join(((load_params() or {}).get("books") or {}).get(sym, {}).get("sides") or ["long", "short"])
+            own = base if bsides == "long,short" else _metrics((run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", bsides]).strip().split("\n") or [""])[-1])
+            for label, ov in (("entry quality off (every stall opens, adds whole)", ["--strat", "entry_v=0", "--strat", "entry_flow=0", "--strat", "entry_decay=0", "--strat", "add_mult=0"]),
+                              ("entry quality without decay", ["--strat", "entry_decay=0"])):
+                line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", bsides] + ov).strip().split("\n") or [""])[-1]
+                out.append(f"counterfactual {label} ({bsides}): {_vs(own, line)}" + line)
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break
                 out.append(f"--follow {fol}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--follow", fol]).strip().split("\n") or [""])[-1])
             out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")

@@ -30,7 +30,7 @@
       "ticker",
       "candle1m"
     ],
-    "TRIAUSDT": [
+    "CHIPUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -110,7 +110,8 @@
       "max_units": 3,
       "stop_lock_atr": 2.0,
       "stop_trail_atr": 1.5,
-      "cap_per_unit": 1
+      "cap_per_unit": 1,
+      "against_regime_mult": 1.0
     }
   },
   "sig": {
@@ -183,7 +184,12 @@
       "stop_lock_atr": 2.0,
       "stop_trail_atr": 1.5,
       "cap_per_unit": 1,
-      "against_regime_mult": 1.0
+      "against_regime_mult": 1.0,
+      "entry_v": 1,
+      "entry_flow": 1,
+      "entry_decay": 1,
+      "entry_mult": 0,
+      "add_mult": 0.5
     },
     "ai_read": 1,
     "ai_model": "gpt-5.6-sol",
