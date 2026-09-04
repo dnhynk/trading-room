@@ -1,5 +1,5 @@
 """OMS invariants of bot/cycle.py (Book against a stub exchange).  python -m unittest bot.test_cycle -v"""
-import asyncio, time, unittest
+import asyncio, json, os, shutil, tempfile, time, unittest
 from types import SimpleNamespace
 from bot.bitget import BitgetError
 from bot.signal import Features, STRAT, book_params, pos_stats
@@ -537,3 +537,51 @@ class Sizing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CapitalPool(unittest.TestCase):
+    """cycle.Pool (2026-09-04): the hunt basket's first-come capital pool — at most `cap` books hold a campaign at once, a claim is a lease,
+    a positioned book adopts, the day's loss across every book refuses new campaigns."""
+    def setUp(self): self.d = tempfile.mkdtemp(); self.path = os.path.join(self.d, "pool.json")
+    def tearDown(self): shutil.rmtree(self.d, ignore_errors=True)
+    def pool(self, sym, cap=1, states=None, ev=None):
+        p = cycle.Pool(sym, ev=ev, path=self.path, states=states or (lambda: {})); p.cap = cap; return p
+    def claims(self):
+        with open(self.path, encoding="utf-8") as f: return json.load(f)["claims"]
+
+    def test_the_first_claim_wins_and_the_next_book_waits_for_the_release(self):
+        a, b = self.pool("AUSDT"), self.pool("BUSDT")
+        self.assertEqual((a.claim(), b.claim(), a.claim()), ("", "pool", ""))            # ours stays ours; the second waits
+        a.tend(positioned=True, armed=False); self.assertTrue(a.mine)                      # positioned: kept
+        a.tend(positioned=False, armed=True); self.assertTrue(a.mine)                      # an armed entry still holds it
+        a.tend(positioned=False, armed=False); self.assertFalse(a.mine)                    # nothing behind it: released
+        self.assertEqual(b.claim(), ""); self.assertEqual(set(self.claims()), {"BUSDT"})
+        c, d = self.pool("CUSDT", cap=2), self.pool("DUSDT", cap=2)
+        self.assertEqual((c.claim(), d.claim()), ("", "pool"))                             # cap 2: room for one more, not two
+
+    def test_a_dead_engines_lease_is_swept_and_a_positioned_book_adopts_whatever_the_cap(self):
+        a = self.pool("AUSDT"); a.claim()
+        with open(self.path, encoding="utf-8") as f: d = json.load(f)
+        d["claims"]["AUSDT"]["t"] -= 400                                                   # older than TTL: its engine is gone
+        with open(self.path, "w", encoding="utf-8") as f: json.dump(d, f)
+        evs = []; b = self.pool("BUSDT", ev=lambda k, **kw: evs.append(k))
+        self.assertEqual(b.claim(), ""); self.assertIn("POOL_STALE", evs); self.assertEqual(set(self.claims()), {"BUSDT"})
+        evs2 = []; c = self.pool("CUSDT", ev=lambda k, **kw: evs2.append(k)); c.tend(positioned=True, armed=False)
+        self.assertTrue(c.mine); self.assertIn("POOL_ADOPT", evs2); self.assertEqual(set(self.claims()), {"BUSDT", "CUSDT"})   # the position is the fact
+        b.refreshed = 0.0; b.tend(positioned=True, armed=False)
+        self.assertGreater(self.claims()["BUSDT"]["t"], time.time() - 5)                   # a held lease is refreshed
+
+    def test_the_days_loss_across_every_book_refuses_new_campaigns(self):
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        states = lambda: {"XUSDT": dict(day=day, books=dict(short=dict(realized=-40.0))), "YUSDT": dict(day=day, books=dict(long=dict(realized=-25.0))),
+                          "OLD": dict(day="2000-01-01", books=dict(long=dict(realized=-999.0)))}
+        a = self.pool("AUSDT", states=states); a.limit = 60.0
+        self.assertEqual(a.day_loss(), -65.0); self.assertEqual(a.claim(), "pool_daily")
+        a.limit = 100.0; self.assertEqual(a.claim(), "")
+
+    def test_a_lock_that_cannot_be_taken_refuses_rather_than_trades(self):
+        a = self.pool("AUSDT"); a.LOCK_TTL, a.LOCK_WAIT = 999, 0.2
+        open(self.path + ".lock", "w").close()                                             # somebody holds the lock and does not let go
+        evs = []; a.ev = lambda k, **kw: evs.append(k)
+        self.assertEqual(a.claim(), "pool_error"); self.assertIn("POOL_ERROR", evs); self.assertFalse(a.mine)
+        os.remove(self.path + ".lock"); self.assertEqual(a.claim(), "")

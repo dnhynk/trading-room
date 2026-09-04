@@ -1,10 +1,12 @@
-"""Pump-coin hunting pipeline — the SIDE pipeline (2026-09-03, user's experiment "until $1000"): one book, one side, the whole wallet,
-the side chosen by the coin's lifecycle PHASE (bot/whale.py).
+"""Pump-coin hunting pipeline — the SIDE pipeline (2026-09-03, user's experiment "until $1000"): a book per confirmed eligible coin, one
+side each, the whole wallet to whichever confirms an entry first (hunt.pool; one book only while it is 0), the side chosen by the coin's
+lifecycle PHASE (bot/whale.py).
   python -m bot.supervise hunt      (python -m bot.hunt [--once] [--dry])
 
 The basket selector (bot/scan.py + bot/select.py) is untouched and stays the contract; this module inherits its skeleton — scan ->
 record every scan (logs/hunt.json, logs/hunt-history.jsonl) -> verdict on `confirm` consecutive scans -> params.json["books"] ->
-wind-down -> flat -> drop -> the next coin. Two writers of `books` must never run at once: `hunt.on` = 1 makes this job the owner
+wind-down -> flat -> drop. With `hunt.pool` > 0 every confirmed eligible coin holds a book and the engines' capital pool (cycle.Pool,
+logs/pool.json) lets `pool` of them campaign at once, first come first served; `pool` 0 = the one-book pipeline of 2026-09-03. Two writers of `books` must never run at once: `hunt.on` = 1 makes this job the owner
 (bot.select must be stopped; the job refuses to write while logs/select.pid names a LIVE select job — `pid_alive`, a pid number alone
 is not evidence), `hunt.on` = 0 keeps it a report-only scanner.
 
@@ -17,7 +19,7 @@ Footprints and thresholds: bot/whale.py (stage 1: candles + ticker; stage 2: CVD
 Common vetoes: 24h volume, ATR(1m) band the 1m rules were tuned in, contract leverage, churn; funding must not tax our side.
 A phase exit does not start a cooldown (the same coin flips long -> short on the same scan it goes flat), and neither does the coin
 merely going still (ATR floor) — an episode death or a coin that cooled off its own heat does.
-Rank among the eligible = 1h two-way path (churn) — the order for the empty slot, never a reason to replace a holding.
+Rank among the eligible = 1h two-way path (churn) — the order of the overflow (and of the single slot without a pool), never a reason to replace a holding.
 Events: HUNT (every scan) in logs/events.jsonl; HUNT_ADD / HUNT_WIND_DOWN / HUNT_DROP / HUNT_BLOCKED also in logs/alerts.jsonl.
 State (streaks, cooldowns, the held coin's side / peak volume / climax high / exit reason) in logs/hunt-state.json."""
 import json, os, statistics, subprocess, sys, time
@@ -68,6 +70,11 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             #                      (사용자 결정 2026-09-04). 자격 게이트는 AI 가 못 건드린다 — 대체하는 것은 국면과 방향뿐이다.
             #                      실패하면 결정론으로 폴백한다. 판정은 며칠 뒤 `bot.campaigns`: 불일치한 행에서 밀려난 쪽이 옳았나.
             ai_cmd="codex", ai_model="", ai_effort="", ai_timeout_s=240, ai_runs=1, ai_charts=0,   # ai_charts=N: 적격+보유 최대 N종의 차트 PNG 를 붙인다. ai_runs>1: 같은 입력을 병렬로 여러 번 읽고 다수결(합의율을 `ai_agree` 로 남긴다)
+            pool=0,              # the FCFS capital pool's cap (cycle.Pool): 0 = one book, the churn leader (the 2026-09-03 contract); N >= 1 = a book for EVERY
+            #                      confirmed eligible coin, at most N campaigns at once — whichever confirmed its first unit first, each on wallet/N (user 2026-09-04:
+            #                      "첫 진입 문턱을 올린 대신 바구니를 확 늘리고 선착순으로 유닛 배분"). Eligibility is the selector; churn rank only orders the overflow
+            max_books=12,        # engines this machine runs at once (a process guard, never a ranking): confirmed candidates beyond it raise HUNT_OVERFLOW — the
+            #                      signal that the eligibility bar can go up (eligible per scan 2026-09-03/04: median 3, p75 5, max 9, 14 coins in 1.5 days)
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
 BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
@@ -346,46 +353,48 @@ def table(rows, n=15):
     return "\n".join(out)
 
 def verdict(rows, books, hunt, st, now):
-    """What this scan says. books = params.books. Returns dict(refuse|wind|add|top|cur); add/top = (symbol, side). A non-hunt book
-    in `books` (a basket, a hand book) makes the job refuse: it never rewrites a basket. Streaks live in st (`streak`, `xstreak`)."""
+    """What this scan says. books = params.books. Returns dict(refuse|held|winds|resumes|adds|overflow|top). A non-hunt book in `books`
+    (a basket, a hand book) makes the job refuse: it never rewrites a basket.
+    Every eligible coin is a candidate and each keeps its own streak (`streak` = {"SYM:side": scans}); one that stays eligible on the
+    same side for `confirm` scans is confirmed. With `pool` > 0 every confirmed candidate gets a book, up to `max_books` engines (a
+    process guard, never a ranking — `overflow` names the confirmed coins left out, in churn order: the eligibility bar is too low while
+    it is non-empty); `pool` 0 keeps one book, the churn leader among the confirmed. A held book leaves on `exit_confirm` flagged scans
+    (`xstreak`); a leaving one resumes when the read comes back for `confirm` scans (`rstreak`)."""
     by = {r["symbol"]: r for r in rows}
     held = [s for s, bk in books.items() if bk.get("hunt")]
     other = [s for s in books if s not in held]
-    if other: return dict(refuse=f"books holds non-hunt symbols {other}: stop this job or empty the basket first", cur=None, wind=None, add=None, top=None)
-    if len(held) > 1: return dict(refuse=f"more than one hunt book {held}", cur=None, wind=None, add=None, top=None)
-    cur = held[0] if held else None
-    wind = resume = None
-    if cur and books[cur].get("wind_down") and cur in by and not _leave_coin((st.get("held", {}).get(cur) or {}).get("exit", "")):
-        # a phase-flip exit is undone when the read comes back to our side for `confirm` scans before the book is flat (a single bad
-        # 15m close must not dump a good book: exit_confirm is 1 — audit 2026-09-03)
-        r = by[cur]; mine = (books[cur].get("sides") or ["short"])[0]
-        back = r.get("side") == mine and not exit_flags(r, st.get("held", {}).get(cur, {}), hunt)
-        st.setdefault("rstreak", {})[cur] = st.get("rstreak", {}).get(cur, 0) + 1 if back else 0
-        if back and st["rstreak"][cur] >= int(hunt["confirm"]): resume = cur; st["rstreak"][cur] = 0
-    if cur and not books[cur].get("wind_down"):
-        r = by.get(cur)
+    if other: return dict(refuse=f"books holds non-hunt symbols {other}: stop this job or empty the basket first", held=held, winds=[], resumes=[], adds=[], overflow=[], top=None)
+    winds, resumes = [], []
+    for cur in held:
+        r = by.get(cur); hs = st.setdefault("held", {}).setdefault(cur, {})
+        if books[cur].get("wind_down"):
+            # a phase-flip exit is undone when the read comes back to our side for `confirm` scans before the book is flat (a single bad
+            # 15m close must not dump a good book: exit_confirm is 1 — audit 2026-09-03); a quiet / dead leaver never resumes
+            if r and not _leave_coin(hs.get("exit", "")):
+                mine = (books[cur].get("sides") or ["short"])[0]
+                back = r.get("side") == mine and not exit_flags(r, hs, hunt)
+                st.setdefault("rstreak", {})[cur] = st.get("rstreak", {}).get(cur, 0) + 1 if back else 0
+                if back and st["rstreak"][cur] >= int(hunt["confirm"]): resumes.append(cur); st["rstreak"][cur] = 0
+            continue
         if r and r.get("phase") not in ("unread", "shallow"):        # absent or unread = not evidence: keep
-            hs = st.setdefault("held", {}).setdefault(cur, {})
             hs["peak"] = max(hs.get("peak") or 0.0, r.get("qv_shape") or r["qv"]); hs.setdefault("side", (books[cur].get("sides") or ["short"])[0])
             hs["tw_peak"] = max(hs.get("tw_peak") or 0.0, r.get("twoway24") or 0.0)   # the churn when this coin was hot: leaving reads against it (quiet_frac)
             xf = exit_flags(r, hs, hunt)
             st.setdefault("xstreak", {})[cur] = st.get("xstreak", {}).get(cur, 0) + 1 if xf else 0
-            if xf and st["xstreak"][cur] >= int(hunt["exit_confirm"]): wind = (cur, ",".join(xf)); hs["exit"] = wind[1]
+            if xf and st["xstreak"][cur] >= int(hunt["exit_confirm"]): winds.append((cur, ",".join(xf))); hs["exit"] = winds[-1][1]
     cool = st.get("cool") or {}
-    def free(r):   # not held, or the leaving book itself on the OTHER side (the lifecycle flip: a long wound down at the climax comes back short) —
-        bk = books.get(r["symbol"])   # unless it left for quiet / dead: that coin is cooling, and holding the top slot would freeze the streak, the drop and the cooldown (deadlock, audit 2026-09-03)
+    leaving = {s for s, _ in winds} | {s for s in held if books[s].get("wind_down") and s not in resumes}
+    def free(r):   # not held, or a leaving book's own coin on the OTHER side (the lifecycle flip: a long wound down at the climax comes back short) —
+        bk = books.get(r["symbol"])   # unless it left for quiet / dead: that coin is cooling, and a slot for it would freeze the streak, the drop and the cooldown (deadlock, audit 2026-09-03)
         if bk is None: return True
-        if not bk.get("wind_down") or _leave_coin((st.get("held", {}).get(r["symbol"]) or {}).get("exit", "")): return False
+        if r["symbol"] not in leaving or _leave_coin((st.get("held", {}).get(r["symbol"]) or {}).get("exit", "")): return False
         return r["side"] != (bk.get("sides") or [None])[0]
     cands = [(r["symbol"], r["side"]) for r in rows if not r["flags"] and r.get("side") and free(r) and cool.get(r["symbol"], 0) <= now]
-    top = cands[0] if cands else None
-    key = f"{top[0]}:{top[1]}" if top else None
-    st["streak"] = {key: (st.get("streak") or {}).get(key, 0) + 1} if key else {}
-    slot_open = cur is None or books[cur].get("wind_down") or wind is not None
-    add = top if top and slot_open and st["streak"][key] >= int(hunt["confirm"]) else None
-    if cur and not slot_open and top and top[0] == cur: add = None
-    if resume: add = None                                                   # the book stays: nothing replaces it this scan
-    return dict(refuse=None, cur=cur, wind=wind, add=add, top=top, resume=resume)
+    st["streak"] = {f"{s}:{sd}": (st.get("streak") or {}).get(f"{s}:{sd}", 0) + 1 for s, sd in cands}   # every candidate counts its own scans; dropping out restarts it
+    confirmed = [(s, sd) for s, sd in cands if st["streak"][f"{s}:{sd}"] >= int(hunt["confirm"])]
+    limit = int(hunt.get("max_books") or 1) if int(hunt.get("pool") or 0) else 1
+    room = max(limit - len([s for s in held if s not in leaving]), 0)        # a leaving book's slot is spoken for by its replacement (apply drops it when flat)
+    return dict(refuse=None, held=held, winds=winds, resumes=resumes, adds=confirmed[:room], overflow=confirmed[room:] if int(hunt.get("pool") or 0) else [], top=cands[0] if cands else None)
 
 def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still", "hold:", "fund"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
 #                                                                                      hurts and there is no hurry — leave gently (stalls above cost, or the cap).
@@ -398,43 +407,46 @@ def _leave_coin(why): return any(k in (why or "") for k in ("dead", "vol", "flat
 #            everything else (a phase flip: climax / markdown / markup / squeeze / newhigh) is a same-coin side change — no cooldown, exit fast into a stall
 
 def apply(p, rows, v, flats, hunt, st, now, recent=()):
-    """Bring params.json to the verdict. One live hunt book at a time: the leaving book is dropped only when it is flat AND a
-    replacement opens in the same write (books never empties — an empty `books` would send ws.portfolio() to whole-wallet
-    strat.symbol on the common sides). The same coin may come back at once on the other side after a phase exit (no cooldown);
-    an episode death starts the cooldown. Returns [(action, symbol, detail)]; nothing is written here."""
+    """Bring params.json to the verdict. Leaving books are dropped as they go flat; confirmed candidates are added, each on wallet/cap
+    (`wallet_frac`: the pool, not a basket split, keeps the exposure to `pool` campaigns at once — cycle.Pool; 1.0 without a pool).
+    `books` never empties: the last flat leaver stays until a replacement opens in the same write (an empty `books` would send
+    ws.portfolio() to whole-wallet strat.symbol on the common sides). The same coin may come back at once on the other side after a
+    phase exit (no cooldown) once its old book is flat; an episode death or a quiet leaver starts the cooldown. Returns
+    [(action, symbol, detail)]; nothing is written here."""
     by = {r["symbol"]: r for r in rows}; acts = []
     books = p.get("books") or {}; sp = p.setdefault("strat", {})
-    if v["wind"]:
-        s, why = v["wind"]
+    for s, why in v["winds"]:
         if s in books and not books[s].get("wind_down"):
             books[s]["wind_down"] = 1                                       # no more adds; trims and the stop keep working
             if not _illiquid(why): books[s]["exit"] = 1                     # a phase flip OR the coin gone quiet: the engine sells the whole position into the next stall whatever the cost (leave fast)
             acts.append(("wind", s, why))                                   # (an episode death leaves gently: stalls above cost, or the cap)
-    if v.get("resume"):                                                     # a phase-flip exit whose read reverted before the book was flat: undo it (audit 2026-09-03)
-        s = v["resume"]
+    for s in v["resumes"]:                                                  # a phase-flip exit whose read reverted before the book was flat: undo it (audit 2026-09-03)
         if s in books and books[s].get("wind_down") and not _leave_coin((st.get("held", {}).get(s) or {}).get("exit", "")):
             books[s].pop("wind_down", None); books[s].pop("exit", None); st.get("held", {}).get(s, {}).pop("exit", None); acts.append(("resume", s, "phase back on our side"))
-    leaving = [s for s in books if books[s].get("wind_down")]; live = [s for s in books if not books[s].get("wind_down")]
-    add = v["add"]
-    cooling = {s for s in leaving if _leave_coin((st.get("held", {}).get(s) or {}).get("exit", ""))}   # a quiet/dead leaver must not come straight back on the other side (audit 2026-09-03)
-    if add and add[0] in cooling: add = None
-    if add and not live and all(flats.get(s) for s in leaving):
-        for s in leaving:
-            why = (st.get("held", {}).get(s) or {}).get("exit", "")
-            del books[s]
-            if _leave_coin(why): st.setdefault("cool", {})[s] = now + float(hunt["cooldown_h"]) * 3600
-            st.get("held", {}).pop(s, None); acts.append(("drop", s, f"flat ({why or 'replaced'})"))
-            for k in ("xstreak", "rstreak"): st.get(k, {}).pop(s, None)         # the streaks are a campaign's, not a coin's
-        sym, side = add; r = by[sym]
-        books[sym] = {"wallet_frac": 1.0, "sides": [side], "hunt": 1, **(hunt.get("strat") or {})}   # the track's risk profile rides on the book, not on params.strat
+    cooling = {s for s in books if books[s].get("wind_down") and _leave_coin((st.get("held", {}).get(s) or {}).get("exit", ""))}   # a quiet/dead leaver must not come straight back on the other side (audit 2026-09-03)
+    adds = [(s, sd) for s, sd in v["adds"] if s not in cooling and (s not in books or flats.get(s))]   # the same coin flips only once its old book is flat
+    gone = [s for s in books if books[s].get("wind_down") and flats.get(s)]
+    if not [s for s in books if s not in gone] and not adds: gone = gone[:-1]   # nothing would remain: the last flat leaver stays as the placeholder
+    for s in gone:
+        why = (st.get("held", {}).get(s) or {}).get("exit", "")
+        del books[s]
+        if _leave_coin(why): st.setdefault("cool", {})[s] = now + float(hunt["cooldown_h"]) * 3600
+        st.get("held", {}).pop(s, None); acts.append(("drop", s, f"flat ({why or 'replaced'})"))
+        for k in ("xstreak", "rstreak"): st.get(k, {}).pop(s, None)         # the streaks are a campaign's, not a coin's
+    cap = int(hunt.get("pool") or 0); wf = round(1.0 / cap, 4) if cap > 1 else 1.0   # each pool holder sizes on wallet/cap; no pool (or cap 1) = the whole wallet
+    for sym, side in adds:
+        if sym in books: continue                                            # its old book on the other side is still there (not flat at the drop): next scan
+        r = by[sym]
+        books[sym] = {"wallet_frac": wf, "sides": [side], "hunt": 1, **(hunt.get("strat") or {})}   # the track's risk profile rides on the book, not on params.strat
         if side == "long" and float(hunt.get("blowoff_atr") or 0) > 0:               # the standing blow-off target, long books only (the basket never sees it)
             books[sym].update(blowoff_atr=float(hunt["blowoff_atr"]), blowoff_frac=float(hunt.get("blowoff_frac") or 1.0))
-        st.setdefault("held", {})[sym] = dict(peak=r.get("qv_shape") or r["qv"], climax=r.get("high48"), side=side, t=now); st["streak"] = {}
+        st.setdefault("held", {})[sym] = dict(peak=r.get("qv_shape") or r["qv"], climax=r.get("high48"), side=side, t=now); (st.get("streak") or {}).pop(f"{sym}:{side}", None)
         for k in ("xstreak", "rstreak"): st.get(k, {}).pop(sym, None)           # a stale count from an earlier campaign would end a re-added coin on its first flagged scan once exit_confirm > 1
         acts.append(("add", sym, f"{side} phase {r.get('phase')} votes {' '.join(r.get('votes') or [])} ratio {r['ratio']}x run {r.get('run')}% off {r.get('off')}% twoway {r.get('twoway24')} atr {r.get('atr_pct')} fund {r['fund']}"))
-    prof = hunt.get("strat") or {}                                          # the risk profile rides on EVERY hunt book, not only on the one being created: a profile edit
-    for s, bk in books.items():                                             # reaches the live book on the next scan (the engine hot-reloads; reductions apply at once — RULES
-        if not bk.get("hunt"): continue                                     # 사이징). Audit 2026-09-03: the 20:08 normalization reached the EGLD book only by hand
+    if v.get("overflow"): acts.append(("overflow", ",".join(s for s, _ in v["overflow"]), f"{len(v['overflow'])} confirmed beyond max_books {hunt.get('max_books')}: the eligibility bar can go up"))
+    prof = {**(hunt.get("strat") or {}), "wallet_frac": wf}                  # the risk profile (and the pool's wallet share) rides on EVERY hunt book, not only on the one being
+    for s, bk in books.items():                                             # created: a profile edit reaches the live books on the next scan (the engine hot-reloads; reductions
+        if not bk.get("hunt"): continue                                     # apply at once — RULES 사이징). Audit 2026-09-03: the 20:08 normalization reached the EGLD book only by hand
         diff = {k: v for k, v in prof.items() if bk.get(k) != v}; stale = [k for k in bk if k not in BOOK_KEYS and k not in prof]
         if diff or stale:
             bk.update(diff)
@@ -449,7 +461,7 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
     rec["BTCUSDT"] = ["candle1m"]; p["record"] = rec
     return acts
 
-ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP", "resume": "HUNT_RESUME", "profile": "HUNT_PROFILE"}
+ALERT = {"add": "HUNT_ADD", "wind": "HUNT_WIND_DOWN", "drop": "HUNT_DROP", "resume": "HUNT_RESUME", "profile": "HUNT_PROFILE", "overflow": "HUNT_OVERFLOW"}
 
 def pid_alive(path, match=("bot.supervise select", "bot.select")):
     """Why this job must not write params.books, or "" when it may. The pid must be alive AND its command line must be one of
@@ -487,7 +499,7 @@ def main():
             now = time.time(); flats = flats_now()
             v = verdict(rows, books, hunt, st, now)
             owner = bool(hunt.get("on")) and not dry
-            ev("HUNT", on=int(bool(hunt.get("on"))), dry=dry, held=held, flat={s: flats.get(s) for s in held}, cur=v["cur"], wind=v["wind"], add=v["add"], top=v["top"],
+            ev("HUNT", on=int(bool(hunt.get("on"))), dry=dry, held=held, flat={s: flats.get(s) for s in held}, winds=v["winds"], adds=v["adds"], resumes=v["resumes"], overflow=v["overflow"], top=v["top"],
                refuse=v["refuse"], streak=st.get("streak"), xstreak={s: st.get("xstreak", {}).get(s) for s in held},
                phases={r["symbol"]: [r.get("phase"), r.get("votes")] for r in rows if r.get("phase") not in ("shallow", None)}, took_s=int(now - t0),
                det={r["symbol"]: r.get("phase_det") for r in rows if r.get("phase_det") and r.get("phase_det") != r.get("phase")},   # the rule reader's phase where the AI overrode it (votes above are the rule reader's)
@@ -505,7 +517,7 @@ def main():
                     for kind, sym, detail in acts:
                         ev(ALERT[kind], alert=True, symbol=sym, why=detail, books={s: (b.get("sides") or [None])[0] for s, b in (p.get("books") or {}).items()})
             else:
-                log(f"hunt: report only ({'--dry' if dry else 'hunt.on=0'}); would: wind={v['wind']} add={v['add']} top={v['top']}")
+                log(f"hunt: report only ({'--dry' if dry else 'hunt.on=0'}); would: winds={v['winds']} adds={v['adds']} top={v['top']}")
         if once: break
         time.sleep(max(60, float(hunt["every_min"]) * 60 - (time.time() - t0)))
 

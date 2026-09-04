@@ -835,3 +835,74 @@ class MarketTrimGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlowExit(unittest.TestCase):
+    """flow_exit_n (2026-09-04, NEXT 21): while positioned, the last 10 s of aggressor flow is read once a minute; n minutes running
+    against the position put the campaign in exit mode (as `exit` does: everything into the next stall whatever the cost, taker after
+    exit_after_s), latched until flat. exit_random = the same exit at a random minute (a measurement baseline). Off by default."""
+    def _pos(self): return dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0, pause=False)
+
+    def test_three_adverse_minutes_running_put_the_campaign_in_exit_mode_and_the_next_stall_sells_everything(self):
+        st = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0, flow_exit_n=3)); pos = self._pos()
+        for t, bs in ((60, 0.7), (120, 0.7), (130, 0.9), (180, 0.3)):      # buyers hitting for two minutes; a mid-minute read is not a minute; minute 3 with us restarts the run
+            st.step(F(t=t, bs10=bs), [], pos); self.assertFalse(st.flow_exit)
+        self.assertEqual(st.flow_n, 0)
+        for t in (240, 300): st.step(F(t=t, bs10=0.8), [], pos)
+        self.assertEqual((st.flow_n, st.flow_exit), (2, False))
+        r = st.step(F(t=360, bs10=0.6), [], pos)
+        self.assertTrue(st.flow_exit); self.assertEqual([e[0] for e in r["events"] if e[0] in ("FLOW_EXIT", "EXIT_ARMED")], ["FLOW_EXIT", "EXIT_ARMED"])
+        self.assertEqual([e[1]["n"] for e in r["events"] if e[0] == "FLOW_EXIT"], [3])
+        r = st.step(F(t=365, mid=3.03, bid=3.029, ask=3.031, bs10=0.6), [dict(sig="DIP_SLOWING")], pos)   # the next stall, 1% against the short: everything, whatever the cost
+        ev = [e for e in r["events"] if e[0] == "PULL_TRIM" and e[1]["mode"] == "exit"][0][1]; self.assertEqual((ev["all"], ev["qty"]), (True, 70))
+        self.assertEqual(r["trim"][1:3], (70, "maker"))
+        st.step(F(t=420, bs10=0.9), [], dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, pause=False))   # flat: the verdict and the count are the campaign's
+        self.assertEqual((st.flow_n, st.flow_exit), (0, False))
+
+    def test_it_reads_the_side_and_is_off_by_default(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, flow_exit_n=3)); pos = self._pos()
+        for t in (60, 120, 180): st.step(F(t=t, bs10=0.2), [], pos)                  # sellers hitting under a long
+        self.assertTrue(st.flow_exit)
+        st2 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, flow_exit_n=3)); pos2 = self._pos()
+        for t in (60, 120, 180): st2.step(F(t=t, bs10=0.8), [], pos2)                # buyers hitting under a long: with us
+        self.assertEqual((st2.flow_n, st2.flow_exit), (0, False))
+        st3 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos3 = self._pos()
+        for t in (60, 120, 180, 240): st3.step(F(t=t, bs10=0.2), [], pos3)
+        self.assertEqual((st3.flow_n, st3.flow_exit), (0, False))                      # off: not even counted
+        st4 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, flow_exit_n=3)); pos4 = self._pos()
+        for t in (60, 120, 180): st4.step(F(t=t), [], pos4)                           # no flow reading is not "against us"
+        self.assertEqual((st4.flow_n, st4.flow_exit), (0, False))
+
+    def test_the_random_exit_is_a_per_minute_coin_toss_deterministic_per_second_and_seed(self):
+        st = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0, exit_random=1.0, exit_seed=1)); pos = self._pos()
+        r = st.step(F(t=60, bs10=0.1), [], pos); self.assertTrue(st.flow_exit); self.assertTrue([e for e in r["events"] if e[0] == "FLOW_EXIT"][0][1]["random"])
+        def run(seed, q=0.3):
+            s = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0, exit_random=q, exit_seed=seed)); p = self._pos(); out = []
+            for t in range(60, 1260, 60): s.step(F(t=t, bs10=0.1), [], p); out.append(s.flow_exit)
+            return out
+        self.assertEqual(run(7), run(7)); self.assertNotEqual(run(1, 0.5), run(2, 0.5))
+        self.assertFalse(any(run(3, 0.0)))
+
+class PoolClaim(unittest.TestCase):
+    """The FCFS basket (2026-09-04): a campaign's first unit takes the capital pool (pos["pool"].claim(): "" = ours, else why not); adds,
+    an armed entry and an entry refused for any other reason never ask."""
+    class P:
+        def __init__(self, why): self.why, self.n = why, 0
+        def claim(self): self.n += 1; return self.why
+    def flat(self, pool): return dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, pause=False, pool=pool)
+
+    def test_the_first_unit_asks_the_pool_and_is_refused_or_armed_by_its_answer(self):
+        st = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pool = self.P("pool"); pos = self.flat(pool)
+        r = st.step(F(bs10=0.7), [dict(sig="DIP_SLOWING", src="v")], pos)
+        self.assertIsNone(st.arm); self.assertEqual([e[1]["why"] for e in r["events"] if e[0] == "SKIP"], ["pool"]); self.assertEqual(pool.n, 1)
+        pool.why = ""; st.step(F(t=101, bs10=0.7), [dict(sig="DIP_SLOWING", src="v")], pos); self.assertIsNotNone(st.arm); self.assertEqual(pool.n, 2)
+        st.step(F(t=102, bs10=0.7), [dict(sig="DIP_SLOWING", src="v")], pos); self.assertEqual(pool.n, 2)       # armed already: no second ask
+        pos2 = dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0, pause=False, pool=self.P("pool"))
+        st2 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0))
+        st2.step(F(mid=2.9, bid=2.899, ask=2.901, bs10=0.8), [dict(sig="DIP_SLOWING", src="v")], pos2)
+        self.assertIsNotNone(st2.arm); self.assertEqual(pos2["pool"].n, 0)                                     # an add never asks: the campaign holds the pool
+        st3 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0, entry_flow=1)); pos3 = self.flat(self.P(""))
+        r = st3.step(F(bs10=0.2), [dict(sig="DIP_SLOWING", src="v")], pos3)
+        self.assertEqual([e[1]["why"] for e in r["events"] if e[0] == "SKIP"], ["flow"]); self.assertEqual(pos3["pool"].n, 0)   # asked last: a refused entry never takes the pool
+        st4 = Strategy(dict(side="long", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos4 = self.flat(None)
+        st4.step(F(bs10=0.7), [dict(sig="DIP_SLOWING", src="v")], pos4); self.assertIsNotNone(st4.arm)          # no pool: as before

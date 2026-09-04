@@ -72,6 +72,11 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              # AGAINST label (the current-leg read with rg_leg_on), _core 1 extends it to the core lot (the average is no anchor either). All 0 = cost-anchored.
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: the round-trip fee, fee_rt_pct)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
+             flow_exit_n=0, exit_random=0.0, exit_seed=0,   # exit QUALITY (2026-09-04, NEXT 21): while positioned, the last 10 s of aggressor flow is read once a
+             # minute (its first tick); flow_exit_n minutes running AGAINST the position (bs10 > 0.5 under a short, < 0.5 under a long) puts the campaign in exit
+             # mode as `exit` does (the whole position into the next stall / retrace top, taker after exit_after_s), latched until flat. Shorts, 9 coins, 4,794 held
+             # minutes: 3 minutes running preceded 8 of the 10 fresh -10% tails within 10 min at 7% of held time (tail 9.6% vs 3.7%). 0 = off. exit_random = the
+             # same exit at a random minute with this probability (measurement baseline only, cycle.LIVE_ZERO), exit_seed its seed.
              entry_v=0, entry_flow=0, entry_decay=0, entry_mult=0.0, add_mult=0.0, entry_random=0.0, entry_seed=0,   # entry QUALITY (2026-09-04, track B tapes,
              # next-bar-open outcomes). A confirmed entry = the velocity rule's stall (entry_v: the 1m rule fires at the candle close, after the reversal began — dec
              # median 0.55 vs 0.15, +0.14% vs +0.84% at 15 min on markdown shorts) with the last 10 s of aggressor flow turned against the move (entry_flow: bs10 < 0.5
@@ -670,6 +675,7 @@ class Strategy:
         self.derisk_armed, self.last_qty = False, 0.0
         self.exit_t = self.exit_ref = None   # when the exit flag was first seen with a position, and the mid then (the taker floor's reference)
         self.exit_trough = self.exit_peak = None   # the bounce AFTER the flag: its worst mid, and the best mid since that worst — the exit's retrace top, whatever the cost
+        self.flow_n, self.flow_t, self.flow_exit = 0, None, False   # minutes running with the aggressor flow against the position (read once a minute), the minute last read, the campaign's own exit verdict (flow_exit_n / exit_random)
         self.brk_seen = False    # a break against the side fired while the book held a position: de-risk evidence must postdate the campaign
         self.regime, self.rg_cand, self.rg_pend, self.rg_t = "TWO_WAY", "TWO_WAY", 0, None
 
@@ -769,6 +775,7 @@ class Strategy:
             elif pos.get("avail") is not None and pos.get("lever") and pos["avail"] < eunit * mid / pos["lever"] * 1.2: why = "margin"
             ok, how = confirmed()
             if not why and not ok: why = "unconfirmed"
+            if not why and not qty and not self.arm and pos.get("pool") is not None: why = pos["pool"].claim() or None   # a campaign's first unit takes the capital pool (FCFS basket, cycle.Pool): "" = ours, else why not
             if why: ev.append(("SKIP", dict(sig=buy_sig, why=why, mid=mid, avail=pos.get("avail"), unit=eunit, ceiling=round(p["max_units"] * unit, 9))))   # unit / ceiling: a max_units skip is readable at a glance (MAGMA 2026-09-04 16:10)
             elif self.arm: ev.append(("SKIP", dict(sig=buy_sig, why="armed", mid=mid)))
             else: self.arm = (t + p["buy_ttl_s"], mid, eunit); self.arm_filled = 0.0; ev.append(("ARM", dict(mid=mid, until=self.arm[0], unit=eunit, confirm=how or None, scaled=eunit != unit or None)))
@@ -871,7 +878,16 @@ class Strategy:
                                              mode="derisk" if is_cut else "favor" if favor else "market" if via_market else ("retrace" if trim_sig not in names else "normal"),   # the gate in force
                                              path="stall" if trim_sig in names else "retrace", lot="core" if lot_from is not None else None,
                                              peak=self.peak)))
-            if p.get("exit"):                                                              # the book is leaving (the premise broke — hunt: the phase turned): the WHOLE position
+            if (p.get("flow_exit_n") or p.get("exit_random")) and t // 60 != self.flow_t:   # once a minute, at its first tick (NEXT 21's sampling): is the aggressor flow against us?
+                self.flow_t = t // 60
+                self.flow_n = self.flow_n + 1 if (f.get("bs10") is not None and s * (f["bs10"] - 0.5) < 0) else 0
+                if not self.flow_exit:
+                    if p.get("flow_exit_n") and self.flow_n >= int(p["flow_exit_n"]):
+                        self.flow_exit = True; ev.append(("FLOW_EXIT", dict(n=self.flow_n, bs10=f.get("bs10"), mid=mid, dev=round(dev, 2), qty=qty)))
+                    elif p.get("exit_random"):                                                # measurement only: the same exit at a random minute (cycle.LIVE_ZERO)
+                        import random
+                        if random.Random(f"x{t}:{p.get('exit_seed', 0)}").random() < p["exit_random"]: self.flow_exit = True; ev.append(("FLOW_EXIT", dict(random=True, mid=mid, dev=round(dev, 2), qty=qty)))
+            if p.get("exit") or self.flow_exit:                                            # the book is leaving (the premise broke — hunt: the phase turned; or its own flow verdict): the WHOLE position
                 if self.exit_t is None:                                                    # sells into the next stall or retrace top whatever the cost; a floor under "되돌림":
                     self.exit_t, self.exit_ref = t, mid                                    # no stall within exit_after_s, or exit_atr x ATR further against us: taker now
                     self.exit_trough = self.exit_peak = mid
@@ -916,7 +932,7 @@ class Strategy:
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = self.best = self.blow_base = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = self.exit_trough = self.exit_peak = None
+        if not qty: self.struct_stop = self.stop_px = self.best = self.blow_base = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = self.exit_trough = self.exit_peak = None; self.flow_n, self.flow_t, self.flow_exit = 0, None, False
         else:
             # cap_per_unit (트랙 B, CONCEPT-B "스탑의 두 층"): 0 = 한 캠페인의 돈 한도를 수량으로 나눈다 — 유닛이 늘수록 가격에서 조여지고,
             # 그 조임이 캠페인당 스탑 확률을 사다리 깊이에 종속시켰다(1유닛 3.4% / 2유닛 9.5% / 3유닛 55%, 손익분기 ~10.5%).

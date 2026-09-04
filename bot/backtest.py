@@ -162,7 +162,7 @@ class Book:
         self.realized = self.day_realized = self.upl = 0.0; self.cycles = self.adds = self.campaigns = self.stops = self.stops_today = 0; self.taker_t = -1e9; self.seq = 0
 
 class Engine:
-    def __init__(self, sig=None, strat=None, qstep=0.1, sides=None, follow=None):
+    def __init__(self, sig=None, strat=None, qstep=0.1, sides=None, follow=None, pool=None):
         self.feat = Features(sig); strat = strat or {}
         sides = list(sides or strat.get("sides") or [strat.get("side", STRAT["side"])])
         self.px_tick, self.qstep = None, qstep
@@ -170,6 +170,7 @@ class Engine:
         self.follow_confirm_s, self.hint_last, self.hint_t = 0, None, None   # a flip needs the hint to have held for follow_confirm_s (0 = at once)
         self.active = strat.get("side", STRAT["side"]) if follow else None   # starts on the configured side (the incumbent's, as select leaves it); the hint flips it
         self.books = {sd: Book(self.feat, strat, sd, 1 if follow else len(sides), qstep) for sd in sides}
+        for bk in self.books.values(): bk.pos["pool"] = pool                  # a shared capital pool across engines (the FCFS basket simulation; None = none)
         self.peak = self.max_dd = 0.0; self.in_mkt = self.n = 0; self.last_t = None; self.day = None
         self.events = []
         self.by_hint, self.last_real = {}, {}                    # realized pnl per book split by the 1H structure hint in force
@@ -240,6 +241,8 @@ class Engine:
         bk.pos["unit_mult"] = bk.strat.p["against_daily_mult"] if dt and dt != ("up" if bk.s > 0 else "down") else 1.0
         working = {r: (w["px"], w["qty"] - w["filled"]) for r, w in bk.work.items() if w}
         d = bk.strat.step(f, sigs, bk.pos, working)
+        for kind, kw in d["events"]:
+            if kind in ("FLOW_EXIT", "EXIT_ARMED"): self.events.append((f["t"], kind, bk.side, kw))   # the campaign's own exit verdicts (NEXT 21 grid)
         self.reconcile(bk, d, f["t"])
 
     def reconcile(self, bk, d, t):
@@ -335,6 +338,7 @@ class Engine:
         return dict(pnl=round(tot, 3), open_pnl=round(opn, 3), total=round(tot + opn, 3), cycles=sum(v["cycles"] for v in per.values()),
                     adds=sum(v["adds"] for v in per.values()), campaigns=sum(v["campaigns"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
                     in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"),
+                    flow_exits=sum(1 for e in self.events if e[1] == "FLOW_EXIT"),
                     by_hint={k: round(v, 3) for k, v in sorted(self.by_hint.items())},
                     follow=dict(hint=self.follow, flips=self.flips, share={k: round(v / max(self.n, 1), 3) for k, v in self.active_s.items()}) if self.follow else None,
                     capture={sd: dict(up=round(c['up_held'] / c['up_all'], 3) if c['up_all'] else 0.0, dn=round(c['dn_held'] / c['dn_all'], 3) if c['dn_all'] else 0.0) for sd, c in self.cap.items()})

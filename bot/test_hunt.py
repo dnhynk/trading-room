@@ -1,5 +1,5 @@
-"""Invariants of the pump-coin hunting side pipeline (bot/hunt.py): phase names the side, the toll vetoes, one book at a time,
-phase exits rotate without cooldown, episode deaths cool down.  python -m unittest bot.test_hunt"""
+"""Invariants of the pump-coin hunting side pipeline (bot/hunt.py): phase names the side, the toll vetoes, a book per confirmed
+eligible coin under the capital pool (one book without it), phase exits rotate without cooldown, episode deaths cool down.  python -m unittest bot.test_hunt"""
 import os, shutil, tempfile, types, unittest
 from bot import hunt
 from bot.hunt import flags_of, exit_flags, verdict, apply, pid_alive, HUNT
@@ -73,8 +73,8 @@ class Verdicts(unittest.TestCase):
     def test_an_empty_book_adds_the_churn_leader_after_confirm_scans_with_the_phase_side(self):
         rows = [row("A", "markup", hint15="long", off=2.0, twoway24=30.0), row("B", "markdown", twoway24=20.0), row("C", "quiet")]
         st, p = {}, dict(strat=dict(symbol="OLD", sides=["long", "short"]), books={})
-        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual((v["top"], v["add"]), (("A", "long"), None)); self.assertEqual(st["streak"], {"A:long": 1})
-        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual(v["add"], ("A", "long"))
+        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual((v["top"], v["adds"]), (("A", "long"), [])); self.assertEqual(st["streak"], {"A:long": 1, "B:short": 1})   # every candidate counts its own scans
+        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual((v["adds"], v["overflow"]), ([("A", "long")], []))   # no pool: one book, the churn leader — B is not an overflow, it is the rank
         acts = apply(p, rows, v, {}, HUNT, st, 1000.0)
         self.assertEqual([a[:2] for a in acts], [("add", "A")])
         self.assertEqual(p["books"], {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "blowoff_atr": 8.0, "blowoff_frac": 0.5}})   # a long book carries the standing blow-off target
@@ -83,23 +83,55 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(p2["books"]["B"], {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "cap_frac": 0.77, "unit_frac": 4.0, "lever": 20})   # the track's risk profile rides on the book
         self.assertNotIn("cap_frac", p2["strat"])                                                                                     # the common strat is untouched
         self.assertEqual((p["strat"]["symbol"], p["strat"]["side"], p["strat"]["sides"]), ("A", "long", ["long", "short"]))
-        self.assertEqual(set(p["record"]), {"A", "B", "BTCUSDT"}); self.assertEqual(st["held"]["A"]["side"], "long")
+        self.assertEqual(set(p["record"]), {"A", "B", "BTCUSDT"}); self.assertEqual(st["held"]["A"]["side"], "long"); self.assertEqual(st["streak"], {"B:short": 2})   # the added coin's streak is spent
+
+    def test_with_a_pool_every_confirmed_candidate_gets_a_book_and_the_overflow_is_reported(self):
+        """The FCFS basket (user 2026-09-04): eligibility is the selector, the engines' pool (cycle.Pool) caps the campaigns, so every
+        confirmed coin holds a book on the whole wallet (wallet/cap above cap 1) and rank only orders what max_books cannot run."""
+        h = {**HUNT, "pool": 1, "max_books": 2}
+        rows = [row("A", "markup", hint15="long", off=2.0, twoway24=30.0), row("B", "markdown", twoway24=20.0), row("C", "markdown", twoway24=16.0)]
+        st = dict(streak={"A:long": 1, "B:short": 1, "C:short": 1}); p = dict(strat=dict(symbol="OLD"), books={})
+        v = verdict(rows, {}, h, st, 1000.0); self.assertEqual((v["adds"], v["overflow"]), ([("A", "long"), ("B", "short")], [("C", "short")]))
+        acts = apply(p, rows, v, {}, h, st, 1000.0)
+        self.assertEqual([a[:2] for a in acts], [("add", "A"), ("add", "B"), ("overflow", "C")]); self.assertIn("max_books 2", acts[2][2])
+        self.assertEqual({s: b["wallet_frac"] for s, b in p["books"].items()}, {"A": 1.0, "B": 1.0})                      # cap 1: each holder sizes on the whole wallet
+        v = verdict(rows, p["books"], h, st, 2000.0); self.assertEqual((v["adds"], v["overflow"]), ([], [("C", "short")]))   # full: C stays confirmed, still reported
+        h2 = {**h, "pool": 2, "max_books": 3}                                                                                 # cap 2: wallet/2 each, and the share reaches the held books
+        v = verdict(rows, p["books"], h2, st, 3000.0); self.assertEqual(v["adds"], [("C", "short")])
+        acts = apply(p, rows, v, {}, h2, st, 3000.0)
+        self.assertEqual([a[:2] for a in acts], [("add", "C"), ("profile", "A"), ("profile", "B")])
+        self.assertEqual({s: b["wallet_frac"] for s, b in p["books"].items()}, {"A": 0.5, "B": 0.5, "C": 0.5})
+        self.assertEqual(set(p["record"]), {"A", "B", "C", "BTCUSDT"})
+
+    def test_leaving_books_are_dropped_as_they_go_flat_and_a_candidate_dropping_out_restarts_its_streak(self):
+        h = {**HUNT, "pool": 1}
+        st = dict(held={"A": dict(side="short", exit="phase:markup"), "B": dict(side="short", exit="dead"), "C": dict(side="long")})
+        p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1, "exit": 1},
+                                               "B": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1}, "C": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1}})
+        rows = [row("C", "markup", hint15="long", off=2.0), row("D", "markdown", twoway24=20.0), row("E", "markdown", twoway24=16.0)]
+        v = verdict(rows, p["books"], h, st, 1000.0); self.assertEqual(st["streak"], {"D:short": 1, "E:short": 1})
+        acts = apply(p, rows, v, {"A": True, "B": False, "C": False}, h, st, 1000.0)
+        self.assertEqual([a[:2] for a in acts], [("drop", "A")]); self.assertEqual(list(p["books"]), ["B", "C"])                # A flat: gone now, B waits for its own flat
+        v = verdict([rows[0], rows[1]], p["books"], h, st, 2000.0); self.assertEqual(st["streak"], {"D:short": 2}); self.assertEqual(v["adds"], [("D", "short")])   # E dropped out: its count is gone
+        acts = apply(p, [rows[0], rows[1]], v, {"B": True, "C": False}, h, st, 2000.0)
+        self.assertEqual([a[:2] for a in acts], [("drop", "B"), ("add", "D")]); self.assertGreater(st["cool"]["B"], 2000.0 + 23 * 3600); self.assertEqual(list(p["books"]), ["C", "D"])
+        v = verdict(rows, p["books"], h, st, 3000.0); self.assertEqual(st["streak"], {"E:short": 1})                            # back after a gap: from one
 
     def test_a_funding_tax_stops_the_adds_without_the_exit_flag_and_without_a_cooldown(self):
         """A funding tax is a slow bleed, not a broken premise (user 2026-09-04): wind_down only, no exit, no cooldown, and HUNT_RESUME
         when the rate comes back. Before this it took the phase-flip branch (exit=1: the whole book at market within ten minutes)."""
         st = dict(held={"A": dict(side="short", peak=4e7, climax=150.2, tw_peak=30.0)}); p = dict(strat=dict(symbol="A", side="short"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
         taxed = row("A", "markdown", fund=-0.3)
-        v = verdict([taxed], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "fund-0.30%"))
+        v = verdict([taxed], p["books"], HUNT, st, 1000.0); self.assertEqual(v["winds"], [("A", "fund-0.30%")])
         apply(p, [taxed], v, {"A": False}, HUNT, st, 1000.0)
         self.assertEqual(p["books"]["A"].get("wind_down"), 1); self.assertNotIn("exit", p["books"]["A"])
         back = row("A", "markdown", fund=0.01)
         for _ in range(2): v = verdict([back], p["books"], HUNT, st, 1000.0)
-        self.assertEqual(v["resume"], "A")
+        self.assertEqual(v["resumes"], ["A"])
         st = dict(held={"A": dict(side="short", peak=4e7, climax=150.2, tw_peak=30.0, exit="fund-0.30%")}, streak={"B:short": 1}, xstreak={"A": 1})
         p = dict(strat=dict(symbol="A", side="short"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1}})
         rows = [row("B", "markdown", twoway24=50.0), taxed]
-        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["add"], ("B", "short"))
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["adds"], [("B", "short")])
         apply(p, rows, v, {"A": True}, HUNT, st, 1000.0)
         self.assertEqual(list(p["books"]), ["B"]); self.assertNotIn("A", st.get("cool", {})); self.assertNotIn("A", st["xstreak"])   # replaced flat: no cooldown, its streaks gone
 
@@ -108,28 +140,30 @@ class Verdicts(unittest.TestCase):
         first flagged scan once exit_confirm > 1 (audit 2026-09-04)."""
         st = dict(streak={"A:short": 1}, xstreak={"A": 1, "Z": 1}, rstreak={"A": 1}); p = dict(strat=dict(symbol="OLD"), books={})
         rows = [row("A", "markdown")]
-        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual(v["add"], ("A", "short")); apply(p, rows, v, {}, HUNT, st, 1000.0)
+        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual(v["adds"], [("A", "short")]); apply(p, rows, v, {}, HUNT, st, 1000.0)
         self.assertNotIn("A", st["xstreak"]); self.assertNotIn("A", st["rstreak"]); self.assertEqual(st["xstreak"]["Z"], 1)
         v = verdict([row("A", "markup", hint15="long", off=2.0)], p["books"], {**HUNT, "exit_confirm": 2}, st, 1000.0)
-        self.assertIsNone(v["wind"]); self.assertEqual(st["xstreak"]["A"], 1)     # the new campaign's first flagged scan counts one, not two
+        self.assertEqual(v["winds"], []); self.assertEqual(st["xstreak"]["A"], 1)     # the new campaign's first flagged scan counts one, not two
 
     def test_a_long_leaves_at_a_confirmed_climax_and_the_same_coin_comes_back_short_without_cooldown(self):
         st = dict(held={"A": dict(side="long", peak=4e7, climax=150.2)}); p = dict(strat=dict(symbol="A", side="long"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1}})
-        v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "phase:climax"))   # exit_confirm 1: leaving is fast
+        v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["winds"], [("A", "phase:climax")])   # exit_confirm 1: leaving is fast
         acts = apply(p, [row("A", "climax")], v, {"A": False}, HUNT, st, 1000.0)             # positioned: winds down, stays
         self.assertEqual([a[:2] for a in acts], [("wind", "A")]); self.assertEqual(p["books"]["A"]["wind_down"], 1)
         self.assertEqual(p["books"]["A"]["exit"], 1)                                          # a phase exit: the engine sells the whole position into the next stall
         rows = [row("A", "markdown")]                                                          # the top is in: the same coin is a short candidate
-        v = verdict(rows, p["books"], HUNT, st, 2000.0); self.assertEqual(v["top"], ("A", "short")); self.assertIsNone(v["add"])   # streak 1 of 2
-        apply(p, rows, v, {"A": True}, HUNT, st, 2000.0); self.assertEqual(p["books"]["A"]["sides"], ["long"])                # flat, but not confirmed yet: stays
-        v = verdict(rows, p["books"], HUNT, st, 3000.0); self.assertEqual(v["add"], ("A", "short"))
+        v = verdict(rows, p["books"], HUNT, st, 2000.0); self.assertEqual(v["top"], ("A", "short")); self.assertEqual(v["adds"], [])   # streak 1 of 2
+        apply(p, rows, v, {"A": True}, HUNT, st, 2000.0); self.assertEqual(p["books"]["A"]["sides"], ["long"])                # flat, but not confirmed yet: stays as the placeholder
+        v = verdict(rows, p["books"], HUNT, st, 3000.0); self.assertEqual(v["adds"], [("A", "short")])
         acts = apply(p, rows, v, {"A": True}, HUNT, st, 3000.0)                                 # the flip: dropped and re-added short in one write
         self.assertEqual([a[:2] for a in acts], [("drop", "A"), ("add", "A")])
         self.assertEqual(p["books"], {"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}}); self.assertEqual(st["held"]["A"]["side"], "short")
         self.assertNotIn("A", st.get("cool", {}))                                              # a phase exit leaves no cooldown
+        v = verdict(rows, p["books"], HUNT, st, 3500.0); self.assertEqual(v["adds"], [])       # confirmed but its old book is not flat yet: the flip waits
+        acts = apply(p, rows, dict(v, adds=[("A", "short")]), {"A": False}, HUNT, st, 3500.0); self.assertEqual(acts, [])
         st2 = dict(held={"A": dict(side="long", peak=4e7, climax=150.2, exit="phase:climax")}, streak={"B:short": 1})
         p2 = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "wind_down": 1}})
-        v = verdict([row("B", "markdown")], p2["books"], HUNT, st2, 4000.0); self.assertEqual(v["add"], ("B", "short"))
+        v = verdict([row("B", "markdown")], p2["books"], HUNT, st2, 4000.0); self.assertEqual(v["adds"], [("B", "short")])
         acts = apply(p2, [row("B", "markdown")], v, {"A": True}, HUNT, st2, 4000.0)
         self.assertEqual([a[:2] for a in acts], [("drop", "A"), ("add", "B")]); self.assertNotIn("A", st2.get("cool", {}))     # phase exit: no cooldown
         self.assertEqual(p2["books"], {"B": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}}); self.assertEqual(p2["strat"]["side"], "short")   # a short book: no blow-off keys
@@ -137,7 +171,7 @@ class Verdicts(unittest.TestCase):
     def test_an_episode_death_winds_down_gently_without_the_exit_flag(self):
         st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2)})
         p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
-        v = verdict([row("A", "markdown", dead=True)], p["books"], HUNT, st, 1000.0); self.assertIn("dead", v["wind"][1])   # volume gone: illiquid, exit_confirm 1 winds at once
+        v = verdict([row("A", "markdown", dead=True)], p["books"], HUNT, st, 1000.0); self.assertIn("dead", v["winds"][0][1])   # volume gone: illiquid, exit_confirm 1 winds at once
         apply(p, [row("A", "markdown", dead=True)], v, {"A": False}, HUNT, st, 1000.0)
         self.assertEqual(p["books"]["A"]["wind_down"], 1); self.assertNotIn("exit", p["books"]["A"])                      # gentle: no market dump into thin books
 
@@ -145,7 +179,7 @@ class Verdicts(unittest.TestCase):
         st = dict(held={"A": dict(side="short", peak=1e8, climax=150.2, tw_peak=40.0)})   # entered when churn was 40
         p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
         v = verdict([row("A", "markdown", twoway24=18.0)], p["books"], HUNT, st, 1000.0)  # above the absolute floor (8) but under half its own peak
-        self.assertTrue(v["wind"][1].startswith("quiet")); self.assertEqual(st["xstreak"], {"A": 1})                     # one scan is enough (exit_confirm 1)
+        self.assertTrue(v["winds"][0][1].startswith("quiet")); self.assertEqual(st["xstreak"], {"A": 1})                 # one scan is enough (exit_confirm 1)
         acts = apply(p, [row("A", "markdown", twoway24=18.0)], v, {"A": False}, HUNT, st, 1000.0)
         self.assertEqual(p["books"]["A"]["exit"], 1)                                                                     # leave fast: sell the whole book into the next stall
         st2 = dict(held={"A": dict(side="short", exit="quiet18/40")}, streak={"B:short": 1})
@@ -166,7 +200,7 @@ class Verdicts(unittest.TestCase):
         st = dict(held={"A": dict(side="short", exit="quiet18/40")}, streak={"A:long": 1})
         p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1, "exit": 1}})
         rows = [row("A", "markup", hint15="long", off=2.0)]                                   # the quiet coin now reads markup: a long candidate on paper
-        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertIsNone(v["top"]); self.assertIsNone(v["add"])   # a cooling coin is no candidate, on either side
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertIsNone(v["top"]); self.assertEqual(v["adds"], [])   # a cooling coin is no candidate, on either side
         acts = apply(p, rows, v, {"A": True}, HUNT, st, 1000.0)
         self.assertEqual(acts, []); self.assertEqual(list(p["books"]), ["A"]); self.assertEqual(p["books"]["A"]["sides"], ["short"])   # stays as the flat placeholder
         self.assertNotIn("A", st.get("cool", {}))                                              # not dropped, so not cooled yet either
@@ -179,7 +213,7 @@ class Verdicts(unittest.TestCase):
         rows = [row("A", "markup", hint15="long", off=2.0, twoway24=60.0), row("B", "markdown", twoway24=30.0)]   # the quiet coin has the best churn on paper
         v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["top"], ("B", "short")); self.assertEqual(st["streak"], {"B:short": 1})
         self.assertEqual(apply(p, rows, v, {"A": True}, HUNT, st, 1000.0), [])                                        # B not confirmed yet: A stays as the flat placeholder
-        v = verdict(rows, p["books"], HUNT, st, 2000.0); self.assertEqual(v["add"], ("B", "short"))
+        v = verdict(rows, p["books"], HUNT, st, 2000.0); self.assertEqual(v["adds"], [("B", "short")])
         acts = apply(p, rows, v, {"A": True}, HUNT, st, 2000.0)
         self.assertEqual([a[:2] for a in acts], [("drop", "A"), ("add", "B")]); self.assertGreater(st["cool"]["A"], 2000.0 + 23 * 3600)
 
@@ -199,20 +233,20 @@ class Verdicts(unittest.TestCase):
         st = dict(held={"A": dict(side="long", exit="phase:climax", peak=4e7, climax=150.2)})
         p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "wind_down": 1, "exit": 1}})
         rows = [row("A", "markup", hint15="long", off=2.0)]                                   # one bad 15m close read climax; now it is markup again
-        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertIsNone(v["resume"]); self.assertEqual(st["rstreak"], {"A": 1})
-        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["resume"], "A"); self.assertIsNone(v["add"])
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["resumes"], []); self.assertEqual(st["rstreak"], {"A": 1})
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["resumes"], ["A"]); self.assertEqual(v["adds"], [])
         acts = apply(p, rows, v, {"A": False}, HUNT, st, 1000.0)
         self.assertEqual([a[:2] for a in acts], [("resume", "A")]); self.assertNotIn("wind_down", p["books"]["A"]); self.assertNotIn("exit", p["books"]["A"])
         st2 = dict(held={"A": dict(side="long", exit="quiet10/40")})                           # a quiet leaver never resumes: it cools and we chase another coin
-        v = verdict(rows, {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "wind_down": 1, "exit": 1}}, HUNT, st2, 1000.0); self.assertIsNone(v["resume"])
+        v = verdict(rows, {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1, "wind_down": 1, "exit": 1}}, HUNT, st2, 1000.0); self.assertEqual(v["resumes"], [])
 
     def test_a_basket_or_a_hand_book_makes_the_job_refuse(self):
         v = verdict([row("A")], {"HYPEUSDT": {"wallet_frac": 0.3}}, HUNT, {}, 1000.0)
-        self.assertIn("non-hunt", v["refuse"]); self.assertIsNone(v["add"])
+        self.assertIn("non-hunt", v["refuse"]); self.assertEqual(v["adds"], [])
 
     def test_books_never_empties_when_the_only_book_is_gone_and_nothing_qualifies(self):
         st = dict(held={"A": {"side": "short"}}); p = dict(strat=dict(symbol="A"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1}})
-        v = verdict([row("C", "quiet")], p["books"], HUNT, st, 1000.0); self.assertIsNone(v["add"])
+        v = verdict([row("C", "quiet")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["adds"], [])
         apply(p, [row("C", "quiet")], v, {"A": True}, HUNT, st, 1000.0)
         self.assertEqual(list(p["books"]), ["A"])
 

@@ -38,12 +38,91 @@ LOGS = os.path.join(ROOT, "logs")
 STATE, EVENTS, ALERTS = (os.path.join(LOGS, f) for f in ("state.json", "events.jsonl", "alerts.jsonl"))
 PUB_CH = ("trade", "books15", "candle1m", "ticker")
 ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", "STOP_FAILED", "STOP_MODIFY_FAIL", "STOP_THROUGH", "EMERGENCY_CLOSE", "MARGIN_LOCKED", "MARGIN_MODE_MISMATCH", "REGIME_CHANGE", "SIDE_HINT","PARAMS_INVALID",
-         "PARAMS_DEFERRED", "STATE_DISCARDED", "EMERGENCY_CANCEL_UNCONFIRMED", "TAKER_UNCONFIRMED", "ERROR", "EXIT"}
+         "PARAMS_DEFERRED", "STATE_DISCARDED", "EMERGENCY_CANCEL_UNCONFIRMED", "TAKER_UNCONFIRMED", "ERROR", "EXIT", "POOL_STALE", "POOL_ERROR"}
 QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS", "STOP_LIQ_GUARD"}   # events.jsonl only, not stdout
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
 SLIP = 0.0005          # dry-mode stop-out slippage
 REJECT_RETRY_S = 5.0   # an explicit exchange rejection is known-not-placed; throttle persistent reduce desires and stale decisions
-LIVE_ZERO = ("entry_random",)   # measurement-only strat keys (the random-veto baseline of the entry grid): a live book must not carry them - the file is rejected as PARAMS_INVALID
+LIVE_ZERO = ("entry_random", "exit_random")   # measurement-only strat keys (the random baselines of the entry / exit grids): a live book must not carry them - the file is rejected as PARAMS_INVALID
+
+
+class Pool:
+    """The hunt basket's first-come capital pool (CONCEPT-B 바구니, user 2026-09-04): every eligible coin has a book, but at most `cap` of them
+    hold a campaign at once — whichever confirmed its first unit first. logs/pool.json = {"claims": {SYMBOL: {"t": epoch, "pid": pid}}} is
+    the truth across engine processes. A claim is a lease: the holder refreshes it while positioned or armed (tend), so a claim older than
+    TTL belongs to a dead engine and is swept by the next claimant. Engines exclude each other by creating pool.json.lock (an owner that
+    died leaves it; older than LOCK_TTL it is broken). cap 0 = no pool (the book never asks). The day's realized loss summed over every
+    engine's state file at or under -limit (this book's daily_loss_limit = wallet x daily_loss_frac) refuses every claim (pool_daily):
+    per-book daily limits alone would let the basket lose that once per coin."""
+    TTL, LOCK_TTL, LOCK_WAIT = 180.0, 10.0, 3.0
+    def __init__(self, sym, ev=None, path=None, states=None):
+        self.sym, self.ev, self.path = sym, ev or (lambda kind, **kw: None), path or os.path.join(LOGS, "pool.json")
+        self.cap, self.limit, self.mine, self.refreshed = 0, None, False, 0.0
+        self.states = states or load_states                     # today's realized across engines (a test passes its own)
+
+    def _locked(self, fn):
+        lock = self.path + ".lock"; t0 = time.time()
+        while True:
+            try: os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)); break
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock) > self.LOCK_TTL: os.remove(lock); continue
+                except OSError: continue
+                if time.time() - t0 > self.LOCK_WAIT: raise TimeoutError("pool lock held")
+                time.sleep(0.05)
+        try:
+            try:
+                with open(self.path, encoding="utf-8") as fh: claims = json.load(fh).get("claims") or {}
+            except (OSError, ValueError): claims = {}
+            out = fn(claims)
+            with open(self.path, "w", encoding="utf-8") as fh: json.dump(dict(claims=claims, t=time.strftime("%Y-%m-%d %H:%M:%S")), fh)
+            return out
+        finally:
+            try: os.remove(lock)
+            except OSError: pass
+
+    def _sweep(self, claims, now):
+        for s, c in list(claims.items()):
+            if s != self.sym and now - float(c.get("t") or 0) > self.TTL:
+                del claims[s]; self.ev("POOL_STALE", pool_symbol=s, age=int(now - float(c.get("t") or 0)))
+
+    def _lease(self): return dict(t=time.time(), pid=os.getpid())
+
+    def claim(self):
+        """"" when this book holds the pool (took it now, or already had it); else why not: pool (cap reached), pool_daily, pool_error."""
+        if self.mine: return ""
+        if self.limit and self.day_loss() <= -float(self.limit): return "pool_daily"
+        def fn(claims):
+            self._sweep(claims, time.time())
+            if self.sym not in claims and len(claims) >= self.cap: return "pool"
+            claims[self.sym] = self._lease(); return ""
+        try: why = self._locked(fn)
+        except Exception as e: self.ev("POOL_ERROR", msg=f"{type(e).__name__}: {str(e)[:120]}"); return "pool_error"   # no campaign without the pool's word
+        if not why: self.mine, self.refreshed = True, time.time(); self.ev("POOL_CLAIM", cap=self.cap)
+        return why
+
+    def release(self):
+        self._locked(lambda claims: claims.pop(self.sym, None)); self.mine = False; self.ev("POOL_RELEASE")
+
+    def tend(self, positioned, armed):
+        """Housekeeping, once a second: a positioned book without a claim adopts one whatever the cap (the pool was switched on under it, or
+        the file was lost — the position is the fact); a claim with nothing behind it (flat, no arm, no resting entry) is released; a held
+        claim is refreshed every 30 s."""
+        if positioned and not self.mine:
+            def fn(claims): self._sweep(claims, time.time()); claims[self.sym] = self._lease(); return len(claims)
+            n = self._locked(fn); self.mine, self.refreshed = True, time.time(); self.ev("POOL_ADOPT", claims=n, cap=self.cap)
+        elif self.mine and not positioned and not armed: self.release()
+        elif self.mine and time.time() - self.refreshed >= 30:
+            def fn(claims): claims[self.sym] = self._lease()
+            self._locked(fn); self.refreshed = time.time()
+
+    def day_loss(self):
+        """Today's realized P&L summed over every engine's state file (a book's `realized` is the UTC day's: day_close resets it)."""
+        day = time.strftime("%Y-%m-%d", time.gmtime()); tot = 0.0
+        for st in (self.states() or {}).values():
+            if st.get("day") != day: continue
+            for b in (st.get("books") or {}).values(): tot += float(b.get("realized") or 0.0)
+        return tot
 
 
 def rnd(x): return round(x, 6) if isinstance(x, float) else x
@@ -182,6 +261,9 @@ class Book:
         self.pos["pause"] = (os.path.exists(os.path.join(ROOT, "PAUSE")) or bool(self.sp.get("wind_down"))   # wind_down = 이 심볼만의 PAUSE (select가 자격 잃은 책을 flat 으로 몬다)
                              or bool(self.unmatched_close))   # 정체불명 close 를 분류하는 15초 동안은 담지 않는다 — 그 사이 담은 로트를 나중에 손절 수량이 LIFO 로 지운다
         self.pos["avail"], self.pos["lever"] = (self.cy.acct["avail"] if self.mode == "live" else None), self.lever
+        pool = getattr(self.cy, "pool", None)                        # the hunt basket's FCFS capital pool (hunt.pool = its cap; 0 = none): a campaign's first unit must take it
+        if pool: pool.cap = int((self.cy.p.get("hunt") or {}).get("pool") or 0); pool.limit = self.sp.get("daily_loss_limit")
+        self.pos["pool"] = pool if pool and pool.cap else None
         dt = self.feat.daily_trend                                   # against the daily trend: smaller units, never a veto
         self.pos["unit_mult"] = self.sp["against_daily_mult"] if dt and dt != ("up" if self.s > 0 else "down") else 1.0
         if self.mode == "dry": await self.sim_stop(f)
@@ -721,6 +803,7 @@ class Cycle:
         if self.mode == "live" and not self.b.hedge:
             self.ev("EXIT", why="one-way position mode is not supported (order side semantics differ); switch the account to hedge mode"); os._exit(0)
         self.books = {sd: Book(self, sd) for sd in self.sides}
+        self.pool = Pool(self.symbol, self.ev)
         self.load_state()
 
     # ---- persistence / logging ----------------------------------------------
@@ -930,6 +1013,7 @@ class Cycle:
                 for bk in self.books.values():
                     if self.mode == "live" and bk.stop_fail >= 3: await bk.stop_failed()
                     if time.time() - bk.sized_t >= 60: bk.resize()
+                if self.pool.cap: self.pool.tend(any(pos_stats(bk.pos)[0] for bk in self.books.values()), any(bk.strat.arm or bk.work["buy"] for bk in self.books.values()))
                 if time.time() - self.lever_t >= 300: await self.refresh_lever()
                 if time.time() - self.daily_t >= 3600: await self.refresh_daily()
                 hint = self.feat.side_hint
