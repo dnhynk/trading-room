@@ -883,6 +883,32 @@ class FlowExit(unittest.TestCase):
         self.assertEqual(run(7), run(7)); self.assertNotEqual(run(1, 0.5), run(2, 0.5))
         self.assertFalse(any(run(3, 0.0)))
 
+class FailExit(unittest.TestCase):
+    """fail_exit_n (2026-09-04, NEXT 3 candidate 1): the N-th stall the LIFO lot could not use puts the campaign in exit mode at that stall —
+    everything, whatever the cost, taker after exit_after_s — latched until flat. Off by default (0): the count only relaxes the gate."""
+    def _pos(self): return dict(lots=[[70, 3.0, "a"]], avg=3.0, last="buy", last_buy_px=3.0, pause=False)
+
+    def test_the_second_refused_stall_sells_everything_and_the_first_only_relaxes_the_gate(self):
+        st = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0, fail_exit_n=2)); pos = self._pos()
+        r = st.step(F(t=100, mid=3.03, bid=3.029, ask=3.031), [dict(sig="DIP_SLOWING")], pos)          # a stall 1% against the short: refused
+        self.assertEqual([e[0] for e in r["events"] if e[0] in ("GATE_RELAX", "FAIL_EXIT", "EXIT_ARMED", "PULL_TRIM")], ["GATE_RELAX"]); self.assertIsNone(r["trim"])
+        r = st.step(F(t=200, mid=3.03, bid=3.029, ask=3.031), [dict(sig="DIP_SLOWING")], pos)          # the second: the campaign leaves at this stall
+        self.assertEqual([e[0] for e in r["events"] if e[0] in ("GATE_RELAX", "FAIL_EXIT", "EXIT_ARMED", "PULL_TRIM")], ["GATE_RELAX", "FAIL_EXIT", "EXIT_ARMED", "PULL_TRIM"])
+        ev = [e for e in r["events"] if e[0] == "PULL_TRIM"][0][1]; self.assertEqual((ev["mode"], ev["all"], ev["qty"]), ("exit", True, 70))
+        self.assertEqual(r["trim"][1:3], (70, "maker")); self.assertTrue(st.flow_exit)
+        st.step(F(t=300), [], dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, pause=False))   # flat: the verdict is the campaign's
+        self.assertEqual((st.fail_n, st.flow_exit), (0, False))
+
+    def test_off_by_default_and_a_fill_restarts_the_count(self):
+        st = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0)); pos = self._pos()
+        for t in (100, 200, 300): r = st.step(F(t=t, mid=3.03, bid=3.029, ask=3.031), [dict(sig="DIP_SLOWING")], pos)
+        self.assertEqual(st.fail_n, 3); self.assertFalse(st.flow_exit); self.assertFalse([e for e in r["events"] if e[0] == "FAIL_EXIT"])
+        st2 = Strategy(dict(side="short", unit_qty=70, cap_usdt=20, stop_structural_on=0, fail_exit_n=2)); pos2 = self._pos()
+        st2.step(F(t=100, mid=3.03, bid=3.029, ask=3.031), [dict(sig="DIP_SLOWING")], pos2); self.assertEqual(st2.fail_n, 1)
+        pos2["lots"].append([70, 3.06, "b"]); pos2["avg"] = 3.03; pos2["last_buy_px"] = 3.06                         # an add: a new lot, a fresh expectation
+        r = st2.step(F(t=200, mid=3.09, bid=3.089, ask=3.091), [dict(sig="DIP_SLOWING")], pos2)
+        self.assertEqual(st2.fail_n, 1); self.assertFalse(st2.flow_exit)
+
 class PoolClaim(unittest.TestCase):
     """The FCFS basket (2026-09-04): a campaign's first unit takes the capital pool (pos["pool"].claim(): "" = ours, else why not); adds,
     an armed entry and an entry refused for any other reason never ask."""

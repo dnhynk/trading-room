@@ -249,7 +249,7 @@ class Engine:
         working = {r: (w["px"], w["qty"] - w["filled"]) for r, w in bk.work.items() if w}
         d = bk.strat.step(f, sigs, bk.pos, working)
         for kind, kw in d["events"]:
-            if kind in ("FLOW_EXIT", "EXIT_ARMED"): self.events.append((f["t"], kind, bk.side, kw))   # the campaign's own exit verdicts (NEXT 21 grid)
+            if kind in ("FLOW_EXIT", "FAIL_EXIT", "EXIT_ARMED"): self.events.append((f["t"], kind, bk.side, kw))   # the campaign's own exit verdicts (NEXT 21 grid)
             elif kind == "SKIP" and str(kw.get("why", "")).startswith("pool"): self.events.append((f["t"], "POOL_SKIP", bk.side, kw["why"]))   # a first unit the pool refused (run_multi)
         self.reconcile(bk, d, f["t"])
         h = bk.pos.get("pool")
@@ -350,7 +350,7 @@ class Engine:
         return dict(pnl=round(tot, 3), open_pnl=round(opn, 3), total=round(tot + opn, 3), cycles=sum(v["cycles"] for v in per.values()),
                     adds=sum(v["adds"] for v in per.values()), campaigns=sum(v["campaigns"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
                     in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"),
-                    flow_exits=sum(1 for e in self.events if e[1] == "FLOW_EXIT"), pool_skips=sum(1 for e in self.events if e[1] == "POOL_SKIP"),
+                    flow_exits=sum(1 for e in self.events if e[1] in ("FLOW_EXIT", "FAIL_EXIT")), pool_skips=sum(1 for e in self.events if e[1] == "POOL_SKIP"),
                     by_hint={k: round(v, 3) for k, v in sorted(self.by_hint.items())},
                     follow=dict(hint=self.follow, flips=self.flips, share={k: round(v / max(self.n, 1), 3) for k, v in self.active_s.items()}) if self.follow else None,
                     capture={sd: dict(up=round(c['up_held'] / c['up_all'], 3) if c['up_all'] else 0.0, dn=round(c['dn_held'] / c['dn_all'], 3) if c['dn_all'] else 0.0) for sd, c in self.cap.items()})

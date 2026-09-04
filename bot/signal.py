@@ -72,6 +72,8 @@ STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_
              # AGAINST label (the current-leg read with rg_leg_on), _core 1 extends it to the core lot (the average is no anchor either). All 0 = cost-anchored.
              gate_relax=0.5, gate_floor_unit_pct=0.05,   # each stall that fails to reach a lot's gate lowers the gate by gate_relax of the way to its floor (core: the round-trip fee, fee_rt_pct)
              add_confirm=None, confirm_within_s=90,      # opening risk needs a higher bar: None = auto (on when two books run), 1 = both signal rules / volume decay / retrace from the trough
+             fail_exit_n=0,          # > 0: the N-th stall the LIFO lot could not use (fail_n, the refused-bounce count that splits campaigns best — NEXT 5) puts the campaign
+             # in exit mode at that very stall: everything, whatever the cost (NEXT 3 revival candidate 1; measured against the random-exit baseline like flow_exit_n). 0 = off
              flow_exit_n=0, exit_random=0.0, exit_seed=0,   # exit QUALITY (2026-09-04, NEXT 21): while positioned, the last 10 s of aggressor flow is read once a
              # minute (its first tick); flow_exit_n minutes running AGAINST the position (bs10 > 0.5 under a short, < 0.5 under a long) puts the campaign in exit
              # mode as `exit` does (the whole position into the next stall / retrace top, taker after exit_after_s), latched until flat. Shorts, 9 coins, 4,794 held
@@ -855,6 +857,8 @@ class Strategy:
             market = bool(mk_lot) and big(s * (mid - self.trough))
             if trim_sig in names and not self.pull and dev_lot < gate and p["gate_relax"] > 0 and not mk_only:   # a stall the lot could not use: relax its gate
                 self.fail_n += 1; ev.append(("GATE_RELAX", dict(fails=self.fail_n, gate=round(floor + (g_norm - floor) * (1 - p["gate_relax"]) ** self.fail_n, 3), dev_lot=round(dev_lot, 2))))
+                if p.get("fail_exit_n") and self.fail_n >= int(p["fail_exit_n"]) and not self.flow_exit:   # the N-th refused stall: the campaign's expectation failed N times — this stall sells everything
+                    self.flow_exit = True; ev.append(("FAIL_EXIT", dict(fails=self.fail_n, dev=round(dev, 2), dev_lot=round(dev_lot, 2), qty=qty)))
             # top confirmed by retrace: the best price since the last fill cleared the gate (market gate: the bounce it crowned was >= trim_market_atr x ATR15)
             # and price has come back by >= trim_retrace_atr x ATR and >= retrace_frac of the bounce (peak - trough): a reversal of the move, not a wiggle at the gate
             back = max(p["trim_retrace_atr"] * atr, p["retrace_frac"] * s * (self.peak - self.trough)) if atr else None
