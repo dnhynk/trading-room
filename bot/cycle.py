@@ -99,6 +99,7 @@ class Book:
         self.work, self.replaced = dict(buy=None, trim=None), dict(buy=0.0, trim=0.0)
         self.place_retry_after = dict(buy=0.0, trim=0.0)
         self.stop, self.stop_fail, self.stop_trig_t, self.preset_plan, self.preset_retry_t = None, 0, 0.0, None, 0.0
+        self.campaign_atr = None                                # the ATR(1m) at the campaign's first fill: cap_min_atr measures the ladder against it until flat (user 2026-09-04)
         self.exch = dict(total=0.0, avg=None, upl=0.0, mark=None)
         self.mismatch_since, self.lever, self.margin_alert_t, self.taker_t, self.seq = None, None, 0.0, 0.0, 0
         self.stop_oids, self.stop_hit_oids, self.unmatched_close = deque(maxlen=20), deque(maxlen=20), []   # known stop plan ids; stop orders already counted; close fills awaiting identity
@@ -150,6 +151,7 @@ class Book:
         if st.get("day") == self.cy.day: self.realized, self.stops_today = b.get("realized", 0.0), b.get("stops_today", 0)
         elif self.pos["halt"] in ("DAILY_STOPS", "DAILY_LOSS"): self.pos["halt"] = None            # a new UTC day lifts yesterday's daily halts, restart or not
         if self.pos["lots"] and b.get("struct_stop"): self.strat.struct_stop = b["struct_stop"]   # frozen at open; a restart must not re-freeze it
+        if self.pos["lots"] and b.get("campaign_atr"): self.campaign_atr = b["campaign_atr"]     # the ATR that sized this campaign's ladder: frozen until flat, so a restart must not re-measure it
         if self.pos["lots"] and b.get("blow_base"): self.strat.blow_base = b["blow_base"]         # ... and so is the campaign's high-water position: without it a restart
         #   after the blow-off target part-filled would take the REMAINDER as the campaign and rest blowoff_frac of that at the same price again (the defect fixed in f740edd,
         #   re-entered through a restart). Campaign geometry that costs money survives a restart, like the stop ratchet; the rest of the Strategy soft state does not.
@@ -166,7 +168,7 @@ class Book:
         return dict(pos=dict(lots=self.pos["lots"], qty=rnd(qty), avg=rnd(avg), upl=rnd(upl), last=self.pos["last"], last_buy_px=self.pos["last_buy_px"],
                              last_trim_px=self.pos["last_trim_px"], halt=self.pos["halt"], pause=self.pos["pause"]),
                     realized=rnd(self.realized), working={r: (w and dict(px=w["px"], qty=w["qty"], filled=w["filled"], oid=w["oid"])) for r, w in self.work.items()},
-                    stop=self.stop, struct_stop=self.strat.struct_stop, blow_base=self.strat.blow_base, stops_today=self.stops_today, cooldown_until=self.pos.get("cooldown_until"), preset_plan=self.preset_plan,
+                    stop=self.stop, struct_stop=self.strat.struct_stop, blow_base=self.strat.blow_base, campaign_atr=self.campaign_atr, stops_today=self.stops_today, cooldown_until=self.pos.get("cooldown_until"), preset_plan=self.preset_plan,
                     exch=self.exch, lever=self.lever, sizing=self.dyn, arm=self.strat.arm, pull=self.strat.pull, regime=self.strat.regime,
                     **{k: self.sp.get(k) for k in SIZED},   # 자본 비례 한도는 전부 실효값으로 — params 절은 파일 값이고 sizing은 덮어쓴 것만 담는다
                     unit_mult=self.pos.get("unit_mult", 1.0),
@@ -230,10 +232,14 @@ class Book:
         # 지갑은 계좌 전체다 — 엔진이 여럿이면 각자 자기 몫만 써야 한다(안 나누면 심볼 수만큼 노출이 배가 된다)
         wallet = (self.cy.acct["equity"] - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0); new = {}
         if wallet <= 0: return                                    # an empty wallet sizes nothing and is no reference for the next resize (2026-09-03: a first SIZING at
-        if self.sp.get("unit_frac"):                              # wallet 0 pinned the unit to the qstep floor, and the damp could never lift it: 0.1 x 1.25 quantizes back to 0.1)
+        atr = self.feat.f.get("atr")                              # wallet 0 pinned the unit to the qstep floor, and the damp could never lift it: 0.1 x 1.25 quantizes back to 0.1)
+        if qty:                                                   # the ladder is the campaign's (user 2026-09-04): the ATR floor is measured against the ATR that sized the first
+            if self.campaign_atr is None: self.campaign_atr = atr   # unit until flat. MAGMA 16:03-16:12: ATR1m x3.5 inside the spike cut the unit 494 -> 206 minute by minute and
+            atr = self.campaign_atr or atr                        # every stall at the top (16:06:16, 16:10:01, 16:12:01) was SKIP max_units. Wallet / profile reductions still apply
+        if self.sp.get("unit_frac"):
             tgt = wallet * self.sp["unit_frac"] / mid             # 양자화 전 목표
             cap = wallet * self.sp["cap_frac"] if self.sp.get("cap_frac") else self.sp.get("cap_usdt")
-            tgt = unit_under_cap(tgt, cap, self.feat.f.get("atr"), self.sp.get("cap_min_atr"))   # 돈 한도는 그대로, 유닛이 줄어 한도가 ≥ k ATR 아래에
+            tgt = unit_under_cap(tgt, cap, atr, self.sp.get("cap_min_atr"))   # 돈 한도는 그대로, 유닛이 줄어 한도가 ≥ k ATR 아래에
             cur = self.dyn.get("unit_qty"); step = self.cy.qstep or 0.0   # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
             if cur and cur > step:                                # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛); a unit AT the
                 tgt = max(min(tgt, max(cur * 1.25, cur + step)), max(min(cur * 0.75, cur - step), step))   # floor is no reference either. The band is at least one qstep
@@ -244,8 +250,8 @@ class Book:
         if qty: new = {k: v for k, v in new.items() if k != "cap_usdt" and self.sp.get(k) is not None and v < self.sp[k]}   # positioned: reductions only, never the cap
         if any(abs(self.sp.get(k, 0) - v) > 0.02 * max(abs(v), 1e-9) for k, v in new.items()):   # only moves of >= 2%: no per-minute jitter
             self.dyn.update(new); self.sp.update(new); self.strat.p = self.sp
-            atr, uq, cap = self.feat.f.get("atr"), self.sp.get("unit_qty"), self.sp.get("cap_usdt")
-            self.ev("SIZING", wallet=round(wallet, 2), mid=mid, atr=atr, cap_atr=round(cap / (uq * atr), 1) if atr and uq and cap else None, **new)   # cap_atr = 1유닛 기준 한도의 ATR 거리
+            uq, cap = self.sp.get("unit_qty"), self.sp.get("cap_usdt")
+            self.ev("SIZING", wallet=round(wallet, 2), mid=mid, atr=atr, cap_atr=round(cap / (uq * atr), 1) if atr and uq and cap else None, **new)   # cap_atr = 1유닛 기준 한도의 ATR 거리; atr = the sizing reference (the campaign's while positioned)
 
     # ---- order management ---------------------------------------------------------
     async def reconcile(self, d):
@@ -274,7 +280,7 @@ class Book:
             if self.stop is None or abs(px - self.stop["px"]) >= self.cy.px_tick / 2:
                 await self.set_stop(px)
                 if px != d["stop"] and self.stop: self.strat.adopt_stop(self.stop["px"])   # the guarded level is the stop from now on (never loosened back)
-        if not qty: self.stop = None
+        if not qty: self.stop = self.campaign_atr = None         # flat: the next campaign's ladder is measured afresh
 
     def remember_lot(self, oid, lot):
         """Which lot a trim's fills reduce (cycles and the ledger read it back as FILL.lot); the map stays small."""
@@ -524,6 +530,7 @@ class Book:
         if lot is None and role == "trim": lot = self.trim_lot.get(oid)
         pnl = apply_fill(self.pos, self.s, role == "buy", qty, px, oid=oid, fee=fee, lot=lot)
         self.realized += pnl; self.strat.on_fill(role, qty)
+        if role == "buy" and self.campaign_atr is None: self.campaign_atr = self.feat.f.get("atr")   # the campaign's first fill: its ATR sizes the ladder until flat
         w = self.work[role]
         if w and w["oid"] == oid:
             w["filled"] += qty

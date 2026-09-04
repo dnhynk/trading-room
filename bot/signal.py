@@ -747,7 +747,7 @@ class Strategy:
             elif pos.get("avail") is not None and pos.get("lever") and pos["avail"] < unit * mid / pos["lever"] * 1.2: why = "margin"
             ok, how = confirmed()
             if not why and not ok: why = "unconfirmed"
-            if why: ev.append(("SKIP", dict(sig=buy_sig, why=why, mid=mid, avail=pos.get("avail"))))
+            if why: ev.append(("SKIP", dict(sig=buy_sig, why=why, mid=mid, avail=pos.get("avail"), unit=unit, ceiling=round(p["max_units"] * unit, 9))))   # unit / ceiling: a max_units skip is readable at a glance (MAGMA 2026-09-04 16:10)
             elif self.arm: ev.append(("SKIP", dict(sig=buy_sig, why="armed", mid=mid)))
             else: self.arm = (t + p["buy_ttl_s"], mid, unit); self.arm_filled = 0.0; ev.append(("ARM", dict(mid=mid, until=self.arm[0], unit=unit, confirm=how or None)))
         buy = None

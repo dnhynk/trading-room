@@ -437,6 +437,26 @@ class Params(unittest.TestCase):
         bk.resize()
         self.assertGreater(bk.sp["unit_qty"], 41.4); self.assertEqual((bk.sp["daily_loss_limit"], bk.sp["max_notional"]), (69.03, 1104.48))
 
+    def test_a_volatility_spike_does_not_shrink_the_ladder_under_an_open_position(self):
+        """MAGMA 2026-09-04 16:03-16:12: ATR1m x3.5 inside the spike, cap_min_atr cut the unit 494 -> 206 minute by minute, and every stall at
+        the top (16:06:16, 16:10:01, 16:12:01) was SKIP max_units. The ladder is the campaign's (user decision): the ATR at the first fill
+        measures it until flat; a smaller wallet (or a lowered profile) still shrinks it at once; a restart carries it."""
+        cy, bk = book(lots=[[494, 0.2559, "a"]]); cy.qstep, cy.vp = 1, 0
+        cy.acct = dict(equity=204.0, upl_all=0.0, avail=200.0)
+        atr0 = 20.4 / (15 * 494)                                                                      # the ATR that sized the 494 unit under cap 20.4 / 15 ATR
+        bk.dyn = dict(unit_qty=494, cap_usdt=20.4); bk.sp = {**bk.sp, "unit_qty": 494, "cap_usdt": 20.4, "unit_frac": 1.5, "cap_frac": 0.1, "cap_min_atr": 15, "wallet_frac": 1.0}
+        bk.campaign_atr = atr0; bk.feat.f = {"mid": 0.281, "atr": atr0 * 3.5}; bk.sized_t = 0
+        bk.resize(); self.assertEqual(bk.sp["unit_qty"], 494)                                          # the spike's ATR does not touch the ladder
+        cy.acct = dict(equity=150.0, upl_all=0.0, avail=150.0); bk.sized_t = 0
+        bk.resize(); self.assertLess(bk.sp["unit_qty"], 494)                                           # a smaller wallet still does (cap 15 over 15 x atr0)
+        self.assertEqual(bk.snapshot()["campaign_atr"], atr0)                                          # and a restart reads it back
+        cy2, bk2 = book(); bk2.load(dict(mode="live", day=cy2.day, books=dict(long=dict(pos=dict(lots=[[494, 0.2559, "a"]], avg=0.2559, last="buy"), campaign_atr=atr0, sizing={}))))
+        self.assertEqual(bk2.campaign_atr, atr0)
+        d = dict(buy=None, trim=None, stop=None, no_stop=False, events=[]); bk2.pos["lots"] = []; bk2.pos["avg"] = None
+        asyncio.run(bk2.reconcile(d)); self.assertIsNone(bk2.campaign_atr)                             # flat: the next campaign is measured afresh
+        bk2.feat.f = {"mid": 0.25, "atr": atr0}
+        asyncio.run(bk2.on_fill("buy", 100, 0.25, 0.01, "cycL-b1", "maker")); self.assertEqual(bk2.campaign_atr, atr0)   # frozen at the first fill
+
     def test_wrong_types_of_file_only_and_optional_keys_are_rejected(self):
         bad = valid_params({**STRAT, "daily_loss_limit": "40", "stop_structural": "oops", "adopt": "false", "symbol": "TRUMPUSDT"}, {})
         self.assertEqual(bad, ["adopt", "daily_loss_limit", "stop_structural"])
