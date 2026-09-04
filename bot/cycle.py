@@ -43,6 +43,7 @@ QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
 SLIP = 0.0005          # dry-mode stop-out slippage
 REJECT_RETRY_S = 5.0   # an explicit exchange rejection is known-not-placed; throttle persistent reduce desires and stale decisions
+NO_POS_RETRY_S = 60.0  # the exchange said this side is EMPTY (43023 on a stop / 22002 on a reduce): one probe a minute until it shows a position again, not one per tick
 LIVE_ZERO = ("entry_random", "exit_random")   # measurement-only strat keys (the random baselines of the entry / exit grids): a live book must not carry them - the file is rejected as PARAMS_INVALID
 
 
@@ -59,6 +60,7 @@ class Pool:
         self.sym, self.ev, self.path = sym, ev or (lambda kind, **kw: None), path or os.path.join(LOGS, "pool.json")
         self.cap, self.limit, self.mine, self.refreshed = 0, None, False, 0.0
         self.states = states or load_states                     # today's realized across engines (a test passes its own)
+        self._dl = {}                                           # day_loss cache per `exclude`: check_daily asks every tick
 
     def _locked(self, fn):
         lock = self.path + ".lock"; t0 = time.time()
@@ -116,12 +118,16 @@ class Pool:
             def fn(claims): claims[self.sym] = self._lease()
             self._locked(fn); self.refreshed = time.time()
 
-    def day_loss(self):
-        """Today's realized P&L summed over every engine's state file (a book's `realized` is the UTC day's: day_close resets it)."""
+    def day_loss(self, exclude=None):
+        """Today's realized P&L summed over every engine's state file (a book's `realized` is the UTC day's: day_close resets it); `exclude`
+        leaves one symbol out (the asking book adds its own live figure instead of its up-to-5-s-old snapshot). Cached 5 s: check_daily asks every tick."""
+        now = time.time(); c = self._dl.get(exclude)
+        if c and now - c[0] < 5: return c[1]
         day = time.strftime("%Y-%m-%d", time.gmtime()); tot = 0.0
-        for st in (self.states() or {}).values():
-            if st.get("day") != day: continue
+        for sym, st in (self.states() or {}).items():
+            if sym == exclude or st.get("day") != day: continue
             for b in (st.get("books") or {}).values(): tot += float(b.get("realized") or 0.0)
+        self._dl[exclude] = (now, tot)
         return tot
 
 
@@ -180,6 +186,7 @@ class Book:
         self.place_retry_after = dict(buy=0.0, trim=0.0)
         self.stop, self.stop_fail, self.stop_trig_t, self.preset_plan, self.preset_retry_t = None, 0, 0.0, None, 0.0
         self.campaign_atr = None                                # the ATR(1m) at the campaign's first fill: cap_min_atr measures the ladder against it until flat (user 2026-09-04)
+        self.no_pos_t = None                                    # when the exchange last said this side holds nothing (no_position); None again once it shows a position or an entry fills
         self.exch = dict(total=0.0, avg=None, upl=0.0, mark=None)
         self.mismatch_since, self.lever, self.margin_alert_t, self.taker_t, self.seq = None, None, 0.0, 0.0, 0
         self.stop_oids, self.stop_hit_oids, self.unmatched_close = deque(maxlen=20), deque(maxlen=20), []   # known stop plan ids; stop orders already counted; close fills awaiting identity
@@ -280,8 +287,10 @@ class Book:
         qty, avg = pos_stats(self.pos)
         upl = self.exch["upl"] if self.mode == "live" else (self.s * (f["mid"] - avg) * qty if qty else 0.0)
         lim = self.sp.get("daily_loss_limit")
-        if lim and self.realized + upl <= -lim and not self.pos["halt"]:
-            self.ev("DAILY_LOSS", realized=rnd(self.realized), upl=rnd(upl), limit=lim); self.halt("DAILY_LOSS")
+        pool = getattr(self.cy, "pool", None)                    # the hunt basket (cycle.Pool): the other books' realized today brakes a campaign in flight too — the pool's
+        others = pool.day_loss(exclude=self.symbol) if pool and pool.cap else 0.0   # shield only refuses NEW campaigns, so a book starting at 0 could add a whole ladder after the day's losses
+        if lim and others + self.realized + upl <= -lim and not self.pos["halt"]:
+            self.ev("DAILY_LOSS", realized=rnd(self.realized), others=rnd(others), upl=rnd(upl), limit=lim); self.halt("DAILY_LOSS")
 
     def day_close(self, day):
         """UTC rollover: a new day gets a fresh loss budget and stop count; daily halts lift (same policy as the backtest)."""
@@ -343,22 +352,23 @@ class Book:
             if self.mode == "live": self.ev("STOP_THROUGH", why="no valid stop level"); await self.emergency_close("no valid stop level")
             else: await self.on_stop_hit(self.feat.f["mid"] * (1 - self.s * SLIP))
             return
+        probe = self.probe_ok()                              # False: the exchange said this side is empty — no order and no stop at every tick, one probe a minute
         for role in ("buy", "trim"):
             want, w = d[role], self.work[role]
             if w and (w.get("cancel_pending") or w.get("unconfirmed") or w.get("settling")): continue    # its exchange state is being settled (a cancel, a lost submission, or fills still in flight); no replacement until then
             if want is not None and role == "trim" and want[2] == "taker":
                 if w: await self.cancel(role); w = self.work[role]
-                if w or self.market_pending: continue            # the maker order rests until its cancel is confirmed, and a market order with a lost response is settled first
+                if w or self.market_pending or not probe: continue   # the maker order rests until its cancel is confirmed, and a market order with a lost response is settled first
                 if want[1] < self.cy.qstep - 1e-9: continue                               # below one exchange step: nothing the exchange can fill (the Strategy quantises pulls; this is the backstop)
                 if time.time() - self.taker_t >= 5: await self.taker(want[1], want[3] if len(want) > 3 else None)
                 continue
             if w and want is not None and abs(want[0] - w["px"]) < self.cy.px_tick / 2 and abs(want[1] - (w["qty"] - w["filled"])) < self.cy.qstep / 2: continue
             if w and (want is None or time.time() - self.replaced[role] >= 1.0):
                 await self.cancel(role); w = self.work[role]
-            if want is not None and w is None and time.time() >= self.place_retry_after[role]:
+            if want is not None and w is None and probe and time.time() >= self.place_retry_after[role]:
                 await self.place(role, want[0], want[1], want[3] if role == "trim" and len(want) > 3 else None,
                                  want[4] if role == "trim" and len(want) > 4 else None)
-        if qty and d["stop"] is not None:
+        if qty and d["stop"] is not None and probe:
             px = self.guard(d["stop"], pos_stats(self.pos)[1])
             if self.stop is None or abs(px - self.stop["px"]) >= self.cy.px_tick / 2:
                 await self.set_stop(px)
@@ -515,8 +525,20 @@ class Book:
         them. Retrying instead drove 1-3/s loops that achieved nothing: EGLD 2026-09-03 20:30 (STOP_SET_FAIL -> STOP_FAILED ->
         HALT until a human wrote the STOP file; 577 in the ledger) and MUBARAK 2026-09-04 04:50-04:58 (a hand close left the
         standing blow-off order re-submitted 205 times over nine minutes). Audit NEXT 17e."""
-        self.cy.resync_due = True
+        self.no_pos_t = time.time(); self.cy.resync_due = True   # latch: probe_ok throttles every stop / order to one a minute until a position push or an entry fill clears it
         self.ev("STOP_NO_POSITION", px=px, our_qty=pos_stats(self.pos)[0], err=str(e)[:120])
+
+    def probe_ok(self):
+        """False while the exchange has said this side holds nothing (no_position) and NO_POS_RETRY_S has not passed since: nothing to
+        protect or close, so reconcile / ensure_stop send nothing — one probe a minute keeps a transient answer from sticking. Without it
+        the stop was re-sent at every tick until a human wrote the STOP file (CP 2026-09-04 09:41: 280 STOP_NO_POSITION in 3.5 min, the
+        43023 relabel of the EGLD 09-03 loop), and the capital pool read the phantom lots as a campaign, so no other coin could open."""
+        return self.no_pos_t is None or time.time() - self.no_pos_t >= NO_POS_RETRY_S
+
+    @property
+    def phantom(self):
+        """Lots the exchange says it does not hold (the last answer was "no position"): not a campaign for the pool, nothing to protect."""
+        return self.no_pos_t is not None and bool(self.pos["lots"])
 
     def fallback_stop(self):
         """A stop level that needs no features: the stop already set (persisted across a restart) or the money cap below the average
@@ -542,7 +564,7 @@ class Book:
 
     async def ensure_stop(self):
         """A live position never waits for a public tick to get its exchange stop (resync, and every second while it has none)."""
-        if not pos_stats(self.pos)[0] or self.stop is not None or self.stop_fail >= 3 or time.time() - self.stop_try_t < 2: return
+        if not pos_stats(self.pos)[0] or self.stop is not None or self.stop_fail >= 3 or time.time() - self.stop_try_t < 2 or not self.probe_ok(): return
         self.stop_try_t = time.time(); await self.set_stop(self.fallback_stop())
         if self.stop: self.strat.adopt_stop(self.stop["px"])
 
@@ -614,6 +636,7 @@ class Book:
         pnl = apply_fill(self.pos, self.s, role == "buy", qty, px, oid=oid, fee=fee, lot=lot)
         self.realized += pnl; self.strat.on_fill(role, qty)
         if role == "buy" and self.campaign_atr is None: self.campaign_atr = self.feat.f.get("atr")   # the campaign's first fill: its ATR sizes the ladder until flat
+        if role == "buy": self.no_pos_t = None                  # an entry fill is a position, whatever the last "no position" answer said
         w = self.work[role]
         if w and w["oid"] == oid:
             w["filled"] += qty
@@ -688,6 +711,7 @@ class Book:
         self.exch.update(total=float(r["total"]) if r else 0.0, avg=float(r["openPriceAvg"]) if r else None,
                          upl=float(r.get("unrealizedPL") or 0) if r else 0.0, mark=float(r["markPrice"]) if r and r.get("markPrice") else self.exch["mark"],
                          liq=(float(r.get("liquidationPrice") or 0) or None) if r else None)
+        if r and self.exch["total"] > 0: self.no_pos_t = None   # the exchange shows the position: the side is not empty any more
         if self.mode == "live": self.check_mismatch(self.exch["total"])
 
     def check_mismatch(self, total):
@@ -785,6 +809,7 @@ class Cycle:
         self.pp, self.vp = int(c["pricePlace"]), int(c["volumePlace"])
         self.px_tick, self.qstep = float(c["priceEndStep"]) * 10 ** -self.pp, 10 ** -self.vp
         self.maker, self.taker = float(c["makerFeeRate"]), float(c["takerFeeRate"])
+        self.max_lever = float(c.get("maxLever") or 0) or None       # the contract's ceiling: refresh_lever clamps the profile's lever to it (BRUSDT max 10 vs 20, 2026-09-04)
         self.sp = sp
         os.makedirs(LOGS, exist_ok=True); self.feat = Features()      # defaults first, so an invalid file can still be reported through ev()
         if outside_books(self.p, self.symbol):        # books 가 진실이다: 그 밖의 계약은 아무도 소유하지 않고 지갑 몫도 없다(주문 하나 내기 전에 나간다)
@@ -1013,7 +1038,7 @@ class Cycle:
                 for bk in self.books.values():
                     if self.mode == "live" and bk.stop_fail >= 3: await bk.stop_failed()
                     if time.time() - bk.sized_t >= 60: bk.resize()
-                if self.pool.cap: self.pool.tend(any(pos_stats(bk.pos)[0] for bk in self.books.values()), any(bk.strat.arm or bk.work["buy"] for bk in self.books.values()))
+                if self.pool.cap: self.pool.tend(any(pos_stats(bk.pos)[0] and not bk.phantom for bk in self.books.values()), any(bk.strat.arm or bk.work["buy"] for bk in self.books.values()))   # phantom lots (the exchange says empty) hold no campaign
                 if time.time() - self.lever_t >= 300: await self.refresh_lever()
                 if time.time() - self.daily_t >= 3600: await self.refresh_daily()
                 hint = self.feat.side_hint
@@ -1078,7 +1103,10 @@ class Cycle:
             # the leverage is not a size (units are notional from the wallet share) but the margin each position locks, i.e. how loosely the
             # margin gate lets the basket pile up — one number for every book, or the brake differs by symbol. A symbol that joins the basket
             # arrives with the exchange's default (HYPEUSDT came at 20x, 2026-09-02), so the engine sets params `lever` itself, only while flat
-            want = float(self.sp.get("lever") or 0); want_mode = self.sp.get("margin_mode")
+            want = float(self.sp.get("lever") or 0); want_mode = self.sp.get("margin_mode"); mx = getattr(self, "max_lever", None)
+            if want and mx and want > mx:                             # the contract caps under the profile (BRUSDT max 10, profile 20: 40797 every 5 minutes, 2026-09-04 19:14) —
+                if getattr(self, "lever_clamped", None) != want: self.lever_clamped = want; self.ev("LEVER_CLAMP", want=want, max=mx)   # run at its max, said once; hunt no longer admits such a coin (flags_of)
+                want = mx
             off = [bk.lever for bk in self.books.values() if bk.lever and abs(bk.lever - want) > 1e-9]
             flat = all(not bk.pos["lots"] and not bk.work["buy"] and not bk.work["trim"] for bk in self.books.values())
             # the margin mode is a contract too (the exchange keeps it per symbol): in isolated mode the liquidation price is the position's

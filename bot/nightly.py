@@ -5,9 +5,9 @@ signal source, volume-decay, CVD divergence, value-area position and regime, the
 and the side-automation counterfactuals; once per basket: bot.capture, (2) bot.recon — what the backtest got wrong against the live ledger
 that day, which every other backtest number in the file inherits, (3) the tuner report over the whole basket (report only, never
 --apply), (4) the symbol scanner. python -m bot.nightly --now runs it once immediately for the previous day (or --day YYYYMMDD)."""
-import glob, json, os, subprocess, sys, time
+import calendar, glob, json, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bot.ws import load_params, portfolio
+from bot.ws import load_params, load_states, portfolio
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 
@@ -30,14 +30,34 @@ def _vs(base, line):
     if not base or not m: return ""
     return f"vs live: total {m['total'] - base['total']:+.2f}, stops {base['stops']}->{m['stops']}, dd {base['max_dd']:.1f}->{m['max_dd']:.1f} | "
 
+def symbols(day, p=None, states=None):
+    """(symbols, {symbol: sides}) the report covers: the books held now plus every engine whose state file was written since the report
+    day began (00:00 UTC). A track-B book rotates within hours, and a report that read `books` alone measured CPUSDT for 20260903 while
+    AKE / EGLD / MUBARAK had traded that day. A gone book's sides come from its state file (a hunt book is one side); a symbol never
+    held reads both."""
+    p = (load_params() or {}) if p is None else p; states = load_states() if states is None else states
+    t0 = calendar.timegm(time.strptime(day, "%Y%m%d"))
+    syms = [s for s in portfolio(p) if s]
+    for s, st in states.items():
+        try:
+            if s not in syms and time.mktime(time.strptime(st["t"], "%Y-%m-%d %H:%M:%S")) >= t0: syms.append(s)
+        except Exception: pass
+    books = p.get("books") or {}
+    return syms, {s: list((books.get(s) or {}).get("sides") or (states.get(s) or {}).get("sides") or ["long", "short"]) for s in syms}
+
 def report(day):
     allf = sorted(f for f in glob.glob(os.path.join(ROOT, "data", "ws", "pub-*.jsonl*")) if not (f.endswith(".jsonl") and os.path.exists(f + ".gz")))
     files = [f for f in allf if os.path.basename(f)[4:12] == day]
     warm = [f for f in allf if os.path.basename(f)[4:12] < day][-2:]      # the previous day's last two hours warm the windows; their signals are not reported
-    syms = [s for s in portfolio(load_params() or {}) if s]
-    out = [f"# nightly {day}  ({len(files)} recording files, {len(warm)} warm-up; books {', '.join(syms)})\n"]
+    p = load_params() or {}; syms, bsides_of = symbols(day, p)
+    out = [f"# nightly {day}  ({len(files)} recording files, {len(warm)} warm-up; symbols {', '.join(syms)})\n"]
     if files:
         for sym in syms:                                # every book gets its own tables: a basket's evidence is per symbol, never one default symbol's
+            # a hunt book that left before 00:10 is not in `books`, and the backtest (strat_for) would size it as a basket slot on the common strat:
+            # give it the track's profile and share, so its lines are the engine that actually traded it
+            gone = ([x for k, v in {**((p.get("hunt") or {}).get("strat") or {}), "wallet_frac": 1.0}.items() for x in ("--strat", f"{k}={v}")]
+                    if (p.get("hunt") or {}).get("on") and sym not in (p.get("books") or {}) else [])
+            bt = ["bot.backtest"] + files + ["--sym", sym] + gone
             out.append(f"\n# {sym}\n")
             out.append("## signals (replay, forward 15m; split by source / volume decay / CVD divergence / value area / regime)\n")
             out.append(run_cmd(["bot.replay"] + warm + files + ["--sym", sym, "--quiet", "--day", day, "--by", "sell_decay,buy_decay,cvd_div,cvd_div_bear,vp_va,vp_dens,rg_er,leg_ow,U,D,side_hint_1h,side_hint_15m,daily_trend,dbl,brk"]))
@@ -46,11 +66,11 @@ def report(day):
             out.append("\n## sides (the day's tape as long / short / dual at live sizing; by_hint = realized pnl per book split by the 1H structure hint; capture = minute moves held / all per book)\n")
             base = None
             for sides in ("long", "short", "long,short"):
-                line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", sides]).strip().split("\n") or [""])[-1]
+                line = (run_cmd(bt + ["--sides", sides]).strip().split("\n") or [""])[-1]
                 out.append(f"--sides {sides}: " + line)
                 if sides == "long,short": base = _metrics(line)      # the live dual run the counterfactuals below are read against
             for v in ("0", "1"):   # the current-leg read as a size scale (NEXT 1), both ways whatever params say: the live experiment's readout is on minus off, per symbol per day
-                out.append(f"--sig rg_leg_on={v} (dual): " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short", "--sig", f"rg_leg_on={v}"]).strip().split("\n") or [""])[-1])
+                out.append(f"--sig rg_leg_on={v} (dual): " + (run_cmd(bt + ["--sides", "long,short", "--sig", f"rg_leg_on={v}"]).strip().split("\n") or [""])[-1])
             # the other live experiments of 2026-09-02 (NEXT 3, 5): the counterfactual of each, per symbol per day — live params vs the value it replaced.
             # de-risk runs both forms (NEXT 3, 2026-09-03): on0 = the lone-core cut that was live until 09-02 10:19, on1 = the under-units cut of the
             # 09-02 audit; each line leads with total / stops / max_dd against the live dual run so the revert rule reads the risk columns, not the pnl alone
@@ -61,22 +81,22 @@ def report(day):
                               # the cross-section decides whether either form ever comes back): below-cost stall sales after a half-excursion bounce; the bounce-size gate alone
                               ("trim market frac 0.5 (below-cost bounce sale)", ["--strat", "trim_market_frac=0.5"]),
                               ("trim market atr 1.5 only (bounce-size gate, cost ignored)", ["--strat", "trim_market_atr=1.5", "--strat", "trim_market_only=1"])):
-                line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", "long,short"] + ov).strip().split("\n") or [""])[-1]
+                line = (run_cmd(bt + ["--sides", "long,short"] + ov).strip().split("\n") or [""])[-1]
                 out.append(f"counterfactual {label} (dual): {_vs(base, line)}" + line)
             # entry quality (2026-09-04, track B — RULES 담기 확인 절): the live hunt book opens a campaign only on a stall the velocity rule read with the flow
             # turned and the volume fading, and adds half units on unconfirmed stalls. Two readouts on the book's own side(s): the gate off (every stall opens,
             # adds whole — the pre-09-04 book) and the gate without the decay condition. The revert rule in NEXT's live 실험 표 reads these lines.
-            bsides = ",".join(((load_params() or {}).get("books") or {}).get(sym, {}).get("sides") or ["long", "short"])
-            own = base if bsides == "long,short" else _metrics((run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", bsides]).strip().split("\n") or [""])[-1])
+            bsides = ",".join(bsides_of[sym])
+            own = base if bsides == "long,short" else _metrics((run_cmd(bt + ["--sides", bsides]).strip().split("\n") or [""])[-1])
             for label, ov in (("entry quality off (every stall opens, adds whole)", ["--strat", "entry_v=0", "--strat", "entry_flow=0", "--strat", "entry_decay=0", "--strat", "add_mult=0"]),
                               ("entry quality without decay", ["--strat", "entry_decay=0"]),
                               # the random baseline (NEXT 19): the gate off but 85% of entries vetoed at random, three seeds - a gate that only
                               # trades less lands inside these; a gate that reads something lands under them on stops / drawdown
                               *((f"random veto 85% seed {k}", ["--strat", "entry_v=0", "--strat", "entry_flow=0", "--strat", "entry_decay=0", "--strat", "add_mult=0", "--strat", "entry_random=0.85", "--strat", f"entry_seed={k}"]) for k in (1, 2, 3))):
-                line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", bsides] + ov).strip().split("\n") or [""])[-1]
+                line = (run_cmd(bt + ["--sides", bsides] + ov).strip().split("\n") or [""])[-1]
                 out.append(f"counterfactual {label} ({bsides}): {_vs(own, line)}" + line)
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break
-                out.append(f"--follow {fol}: " + (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--follow", fol]).strip().split("\n") or [""])[-1])
+                out.append(f"--follow {fol}: " + (run_cmd(bt + ["--follow", fol]).strip().split("\n") or [""])[-1])
             out.append("\n## sweeps (stop hunts: sweeps under/over the engine's pivots, reclaim rate, depth vs the stop buffer, what follows a reclaim)\n")
             out.append(run_cmd(["bot.sweeps"] + warm + files + ["--sym", sym, "--quiet", "--day", day]))
             out.append("\n## phases (does the lifecycle read pay: forward move / live cycles per phase / order-flow footprints; 세력대항마 stage 2, NEXT 6.13)\n")

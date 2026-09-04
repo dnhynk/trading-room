@@ -74,6 +74,14 @@ class LeverageSet(unittest.TestCase):
         asyncio.run(refresh(cy))
         self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], [("lever", 10, None)]); self.assertIn("LEVER_SET", kinds(cy)); self.assertEqual(bk.lever, 10)
 
+    def test_a_contract_that_caps_under_the_profile_runs_at_its_max_instead_of_erroring_every_five_minutes(self):
+        cy, bk, refresh = self._cy(lever=20, acct_lever=10.0); cy.max_lever = 10.0        # BRUSDT: max 10, profile 20 (2026-09-04 19:14, 40797 every 5 min)
+        asyncio.run(refresh(cy))
+        self.assertEqual([c for c in cy.b.calls if c[0] == "lever"], []); self.assertIn("LEVER_CLAMP", kinds(cy)); self.assertEqual(bk.lever, 10.0)
+        asyncio.run(refresh(cy)); self.assertEqual(kinds(cy).count("LEVER_CLAMP"), 1)     # said once
+        cy2, bk2, refresh2 = self._cy(lever=20, acct_lever=10.0); cy2.max_lever = 50.0
+        asyncio.run(refresh2(cy2)); self.assertEqual([c for c in cy2.b.calls if c[0] == "lever"], [("lever", 20, None)])   # room for the profile: set as before
+
     def test_a_positioned_book_is_left_alone_and_lever_0_means_hands_off(self):
         cy, bk, refresh = self._cy(lots=[[70, 3.0, "a"]])
         asyncio.run(refresh(cy))
@@ -589,3 +597,44 @@ class CapitalPool(unittest.TestCase):
         evs = []; a.ev = lambda k, **kw: evs.append(k)
         self.assertEqual(a.claim(), "pool_error"); self.assertIn("POOL_ERROR", evs); self.assertFalse(a.mine)
         os.remove(self.path + ".lock"); self.assertEqual(a.claim(), "")
+
+    def test_the_days_loss_can_leave_the_asking_book_out(self):
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        states = lambda: {"XUSDT": dict(day=day, books=dict(short=dict(realized=-40.0))), "AUSDT": dict(day=day, books=dict(long=dict(realized=-5.0)))}
+        a = self.pool("AUSDT", states=states)
+        self.assertEqual(a.day_loss(), -45.0); self.assertEqual(a.day_loss(exclude="AUSDT"), -40.0)   # the asker adds its own live figure instead of its snapshot
+
+class BasketDailyBrake(unittest.TestCase):
+    """With the pool on, a campaign in flight is braked by the day's realized losses of the OTHER books too: the pool's shield only refuses
+    new campaigns, so a book starting the day at 0 could otherwise add a whole ladder after the basket had already lost its daily limit."""
+    def test_a_campaign_in_flight_is_halted_by_the_days_losses_of_the_other_books(self):
+        cy, bk = book(lots=[[70, 3.0, "a"]]); d = tempfile.mkdtemp(); day = time.strftime("%Y-%m-%d", time.gmtime())
+        cy.pool = cycle.Pool("TESTUSDT", path=os.path.join(d, "pool.json"),
+                             states=lambda: {"OTHER": dict(day=day, books=dict(short=dict(realized=-50.0))), "TESTUSDT": dict(day=day, books=dict(long=dict(realized=-999.0)))})
+        cy.pool.cap = 1; bk.sp["daily_loss_limit"] = 60.0; bk.exch["upl"] = -5.0
+        bk.check_daily(cy.feat.f); self.assertIsNone(bk.pos["halt"])                      # -50 + 0 - 5 > -60; its own stale snapshot is not counted twice
+        bk.exch["upl"] = -12.0; bk.check_daily(cy.feat.f); self.assertEqual(bk.pos["halt"], "DAILY_LOSS")
+        self.assertEqual(next(kw for k, kw in cy.events if k == "DAILY_LOSS")["others"], -50.0)
+        cy2, bk2 = book(lots=[[70, 3.0, "a"]]); bk2.sp["daily_loss_limit"] = 60.0; bk2.exch["upl"] = -12.0
+        bk2.check_daily(cy2.feat.f); self.assertIsNone(bk2.pos["halt"])                   # no pool: the book alone, as before
+        shutil.rmtree(d, ignore_errors=True)
+
+class EmptySide(unittest.TestCase):
+    """The exchange answered "no position" (43023 on a stop, 22002 on a reduce): the book's lots are stale. One probe a minute instead of an
+    order or a stop at every tick, and the capital pool does not count the phantom as a campaign — CP 2026-09-04 09:41: 280 STOP_NO_POSITION
+    in 3.5 minutes until the STOP file, while the phantom lots would have held the pool for every other coin."""
+    def test_a_no_position_answer_throttles_stops_and_orders_to_one_probe_a_minute_until_the_exchange_shows_a_position(self):
+        cy, bk = book(lots=[[70, 3.0, "a"]]); calls = []
+        def refuse(symbol, hold_side, sl=None, tp=None): calls.append(sl); raise BitgetError("43023", "Insufficient position, can not set stop")
+        cy.b.place_pos_tpsl = refuse
+        asyncio.run(bk.ensure_stop()); self.assertEqual(len(calls), 1); self.assertEqual(kinds(cy).count("STOP_NO_POSITION"), 1); self.assertTrue(bk.phantom)
+        bk.stop_try_t = 0.0; asyncio.run(bk.ensure_stop()); self.assertEqual(len(calls), 1)                  # the latch, not the 2-s clock, holds it
+        d = dict(buy=None, trim=(3.1, 70.0, "maker", None), stop=2.9, no_stop=False, events=[])
+        asyncio.run(bk.reconcile(d)); self.assertEqual(len(calls), 1); self.assertFalse(any(c[0] == "limit" for c in cy.b.calls))   # no stop and no order per tick either
+        bk.no_pos_t -= cycle.NO_POS_RETRY_S; bk.stop_try_t = 0.0
+        asyncio.run(bk.ensure_stop()); self.assertEqual(len(calls), 2); self.assertEqual(kinds(cy).count("STOP_NO_POSITION"), 2)   # a minute later: one probe, refused again
+        bk.on_position(dict(total="70", openPriceAvg="3.0", unrealizedPL="0", markPrice="3.0")); self.assertFalse(bk.phantom)      # the exchange shows the position: normal again
+        del cy.b.place_pos_tpsl; bk.stop_try_t = 0.0
+        asyncio.run(bk.ensure_stop()); self.assertIsNotNone(bk.stop)
+        bk.no_pos_t = time.time(); asyncio.run(bk.on_fill("buy", 70, 3.0, 0.01, "cycL-b2", "maker")); self.assertIsNone(bk.no_pos_t)   # an entry fill clears it too
+        cy3, bk3 = book(lots=[[70, 3.0, "a"]]); self.assertFalse(bk3.phantom)                                    # never told otherwise: a campaign as before

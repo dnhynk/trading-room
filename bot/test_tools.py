@@ -261,6 +261,22 @@ class SelectorCounterfactual(unittest.TestCase):
         self.assertEqual(stop_pct(dict(atr_pct=1.30), prof, 10.0), 10.0)             # --stop N stays a fixed number
         self.assertEqual(stop_pct(dict(atr_pct=None), dict(cap_frac=0, unit_frac=0)), 10.0)   # no geometry at all: the old default
 
+class NightlySymbols(unittest.TestCase):
+    """The nightly covers every engine that wrote a state since the report day began, not only the books held at 00:10 UTC — a track-B
+    book rotates within hours (20260903: the report measured CPUSDT alone while AKE / EGLD / MUBARAK had traded that day)."""
+    def test_engines_seen_that_day_join_the_books_and_a_gone_book_keeps_its_side(self):
+        import time
+        from bot.nightly import symbols
+        p = dict(strat=dict(symbol="CPUSDT"), books={"CPUSDT": {"sides": ["short"], "hunt": 1}})
+        day0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.mktime(time.strptime("20260903", "%Y%m%d")) - time.timezone))   # 00:00 UTC of the day, in local time
+        late = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.mktime(time.strptime("20260903", "%Y%m%d")) - time.timezone + 15 * 3600))
+        states = {"CPUSDT": dict(t=late, sides=["short"]), "EGLDUSDT": dict(t=late, sides=["long"]),                        # a hunt book that left that day
+                  "MUBARAKUSDT": dict(t=day0, sides=["long"]), "HYPEUSDT": dict(t="2026-09-02 21:46:00", sides=["long", "short"])}   # at the boundary: in; the day before: out
+        syms, sides = symbols("20260903", p, states)
+        self.assertEqual(syms, ["CPUSDT", "EGLDUSDT", "MUBARAKUSDT"])
+        self.assertEqual(sides, {"CPUSDT": ["short"], "EGLDUSDT": ["long"], "MUBARAKUSDT": ["long"]})                    # the gone books' sides come from their state files
+        self.assertEqual(symbols("20260903", dict(strat=dict(symbol="XUSDT")), {}), (["XUSDT"], {"XUSDT": ["long", "short"]}))   # no books, no states: the default symbol, both sides
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -96,7 +96,8 @@ def flags_of(r, hunt):
     f = []
     if r["qv"] < hunt["min_vol"]: f.append(f"vol{r['qv'] / 1e6:.0f}M")
     if r.get("atr_pct") is None or r["atr_pct"] > hunt["max_atr"] or r["atr_pct"] < hunt["min_atr"]: f.append(f"atr{r.get('atr_pct')}")
-    if (r.get("lever_max") or 0) < hunt["min_lever"]: f.append(f"lever{r.get('lever_max')}")
+    need_lv = max(float(hunt["min_lever"]), float((hunt.get("strat") or {}).get("lever") or 0))   # the profile's leverage is the margin gate's brake and must be settable: BRUSDT (max 10)
+    if (r.get("lever_max") or 0) < need_lv: f.append(f"lever{r.get('lever_max')}")                 # became a book and LEVER_SET 20 was refused every 5 min (2026-09-04 19:14)
     if (r.get("twoway24") or 0) < hunt["min_twoway"]: f.append(f"twoway{r.get('twoway24')}")
     if hunt.get("require_spot") and not r.get("spot"): f.append("nospot")
     ph = r.get("phase")
@@ -134,6 +135,14 @@ def exit_flags(r, held, hunt):
         if held.get("climax") and r["px"] > held["climax"]: f.append("newhigh")
         if r["fund"] is not None and r["fund"] < hunt["min_fund"]: f.append(f"fund{r['fund']:+.2f}%")
     return f                                                      # ATR is an entry question only: a held coin's ATR exploding is the pump itself
+
+def ai_only(r, flags):
+    """True when every flag hangs on the phase AND the AI's phase disagrees with the rule reader's (`phase_det`): such a read leaves only
+    after `confirm` scans, like an entry, not after `exit_confirm`. The AI label changes between scans 2.5x as often as the rule reader's
+    (2026-09-04, 1,047 consecutive-scan pairs: 17.6% vs 7.1%) and printed 14 one-scan exit-phase blips inside runs of our own side against
+    the reader's 0 (TRIA climax alone at 16:10 / 18:11 / 18:30) — and the exit floor (600 s) is one scan, so HUNT_RESUME never undoes a
+    blip's sale. A measured flag (vol / dead / still / far / newhigh / fund / quiet) or a flip the rule reader agrees with keeps `exit_confirm`."""
+    return bool(flags) and all(f.startswith(("phase:", "hold:")) for f in flags) and r.get("phase_det") is not None and r.get("phase_det") != r.get("phase")
 
 _SPOTS = {"t": 0.0, "map": {}}
 def spot_markets(b, log=log):
@@ -381,7 +390,8 @@ def verdict(rows, books, hunt, st, now):
             hs["tw_peak"] = max(hs.get("tw_peak") or 0.0, r.get("twoway24") or 0.0)   # the churn when this coin was hot: leaving reads against it (quiet_frac)
             xf = exit_flags(r, hs, hunt)
             st.setdefault("xstreak", {})[cur] = st.get("xstreak", {}).get(cur, 0) + 1 if xf else 0
-            if xf and st["xstreak"][cur] >= int(hunt["exit_confirm"]): winds.append((cur, ",".join(xf))); hs["exit"] = winds[-1][1]
+            need = int(hunt["confirm"]) if ai_only(r, xf) else int(hunt["exit_confirm"])   # a phase the AI alone reads waits like an entry does
+            if xf and st["xstreak"][cur] >= need: winds.append((cur, ",".join(xf))); hs["exit"] = winds[-1][1]
     cool = st.get("cool") or {}
     leaving = {s for s, _ in winds} | {s for s in held if books[s].get("wind_down") and s not in resumes}
     def free(r):   # not held, or a leaving book's own coin on the OTHER side (the lifecycle flip: a long wound down at the climax comes back short) —
@@ -497,6 +507,7 @@ def main():
             with open(os.path.join(LOGS, "hunt-history.jsonl"), "a", encoding="utf-8") as f: f.write(json.dumps(rec) + "\n")
             log("\n" + table(rows))
             now = time.time(); flats = flats_now()
+            p = load_params() or p; books = p.get("books") or {}   # re-read AFTER the scan (60-320 s with the AI read): the copy read before it would overwrite an edit made meanwhile — every key but ours is the supervising session's
             v = verdict(rows, books, hunt, st, now)
             owner = bool(hunt.get("on")) and not dry
             ev("HUNT", on=int(bool(hunt.get("on"))), dry=dry, held=held, flat={s: flats.get(s) for s in held}, winds=v["winds"], adds=v["adds"], resumes=v["resumes"], overflow=v["overflow"], top=v["top"],

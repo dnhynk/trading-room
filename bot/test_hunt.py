@@ -30,6 +30,12 @@ class Flags(unittest.TestCase):
         self.assertEqual(flags_of(row("A", "markdown", spot=None), HUNT), ["nospot"])                    # a perp-only pump (AKE, USELESS) is not a candidate
         self.assertEqual(flags_of(row("A", "markdown", spot=None), {**HUNT, "require_spot": 0}), [])
 
+    def test_the_lever_gate_reads_the_profiles_leverage(self):
+        h = {**HUNT, "strat": {"lever": 20}}
+        self.assertEqual(flags_of(row("A", "markdown", lever_max=10), h), ["lever10"])     # BRUSDT 2026-09-04 19:14: admitted at max 10, LEVER_SET 20 refused every 5 min
+        self.assertEqual(flags_of(row("A", "markdown", lever_max=20), h), [])
+        self.assertEqual(flags_of(row("A", "markdown", lever_max=10), HUNT), [])          # no profile leverage: min_lever alone
+
     def test_exit_flags_read_the_side_and_the_phase(self):
         short = dict(side="short", peak=1e8, climax=150.2); long_ = dict(side="long", peak=1e8, climax=150.2)
         self.assertEqual(exit_flags(row("A", "markdown"), short, HUNT), [])
@@ -373,6 +379,29 @@ class SecondOpinion(unittest.TestCase):
         finally: hunt.subprocess.run = real
         self.assertEqual(r["A"][0], "markup"); self.assertEqual(r["A"][3:], (1, 3))      # the rule reader's markup is among the three answers
         self.assertEqual(r["B"][0], "markdown"); self.assertEqual(r["B"][3:], (1, 3))    # unknown is not: the first run, as before
+
+class AiOnlyExit(unittest.TestCase):
+    """A phase the AI alone reads (the rule reader disagrees) leaves after `confirm` scans, like an entry; a measured flag or a flip the rule
+    reader agrees with keeps `exit_confirm` 1 (2026-09-04: the AI label flips between scans 2.5x as often, 14 one-scan blips vs the reader's 0,
+    and the exit floor is one scan, so a blip's sale cannot be undone by HUNT_RESUME)."""
+    bk = {"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1}}
+    def held(self): return dict(held={"A": dict(side="long", peak=4e7, climax=150.2)})
+
+    def test_an_ai_only_phase_flip_waits_a_second_scan_and_a_rule_agreed_one_does_not(self):
+        st = self.held(); blip = row("A", "climax", phase_det="markup")                                       # TRIA 16:10 / 18:11 / 18:30: climax by the AI alone
+        v = verdict([blip], self.bk, HUNT, st, 1000.0); self.assertEqual(v["winds"], []); self.assertEqual(st["xstreak"]["A"], 1)
+        v = verdict([blip], self.bk, HUNT, st, 2000.0); self.assertEqual(v["winds"], [("A", "phase:climax")])   # the second scan leaves
+        v = verdict([row("A", "climax", phase_det="climax")], self.bk, HUNT, self.held(), 1000.0); self.assertEqual(v["winds"], [("A", "phase:climax")])   # both readers: one scan
+        v = verdict([row("A", "climax")], self.bk, HUNT, self.held(), 1000.0); self.assertEqual(v["winds"], [("A", "phase:climax")])                      # no AI read: as before
+        st = self.held(); v = verdict([blip], self.bk, HUNT, st, 1000.0); v = verdict([row("A", "markup", hint15="long", off=2.0, phase_det="unknown")], self.bk, HUNT, st, 2000.0)
+        self.assertEqual((v["winds"], st["xstreak"]["A"]), ([], 0))                                            # the blip passed: the count restarts
+
+    def test_hold_flags_from_the_ai_wait_too_but_a_measured_flag_beside_them_does_not(self):
+        st = self.held()
+        v = verdict([row("A", "distribution", phase_det="unknown")], self.bk, HUNT, st, 1000.0); self.assertEqual(v["winds"], [])   # ARB 2026-09-04: distribution on 7 of 20 scans, alternating with markup
+        v = verdict([row("A", "distribution", phase_det="unknown")], self.bk, HUNT, st, 2000.0); self.assertEqual(v["winds"], [("A", "hold:distribution")])
+        v = verdict([row("A", "distribution", phase_det="unknown", atr_pct=0.2)], self.bk, HUNT, self.held(), 1000.0)
+        self.assertEqual(v["winds"], [("A", "still0.2,hold:distribution")])                                    # a measured flag beside it: one scan, as before
 
 class TheOtherWriter(unittest.TestCase):
     """pid_alive gates the only write of params.books, so both of its errors must be the safe one."""
