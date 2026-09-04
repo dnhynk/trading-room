@@ -85,6 +85,34 @@ class Verdicts(unittest.TestCase):
         self.assertEqual((p["strat"]["symbol"], p["strat"]["side"], p["strat"]["sides"]), ("A", "long", ["long", "short"]))
         self.assertEqual(set(p["record"]), {"A", "B", "BTCUSDT"}); self.assertEqual(st["held"]["A"]["side"], "long")
 
+    def test_a_funding_tax_stops_the_adds_without_the_exit_flag_and_without_a_cooldown(self):
+        """A funding tax is a slow bleed, not a broken premise (user 2026-09-04): wind_down only, no exit, no cooldown, and HUNT_RESUME
+        when the rate comes back. Before this it took the phase-flip branch (exit=1: the whole book at market within ten minutes)."""
+        st = dict(held={"A": dict(side="short", peak=4e7, climax=150.2, tw_peak=30.0)}); p = dict(strat=dict(symbol="A", side="short"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1}})
+        taxed = row("A", "markdown", fund=-0.3)
+        v = verdict([taxed], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "fund-0.30%"))
+        apply(p, [taxed], v, {"A": False}, HUNT, st, 1000.0)
+        self.assertEqual(p["books"]["A"].get("wind_down"), 1); self.assertNotIn("exit", p["books"]["A"])
+        back = row("A", "markdown", fund=0.01)
+        for _ in range(2): v = verdict([back], p["books"], HUNT, st, 1000.0)
+        self.assertEqual(v["resume"], "A")
+        st = dict(held={"A": dict(side="short", peak=4e7, climax=150.2, tw_peak=30.0, exit="fund-0.30%")}, streak={"B:short": 1}, xstreak={"A": 1})
+        p = dict(strat=dict(symbol="A", side="short"), books={"A": {"wallet_frac": 1.0, "sides": ["short"], "hunt": 1, "wind_down": 1}})
+        rows = [row("B", "markdown", twoway24=50.0), taxed]
+        v = verdict(rows, p["books"], HUNT, st, 1000.0); self.assertEqual(v["add"], ("B", "short"))
+        apply(p, rows, v, {"A": True}, HUNT, st, 1000.0)
+        self.assertEqual(list(p["books"]), ["B"]); self.assertNotIn("A", st.get("cool", {})); self.assertNotIn("A", st["xstreak"])   # replaced flat: no cooldown, its streaks gone
+
+    def test_a_re_added_coin_starts_its_streaks_fresh(self):
+        """xstreak / rstreak are a campaign's, not a coin's: a stale count from an earlier campaign would end a re-added coin on its
+        first flagged scan once exit_confirm > 1 (audit 2026-09-04)."""
+        st = dict(streak={"A:short": 1}, xstreak={"A": 1, "Z": 1}, rstreak={"A": 1}); p = dict(strat=dict(symbol="OLD"), books={})
+        rows = [row("A", "markdown")]
+        v = verdict(rows, {}, HUNT, st, 1000.0); self.assertEqual(v["add"], ("A", "short")); apply(p, rows, v, {}, HUNT, st, 1000.0)
+        self.assertNotIn("A", st["xstreak"]); self.assertNotIn("A", st["rstreak"]); self.assertEqual(st["xstreak"]["Z"], 1)
+        v = verdict([row("A", "markup", hint15="long", off=2.0)], p["books"], {**HUNT, "exit_confirm": 2}, st, 1000.0)
+        self.assertIsNone(v["wind"]); self.assertEqual(st["xstreak"]["A"], 1)     # the new campaign's first flagged scan counts one, not two
+
     def test_a_long_leaves_at_a_confirmed_climax_and_the_same_coin_comes_back_short_without_cooldown(self):
         st = dict(held={"A": dict(side="long", peak=4e7, climax=150.2)}); p = dict(strat=dict(symbol="A", side="long"), books={"A": {"wallet_frac": 1.0, "sides": ["long"], "hunt": 1}})
         v = verdict([row("A", "climax")], p["books"], HUNT, st, 1000.0); self.assertEqual(v["wind"], ("A", "phase:climax"))   # exit_confirm 1: leaving is fast
@@ -294,6 +322,23 @@ class SecondOpinion(unittest.TestCase):
 
     def test_chart_slot_limit_never_lets_a_candidate_displace_the_holding(self):
         self.assertEqual(hunt.chart_symbols([row("HOT", twoway24=99), row("HELD", "quiet")], ["HELD"], 1), ["HELD"])
+
+    def test_a_tie_is_broken_by_the_rule_reader_when_it_sits_among_the_tied_answers(self):
+        """1:1:1 of three runs is no majority. The rule reader's phase wins when it is one of the tied answers, else the first run —
+        which is what the run order alone did before (user decision 2026-09-04; 11 of 688 rows that day were ties)."""
+        outs = ['{"reads":[{"symbol":"A","phase":"markdown","conf":70},{"symbol":"B","phase":"markdown","conf":70}]}',
+                '{"reads":[{"symbol":"A","phase":"markup","conf":70},{"symbol":"B","phase":"markup","conf":70}]}',
+                '{"reads":[{"symbol":"A","phase":"quiet","conf":70},{"symbol":"B","phase":"quiet","conf":70}]}']
+        real = hunt.subprocess.run
+        def fake(cmd, **kw):
+            i = cmd.index("-o"); n = int(os.path.basename(cmd[i + 1])[4:-5])        # read<n>.json: run n gets outs[n-1], whatever thread runs it
+            with open(cmd[i + 1], "w", encoding="utf-8") as fh: fh.write(outs[n - 1])
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        hunt.subprocess.run = fake
+        try: r = hunt.ai_read([row("A", "markup"), row("B", "unknown")], {**HUNT, "ai_read": 1, "ai_runs": 3}, log=lambda *a: None)
+        finally: hunt.subprocess.run = real
+        self.assertEqual(r["A"][0], "markup"); self.assertEqual(r["A"][3:], (1, 3))      # the rule reader's markup is among the three answers
+        self.assertEqual(r["B"][0], "markdown"); self.assertEqual(r["B"][3:], (1, 3))    # unknown is not: the first run, as before
 
 class TheOtherWriter(unittest.TestCase):
     """pid_alive gates the only write of params.books, so both of its errors must be the safe one."""

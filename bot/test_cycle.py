@@ -202,6 +202,23 @@ class Stops(unittest.TestCase):
         bk.place_retry_after["trim"] = 0.0
         asyncio.run(bk.reconcile(d)); self.assertEqual(calls, [1, 1])
 
+    def test_a_same_price_stop_request_after_the_race_sends_no_modify(self):
+        """reconcile and ensure_stop both check for a stop before taking the lock; the loser finds one placed meanwhile and must not
+        modify it to the price it already has (MAGMA 2026-09-04 14:20:10: one plan id, two STOP_SET)."""
+        cy, bk = book(lots=[[70, 3.0, "a"]], stop=dict(px=2.9, order_id="P-old"))
+        asyncio.run(bk.set_stop(2.9)); asyncio.run(bk.set_stop(2.9004))
+        self.assertNotIn("modify", [c[0] for c in cy.b.calls]); self.assertNotIn("STOP_SET", kinds(cy))
+        asyncio.run(bk.set_stop(2.95)); self.assertEqual([c for c in cy.b.calls if c[0] == "modify"], [("modify", "P-old", "2.950")])
+
+    def test_the_preset_is_cancelled_once_when_two_callers_race(self):
+        cy, bk = book(lots=[[70, 3.0, "a"]], stop=dict(px=2.9, order_id="P-1")); bk.preset_plan = "S-1"; calls = []
+        cy.b.cancel_plan = lambda symbol, pid, kind: calls.append(pid) or {}
+        async def slow(fn, *a, **kw): await asyncio.sleep(0.01); return fn(*a, **kw)     # a real REST call yields: both callers are inside at once
+        cy.rest = slow
+        async def both(): await asyncio.gather(bk.drop_preset(), bk.drop_preset())
+        asyncio.run(both())
+        self.assertEqual(calls, ["S-1"]); self.assertIsNone(bk.preset_plan); self.assertEqual(kinds(cy).count("PRESET_DROPPED"), 1)
+
     def test_the_exchange_saying_there_is_no_position_asks_for_a_resync_instead_of_escalating(self):
         """43023: our lots are stale, so there is nothing to protect and nothing to market-close. Counting it as a stop failure
         drove a 3/s STOP_SET_FAIL -> STOP_FAILED loop that HALTed the book (EGLD 2026-09-03 20:30, audit NEXT 17e)."""

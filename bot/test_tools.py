@@ -251,5 +251,15 @@ class SelectorCounterfactual(unittest.TestCase):
         self.assertIsNone(campaign(SC2, "A", 0, "long", cfg, 10.0, 12.0))
         self.assertIsNone(campaign(SC2, "A", 0, "long", cfg, 10.0, 0.05))   # horizon shorter than one scan
 
+    def test_the_stop_distance_follows_the_live_geometry_per_entry_row(self):
+        """A fixed -10% stop measured a coin whose live stop sits 30 x ATR1m = 40% away as if it were four times tighter (audit 2026-09-04:
+        the >= 1.30 ATR bucket read p 21% that way). The default is the live geometry: max(cap_frac/unit_frac, cap_min_atr x ATR1m)."""
+        from bot.campaigns import stop_pct
+        prof = dict(cap_frac=0.1, unit_frac=1.5, cap_min_atr=15, cap_per_unit=1)
+        self.assertAlmostEqual(stop_pct(dict(atr_pct=0.30), prof), 100 / 15, 6)      # 15 x 0.30% = 4.5% sits under the 6.7% money distance: the money binds
+        self.assertAlmostEqual(stop_pct(dict(atr_pct=1.30), prof), 19.5, 6)          # 15 x 1.30%: the ATR floor binds
+        self.assertEqual(stop_pct(dict(atr_pct=1.30), prof, 10.0), 10.0)             # --stop N stays a fixed number
+        self.assertEqual(stop_pct(dict(atr_pct=None), dict(cap_frac=0, unit_frac=0)), 10.0)   # no geometry at all: the old default
+
 if __name__ == "__main__":
     unittest.main()

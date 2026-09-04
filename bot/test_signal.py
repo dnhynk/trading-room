@@ -713,6 +713,20 @@ class ExitMode(unittest.TestCase):
         st, pos = self._st(); st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertEqual(st.exit_t, 100)
         pos["lots"] = []; st.step(F(t=101, mid=2.9, bid=2.899, ask=2.901), [], pos); self.assertIsNone(st.exit_t)
 
+    def test_a_retrace_top_after_the_flag_sells_everything_whatever_the_cost(self):
+        """RULES: "다음 정체 또는 되돌림 고점에서 원가 무관하게 전량". The cost-gated retrace_top never exists under water, so before this
+        (audit 2026-09-04) only a stall or the floor could end the book. The bounce is counted from the flag on: no bounce, no top."""
+        st, pos = self._st()
+        st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos)                                      # armed 2.5% under the average
+        r = st.step(F(t=110, mid=2.88, bid=2.879, ask=2.881), [], pos); self.assertIsNone(r["trim"])    # a new low after the flag: the trough, no bounce yet
+        r = st.step(F(t=120, mid=2.93, bid=2.929, ask=2.931), [], pos); self.assertIsNone(r["trim"])    # the bounce (+1.7%, still under every cost): its peak
+        r = st.step(F(t=130, mid=2.91, bid=2.909, ask=2.911), [], pos)                                  # back 0.02 = 1 x ATR and 40% of the bounce: the top is in
+        ev = [e for e in r["events"] if e[0] == "PULL_TRIM" and e[1]["mode"] == "exit"]
+        self.assertEqual([e[1]["path"] for e in ev], ["retrace"]); self.assertEqual(r["trim"], (2.911, 140, "maker", None))
+        st, pos = self._st()                                                                             # a giveback under the rule's size is a wiggle, not a top
+        st.step(F(t=100, mid=2.9, bid=2.899, ask=2.901), [], pos); st.step(F(t=120, mid=2.93, bid=2.929, ask=2.931), [], pos)
+        r = st.step(F(t=130, mid=2.925, bid=2.924, ask=2.926), [], pos); self.assertIsNone(r["trim"])
+
 class StopLock(unittest.TestCase):
     """stop_lock_atr / stop_trail_atr (2026-09-03, hunt profile): a gain beyond noise never becomes a loss — the exchange stop rises to
     breakeven once the best mid is lock x ATR15 past the average, trails the best mid at trail x ATR15 when tighter, and never loosens."""

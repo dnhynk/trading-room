@@ -386,6 +386,8 @@ class Book:
         if self.mode == "dry":
             self.stop = dict(px=px, order_id=None); self.ev("STOP_SET", px=px); return
         if self.stop and self.stop.get("order_id"):
+            if abs(px - self.stop["px"]) < self.cy.px_tick / 2: return   # already there: the caller checked before taking the lock and the stop was placed meanwhile (a fill's
+            #                                                              reconcile and ensure_stop raced — MAGMA 2026-09-04 14:20:10 logged one plan id twice); a same-price modify is a wasted call
             # an existing stop is never cancelled by the script: if modify fails (any error) the old, valid stop stays and the agent is told;
             # modify failures never count toward the no-stop escalation
             try:
@@ -463,13 +465,17 @@ class Book:
 
     async def drop_preset(self):
         """Cancel the entry order's preset stop once the whole-position pos_loss is registered (never before). The id is kept until
-        the exchange confirms; a failure is retried from housekeeping."""
-        pid = self.preset_plan; self.preset_retry_t = time.time()
+        the exchange confirms; a failure is retried from housekeeping. One cancel in flight per id: on_algo (the preset going live, the
+        pos_loss going live) and housekeeping all call this, and two of them awaiting the same REST cancel sent it twice (MAGMA 2026-09-04 14:42:02)."""
+        pid = self.preset_plan
+        if not pid or getattr(self, "preset_busy", None) == pid: return
+        self.preset_busy, self.preset_retry_t = pid, time.time()
         try:
             r = await self.cy.rest(self.cy.b.cancel_plan, self.symbol, pid, "loss_plan")
             if (r or {}).get("failureList"): self.ev("PRESET_DROP_FAIL", order_id=pid, err=str(r["failureList"])[:120]); return
             self.preset_plan = None; self.ev("PRESET_DROPPED", order_id=pid)
         except Exception as e: self.ev("PRESET_DROP_FAIL", order_id=pid, err=str(e)[:120])
+        finally: self.preset_busy = None
 
     async def emergency_close(self, why):
         """Market-close our lots now — after every resting order is confirmed gone (a resting close order freezes quantity that a

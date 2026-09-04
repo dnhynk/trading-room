@@ -661,6 +661,7 @@ class Strategy:
         self.arm_filled = 0.0    # quantity filled against the current arm (progress is per order, not net position)
         self.derisk_armed, self.last_qty = False, 0.0
         self.exit_t = self.exit_ref = None   # when the exit flag was first seen with a position, and the mid then (the taker floor's reference)
+        self.exit_trough = self.exit_peak = None   # the bounce AFTER the flag: its worst mid, and the best mid since that worst — the exit's retrace top, whatever the cost
         self.brk_seen = False    # a break against the side fired while the book held a position: de-risk evidence must postdate the campaign
         self.regime, self.rg_cand, self.rg_pend, self.rg_t = "TWO_WAY", "TWO_WAY", 0, None
 
@@ -851,19 +852,27 @@ class Strategy:
             if p.get("exit"):                                                              # the book is leaving (the premise broke — hunt: the phase turned): the WHOLE position
                 if self.exit_t is None:                                                    # sells into the next stall or retrace top whatever the cost; a floor under "되돌림":
                     self.exit_t, self.exit_ref = t, mid                                    # no stall within exit_after_s, or exit_atr x ATR further against us: taker now
+                    self.exit_trough = self.exit_peak = mid
                     ev.append(("EXIT_ARMED", dict(mid=mid, qty=qty, after_s=p["exit_after_s"], atr=p["exit_atr"])))
+                # the retrace top the exit sells into is the NEXT bounce's, counted from the flag on and without the cost gate (RULES: "되돌림 고점에서
+                # 원가 무관하게 전량"; audit 2026-09-04 — `retrace_top` above needs the peak to have cleared the lot's gate, so under water only a stall or
+                # the floor could ever end the book): the worst mid since the flag, the best mid since that worst, and the usual giveback from it
+                if s * (mid - self.exit_trough) < 0: self.exit_trough = self.exit_peak = mid
+                elif s * (mid - self.exit_peak) > 0: self.exit_peak = mid
+                bounce = s * (self.exit_peak - self.exit_trough)
+                retrace_exit = bool(atr) and p["trim_retrace_atr"] > 0 and bounce > 0 and s * (self.exit_peak - mid) >= max(p["trim_retrace_atr"] * atr, p["retrace_frac"] * bounce)
                 adverse = bool(atr) and s * (self.exit_ref - mid) >= p["exit_atr"] * atr
                 late = t - self.exit_t >= p["exit_after_s"]
-                if (trim_sig in names or retrace_top) and not (self.pull and self.pull.get("exit")):
+                if (trim_sig in names or retrace_top or retrace_exit) and not (self.pull and self.pull.get("exit")):
                     self.pull = dict(t=t, qty=qty, target=0.0, gate=-1e9, ref=avg, px0=touch_out, lot=None, exit=True)
                     ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=avg, qty=qty, all=True, px=touch_out, mode="exit",
-                                                 path="stall" if trim_sig in names else "retrace", lot=None, peak=self.peak)))
+                                                 path="stall" if trim_sig in names else "retrace", lot=None, peak=self.exit_peak if retrace_exit else self.peak)))
                 elif (late or adverse) and not (self.pull and self.pull.get("exit") and self.pull.get("floor")):
                     self.pull = dict(t=t - p["trim_taker_after_s"], qty=qty, target=0.0, gate=-1e9, ref=avg, px0=touch_in, lot=None, exit=True, floor=True)   # backdated: taker at once
                     ev.append(("PULL_TRIM", dict(dev=round(dev, 2), dev_lot=round(dev_lot, 2), ref=avg, qty=qty, all=True, px=touch_in, mode="exit_taker",
                                                  path="timeout" if late else "adverse", lot=None, peak=self.peak)))
             else:
-                self.exit_t = self.exit_ref = None
+                self.exit_t = self.exit_ref = self.exit_trough = self.exit_peak = None
                 if self.pull and self.pull.get('exit'):        # the read came back to our side before the book was flat (hunt's HUNT_RESUME): a standing "sell everything at
                     ev.append(("PULL_DROP", dict(why="exit_off", dev_lot=round(dev_lot, 2)))); self.pull = None   # any price" order outlives its reason otherwise (gate -1e9 never drops it)
             if self.pull:
@@ -885,7 +894,7 @@ class Strategy:
         # stop: the exchange stop is the money cap alone (disaster bound, hunt-proof by distance); the structural level (the campaign's
         # premise, frozen at open, ratchets in FAVOR) is soft — beyond it the engine de-risks into bounces instead of a market stop (B)
         stop = None
-        if not qty: self.struct_stop = self.stop_px = self.best = self.blow_base = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = None
+        if not qty: self.struct_stop = self.stop_px = self.best = self.blow_base = None; self.prem_broken = self.struct_skip = False; self.fail_n = 0; self.gate_eff = None; self.arm_filled = self.arm_filled if self.arm else 0.0; self.exit_t = self.exit_ref = self.exit_trough = self.exit_peak = None
         else:
             # cap_per_unit (트랙 B, CONCEPT-B "스탑의 두 층"): 0 = 한 캠페인의 돈 한도를 수량으로 나눈다 — 유닛이 늘수록 가격에서 조여지고,
             # 그 조임이 캠페인당 스탑 확률을 사다리 깊이에 종속시켰다(1유닛 3.4% / 2유닛 9.5% / 3유닛 55%, 손익분기 ~10.5%).

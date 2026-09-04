@@ -261,17 +261,22 @@ def ai_read(rows, hunt, log=log, held=()):
         with ThreadPoolExecutor(max_workers=runs) as ex: got = list(ex.map(one, range(1, runs + 1)))
     ok = [g for g in got if g]
     if not ok: log("hunt: ai_read produced nothing - keeping the deterministic read"); return {}
-    reads = {}
+    det = {r["symbol"]: r.get("phase") for r in rows}      # the rule reader's phase — still what the row carries at this point
+    reads = {}; ties = 0
     for sym in want:
         votes = [g[sym] for g in ok if sym in g]
         if not votes: continue
-        c = Counter(v[0] for v in votes); ph, n_ph = c.most_common(1)[0]
+        c = Counter(v[0] for v in votes); mc = c.most_common(); tied = [x for x, n in mc if n == mc[0][1]]
+        # a tie is no majority (1:1:1 of three runs, 1:1 of two): the rule reader breaks it when its phase is one of the tied answers, else
+        # the first run stands (user decision 2026-09-04; the run order alone decided before — 11 of 688 rows that day, ai_agree 1/3)
+        ph = det.get(sym) if len(tied) > 1 and det.get(sym) in tied else tied[0]; n_ph = c[ph]
+        if len(tied) > 1: ties += 1
         confs = [v[1] for v in votes if v[0] == ph and isinstance(v[1], (int, float))]
         why = next(v[2] for v in votes if v[0] == ph)
         reads[sym] = (ph, round(sum(confs) / len(confs)) if confs else None, why, n_ph, len(votes))   # 합의 n/N 이 실측 신뢰도다
     split = sum(1 for v in reads.values() if v[3] < v[4])
     log(f"hunt: ai_read {len(reads)}/{len(rows)} coins from {len(ok)}/{len(got)} runs, "
-        f"{sum(1 for r in rows if reads.get(r['symbol'], (None,))[0] != r.get('phase'))} disagree, {split} split")
+        f"{sum(1 for r in rows if reads.get(r['symbol'], (None,))[0] != r.get('phase'))} disagree, {split} split, {ties} tied")
     return reads
 
 def scan(hunt, held=(), st=None, b=None, log=log):
@@ -382,8 +387,10 @@ def verdict(rows, books, hunt, st, now):
     if resume: add = None                                                   # the book stays: nothing replaces it this scan
     return dict(refuse=None, cur=cur, wind=wind, add=add, top=top, resume=resume)
 
-def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still", "hold:"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
-#                                                                                      hurts and there is no hurry — leave gently (stalls above cost, or the cap)
+def _illiquid(why): return any(k in (why or "") for k in ("dead", "vol", "still", "hold:", "fund"))   # volume gone, or the coin stopped moving: dumping into a book with nothing in it
+#                                                                                      hurts and there is no hurry — leave gently (stalls above cost, or the cap).
+#   `fund` (2026-09-04, user): a funding tax is a slow bleed, not a broken premise — stop adding, sell into stalls above cost, no cooldown
+#   (not in _leave_coin), and HUNT_RESUME undoes it when the rate comes back. Before this it took the phase-flip branch: exit=1, taker within 10 min.
 def _leave_coin(why): return any(k in (why or "") for k in ("dead", "vol", "flat", "quiet"))   # the episode is over or the coin went quiet: cool down, chase a different one.
 #   `still` is deliberately NOT here (2026-09-04): a coin that stopped moving has not ended its episode, it went quiet for an hour — banishing
 #   it for cooldown_h on one soft ATR reading is the wrong price for a floor that sits only ~18% under the lowest ATR we have actually held
@@ -417,11 +424,13 @@ def apply(p, rows, v, flats, hunt, st, now, recent=()):
             del books[s]
             if _leave_coin(why): st.setdefault("cool", {})[s] = now + float(hunt["cooldown_h"]) * 3600
             st.get("held", {}).pop(s, None); acts.append(("drop", s, f"flat ({why or 'replaced'})"))
+            for k in ("xstreak", "rstreak"): st.get(k, {}).pop(s, None)         # the streaks are a campaign's, not a coin's
         sym, side = add; r = by[sym]
         books[sym] = {"wallet_frac": 1.0, "sides": [side], "hunt": 1, **(hunt.get("strat") or {})}   # the track's risk profile rides on the book, not on params.strat
         if side == "long" and float(hunt.get("blowoff_atr") or 0) > 0:               # the standing blow-off target, long books only (the basket never sees it)
             books[sym].update(blowoff_atr=float(hunt["blowoff_atr"]), blowoff_frac=float(hunt.get("blowoff_frac") or 1.0))
         st.setdefault("held", {})[sym] = dict(peak=r.get("qv_shape") or r["qv"], climax=r.get("high48"), side=side, t=now); st["streak"] = {}
+        for k in ("xstreak", "rstreak"): st.get(k, {}).pop(sym, None)           # a stale count from an earlier campaign would end a re-added coin on its first flagged scan once exit_confirm > 1
         acts.append(("add", sym, f"{side} phase {r.get('phase')} votes {' '.join(r.get('votes') or [])} ratio {r['ratio']}x run {r.get('run')}% off {r.get('off')}% twoway {r.get('twoway24')} atr {r.get('atr_pct')} fund {r['fund']}"))
     prof = hunt.get("strat") or {}                                          # the risk profile rides on EVERY hunt book, not only on the one being created: a profile edit
     for s, bk in books.items():                                             # reaches the live book on the next scan (the engine hot-reloads; reductions apply at once — RULES
@@ -490,10 +499,10 @@ def main():
                 else:
                     before = json.dumps(p, sort_keys=True)
                     acts = apply(p, rows, v, flats, hunt, st, now, recent=recent_engines(load_states(), now))
-                    if json.dumps(p, sort_keys=True) != before: write_json(PARAMS, p, indent=2)
+                    write_json(os.path.join(LOGS, "hunt-state.json"), st)          # state BEFORE params: a crash between the two writes must not leave a live book without
+                    if json.dumps(p, sort_keys=True) != before: write_json(PARAMS, p, indent=2)   # its held state (climax / peak = the newhigh and dead exits); the other order only re-confirms the candidate
                     for kind, sym, detail in acts:
                         ev(ALERT[kind], alert=True, symbol=sym, why=detail, books={s: (b.get("sides") or [None])[0] for s, b in (p.get("books") or {}).items()})
-                    write_json(os.path.join(LOGS, "hunt-state.json"), st)
             else:
                 log(f"hunt: report only ({'--dry' if dry else 'hunt.on=0'}); would: wind={v['wind']} add={v['add']} top={v['top']}")
         if once: break
