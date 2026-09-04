@@ -490,6 +490,7 @@ def main():
             ev("HUNT", on=int(bool(hunt.get("on"))), dry=dry, held=held, flat={s: flats.get(s) for s in held}, cur=v["cur"], wind=v["wind"], add=v["add"], top=v["top"],
                refuse=v["refuse"], streak=st.get("streak"), xstreak={s: st.get("xstreak", {}).get(s) for s in held},
                phases={r["symbol"]: [r.get("phase"), r.get("votes")] for r in rows if r.get("phase") not in ("shallow", None)}, took_s=int(now - t0),
+               det={r["symbol"]: r.get("phase_det") for r in rows if r.get("phase_det") and r.get("phase_det") != r.get("phase")},   # the rule reader's phase where the AI overrode it (votes above are the rule reader's)
                rows=[[r["symbol"], r.get("phase"), r.get("side"), r["ratio"], r.get("run"), r.get("off"), r.get("twoway24"), r.get("atr_pct"), r["fund"], r.get("hint15"), " ".join(r["flags"])] for r in rows[:8]])
             if v["refuse"]: log(f"hunt: {v['refuse']}")
             elif owner:

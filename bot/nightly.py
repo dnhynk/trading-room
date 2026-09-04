@@ -69,7 +69,10 @@ def report(day):
             bsides = ",".join(((load_params() or {}).get("books") or {}).get(sym, {}).get("sides") or ["long", "short"])
             own = base if bsides == "long,short" else _metrics((run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", bsides]).strip().split("\n") or [""])[-1])
             for label, ov in (("entry quality off (every stall opens, adds whole)", ["--strat", "entry_v=0", "--strat", "entry_flow=0", "--strat", "entry_decay=0", "--strat", "add_mult=0"]),
-                              ("entry quality without decay", ["--strat", "entry_decay=0"])):
+                              ("entry quality without decay", ["--strat", "entry_decay=0"]),
+                              # the random baseline (NEXT 19): the gate off but 85% of entries vetoed at random, three seeds - a gate that only
+                              # trades less lands inside these; a gate that reads something lands under them on stops / drawdown
+                              *((f"random veto 85% seed {k}", ["--strat", "entry_v=0", "--strat", "entry_flow=0", "--strat", "entry_decay=0", "--strat", "add_mult=0", "--strat", "entry_random=0.85", "--strat", f"entry_seed={k}"]) for k in (1, 2, 3))):
                 line = (run_cmd(["bot.backtest"] + files + ["--sym", sym, "--sides", bsides] + ov).strip().split("\n") or [""])[-1]
                 out.append(f"counterfactual {label} ({bsides}): {_vs(own, line)}" + line)
             for fol in ("15m", "brk"):                   # side automation counterfactuals: one side at a time, flipped at flat by the 15m structure / the last volume break

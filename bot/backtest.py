@@ -159,7 +159,7 @@ class Book:
         self.strat = Strategy(bp, feat.p); self.side, self.s = side, (1 if side == "long" else -1)   # same per-side budget split as live
         self.pos = dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, halt=None, pause=False)
         self.work, self.replaced, self.stop = dict(buy=None, trim=None), dict(buy=-1e9, trim=-1e9), None
-        self.realized = self.day_realized = self.upl = 0.0; self.cycles = self.adds = self.stops = self.stops_today = 0; self.taker_t = -1e9; self.seq = 0
+        self.realized = self.day_realized = self.upl = 0.0; self.cycles = self.adds = self.campaigns = self.stops = self.stops_today = 0; self.taker_t = -1e9; self.seq = 0
 
 class Engine:
     def __init__(self, sig=None, strat=None, qstep=0.1, sides=None, follow=None):
@@ -185,7 +185,9 @@ class Engine:
         n0 = len(bk.pos["lots"])
         pnl = apply_fill(bk.pos, bk.s, role == "buy", qty, px, oid=oid, fee=fee, lot=lot); bk.realized += pnl; bk.day_realized += pnl; bk.strat.on_fill(role, qty)
         w = bk.work[role]
-        if role == "buy": bk.adds += 0 if (w and w["oid"] == oid and w["filled"] > 0) else 1   # an add = an order that filled, not each partial print (recon compares with live clientOids)
+        if role == "buy":
+            bk.adds += 0 if (w and w["oid"] == oid and w["filled"] > 0) else 1   # an add = an order that filled, not each partial print (recon compares with live clientOids)
+            if n0 == 0: bk.campaigns += 1                                    # a campaign = a first unit from flat (the stop-rate denominator, NEXT 14)
         else: bk.cycles += max(n0 - len(bk.pos["lots"]), 0)        # a cycle = a lot bought and sold out, however many fills the selling took
         if w and w["oid"] == oid:
             w["filled"] += qty
@@ -328,10 +330,10 @@ class Engine:
         per = {}
         for sd, bk in self.books.items():
             qty, avg = pos_stats(bk.pos)
-            per[sd] = dict(pnl=round(bk.realized, 3), open_pnl=round(bk.upl, 3), cycles=bk.cycles, adds=bk.adds, stops=bk.stops, end_qty=qty, end_avg=avg, halt=bk.pos["halt"])
+            per[sd] = dict(pnl=round(bk.realized, 3), open_pnl=round(bk.upl, 3), cycles=bk.cycles, adds=bk.adds, campaigns=bk.campaigns, stops=bk.stops, end_qty=qty, end_avg=avg, halt=bk.pos["halt"])
         tot = sum(v["pnl"] for v in per.values()); opn = sum(v["open_pnl"] for v in per.values())
         return dict(pnl=round(tot, 3), open_pnl=round(opn, 3), total=round(tot + opn, 3), cycles=sum(v["cycles"] for v in per.values()),
-                    adds=sum(v["adds"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
+                    adds=sum(v["adds"] for v in per.values()), campaigns=sum(v["campaigns"] for v in per.values()), stops=sum(v["stops"] for v in per.values()), max_dd=round(self.max_dd, 3),
                     in_mkt=round(self.in_mkt / max(self.n, 1), 3), seconds=self.n, sides=per, fills=sum(1 for e in self.events if e[1] == "FILL"),
                     by_hint={k: round(v, 3) for k, v in sorted(self.by_hint.items())},
                     follow=dict(hint=self.follow, flips=self.flips, share={k: round(v / max(self.n, 1), 3) for k, v in self.active_s.items()}) if self.follow else None,

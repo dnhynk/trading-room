@@ -43,6 +43,7 @@ QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
 SLIP = 0.0005          # dry-mode stop-out slippage
 REJECT_RETRY_S = 5.0   # an explicit exchange rejection is known-not-placed; throttle persistent reduce desires and stale decisions
+LIVE_ZERO = ("entry_random",)   # measurement-only strat keys (the random-veto baseline of the entry grid): a live book must not carry them - the file is rejected as PARAMS_INVALID
 
 
 def rnd(x): return round(x, 6) if isinstance(x, float) else x
@@ -706,7 +707,7 @@ class Cycle:
         os.makedirs(LOGS, exist_ok=True); self.feat = Features()      # defaults first, so an invalid file can still be reported through ev()
         if outside_books(self.p, self.symbol):        # books 가 진실이다: 그 밖의 계약은 아무도 소유하지 않고 지갑 몫도 없다(주문 하나 내기 전에 나간다)
             self.ev("EXIT", why=f"{self.symbol} is not in params.books {sorted(self.p['books'])}"); os._exit(0)
-        bad = valid_params(sp, self.p.get("sig") or {})
+        bad = valid_params(sp, self.p.get("sig") or {}) + ([k for k in LIVE_ZERO if sp.get(k)] if self.mode == "live" else [])
         if bad or any(sd not in ("long", "short") for sd in self.sides) or len(set(self.sides)) != len(self.sides) or self.mode not in ("dry", "live"):
             self.ev("EXIT", why=f"invalid params at start: {bad or [self.sides, self.mode]}"); os._exit(1)
         self.feat = Features(self.p.get("sig"))
@@ -947,7 +948,7 @@ class Cycle:
         self.pmtime = m; p = load_params()
         if p is None: self.ev("PARAMS_INVALID", msg="unreadable json; keeping previous"); return
         sp = strat_for(p, self.want); sides = list(sp.get("sides") or [sp["side"]]); sig = p.get("sig") or {}
-        bad = valid_params(sp, sig)
+        bad = valid_params(sp, sig) + ([k for k in LIVE_ZERO if sp.get(k)] if sp.get("mode", "dry") == "live" else [])
         if bad or any(sd not in ("long", "short") for sd in sides) or len(set(sides)) != len(sides) or sp.get("mode", "dry") not in ("dry", "live") or not isinstance(sp.get("symbol"), str):
             self.ev("PARAMS_INVALID", msg=f"bad keys {bad or [sides, sp.get('mode'), sp.get('symbol')]}; keeping previous"); return
         new = [sp["symbol"], sides, sp.get("mode", "dry")]
