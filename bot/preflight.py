@@ -26,10 +26,16 @@ def main():
         # 설계된 과도기다(자본을 덜 쓸 뿐 위험하지 않다). 위험한 것은 초과뿐이라 그것만 FAIL 이다.
         n = int((p.get("select") or {}).get("n") or len(syms))
         wf = {s: strat_for(p, s).get("wallet_frac", 1.0) for s in syms}
-        tot = sum(wf.values())
-        rep("FAIL" if tot > 1.0 + 1e-9 else "PASS", f"portfolio {len(syms)}/{n} symbols, wallet_frac {wf} sums to {tot:.3f}"
-            + (" -> the wallet is OVER-committed" if tot > 1.0 + 1e-9 else
-               f" (empty slots: {n - len(syms)}, so {1 - tot:.0%} of the wallet is idle by design)" if tot < 1.0 - 1e-9 else ""))
+        tot = sum(wf.values()); cap = int((p.get("hunt") or {}).get("pool") or 0) if (p.get("hunt") or {}).get("on") else 0
+        if cap:
+            # 트랙 B 바구니(RULES 트랙 B 절, 2026-09-04): 책마다 wallet_frac 1/cap 이고 동시 노출을 cap 개의 캠페인으로 묶는 것은 엔진의 자본 풀
+            # (cycle.Pool)이다 — 합이 1 을 넘는 것이 설계다. 위험한 것은 한 책이 자기 몫(1/cap)을 넘는 것뿐이다.
+            over = {s: f for s, f in wf.items() if f > 1.0 / cap + 1e-9}
+            rep("FAIL" if over else "PASS", f"hunt basket {len(syms)} books under pool cap {cap}: wallet_frac {wf}" + (f" -> {over} exceed 1/{cap}" if over else f" (each <= 1/{cap}; exposure = {cap} campaign(s) at once, bounded by logs/pool.json)"))
+        else:
+            rep("FAIL" if tot > 1.0 + 1e-9 else "PASS", f"portfolio {len(syms)}/{n} symbols, wallet_frac {wf} sums to {tot:.3f}"
+                + (" -> the wallet is OVER-committed" if tot > 1.0 + 1e-9 else
+                   f" (empty slots: {n - len(syms)}, so {1 - tot:.0%} of the wallet is idle by design)" if tot < 1.0 - 1e-9 else ""))
     all_pos = b.positions()
     for sym in syms:                                    # 심볼마다: 파라미터·계약·상태·거래소 대조·대기 주문
         sp = strat_for(p, sym); sides = list(sp.get("sides") or [sp["side"]])
