@@ -571,6 +571,10 @@ class CapitalPool(unittest.TestCase):
         b.refreshed = 0.0; b.tend(positioned=True, armed=False)
         self.assertGreater(self.claims()["BUSDT"]["t"], time.time() - 5)                   # a held lease is refreshed
 
+    def test_the_live_construction_reads_the_engines_state_files_by_default(self):
+        p = cycle.Pool("XUSDT", path=self.path)                                          # no states argument, as Cycle builds it (18:30:44 crash: the name was not imported)
+        self.assertIs(p.states, cycle.load_states); self.assertIsInstance(p.day_loss(), float)
+
     def test_the_days_loss_across_every_book_refuses_new_campaigns(self):
         day = time.strftime("%Y-%m-%d", time.gmtime())
         states = lambda: {"XUSDT": dict(day=day, books=dict(short=dict(realized=-40.0))), "YUSDT": dict(day=day, books=dict(long=dict(realized=-25.0))),
