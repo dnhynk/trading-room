@@ -22,7 +22,7 @@ merely going still (ATR floor) — an episode death or a coin that cooled off it
 Rank among the eligible = 1h two-way path (churn) — the order of the overflow (and of the single slot without a pool), never a reason to replace a holding.
 Events: HUNT (every scan) in logs/events.jsonl; HUNT_ADD / HUNT_WIND_DOWN / HUNT_DROP / HUNT_BLOCKED also in logs/alerts.jsonl.
 State (streaks, cooldowns, the held coin's side / peak volume / climax high / exit reason) in logs/hunt-state.json."""
-import json, os, statistics, subprocess, sys, time
+import json, math, os, statistics, subprocess, sys, time
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import Bitget
@@ -35,8 +35,9 @@ from bot.ws import load_params, PARAMS, load_states
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
 HUNT = dict(on=0,                # 1: this job owns params.books (bot.select stopped); 0: report only, never writes params or state
-            every_min=10, confirm=2, exit_confirm=1, long_on=1, short_on=1,   # opening risk waits `confirm` scans; leaving is fast (`exit_confirm`, CONCEPT: the
-            #                                                                   risk-opening side bears the higher bar). Scan often — the churn we eat is minutes-scale
+            every_min=15, confirm=2, exit_confirm=1, long_on=1, short_on=1,   # opening risk waits `confirm` scans; leaving is fast (`exit_confirm`, CONCEPT: the
+            #                                                                   risk-opening side bears the higher bar). Scans start SCAN_OFFSET_S after each 15m close
+            #                                                                   (next_scan_t): the phase is read from closed 15m bars, so a scan is worth what it sees fresh
             quiet_frac=0.5,      # leave when the last-24h two-way path falls under this share of the peak seen while held: the action left THIS coin, chase a hotter one
             require_spot=1,      # a candidate must have a SPOT market (Bitget or Binance): a perp-only pump is a pure liquidation harvest that can vanish in an hour
             #                      (AKE, USELESS: no spot anywhere; 강고양이 picked STO over NOM for its spot liquidity; user approved 2026-09-03)
@@ -78,6 +79,15 @@ HUNT = dict(on=0,                # 1: this job owns params.books (bot.select sto
             cooldown_h=24, exclude=["BTCUSDT"], record_top=3,
             min_hours=6)         # closed 1H bars a coin needs to be read (a listing a few hours old)
 BOOK_KEYS = ("wallet_frac", "sides", "hunt", "wind_down", "exit", "blowoff_atr", "blowoff_frac")   # a hunt book = these + the risk profile (hunt.strat), nothing else
+SCAN_OFFSET_S = 75   # a scan starts this long after the period boundary: the 15m candle has closed and REST serves it (a close takes a few seconds to appear)
+
+def next_scan_t(now, period_s, offset_s=SCAN_OFFSET_S):
+    """The next scan start: the period grid on the UTC epoch (900 s = :00 / :15 / :30 / :45) plus the offset. The scan reads CLOSED bars — the
+    phase from the last 15m close — so what a scan is worth is not how often it runs but how soon after a close it runs and whether two scans
+    ever read the same bar. The unaligned 10-min scan sat a mean 7.6 min after the last close (max 14.3) and 37% of consecutive scans read the
+    same 15m bar, where the AI still changed 12.1% of its labels against the rule reader's 0% — dice, not information (2026-09-04, 93 scans;
+    user: "정렬"). Aligned: 1.3 min after every close, every consecutive pair a new bar, a third fewer AI calls."""
+    return (math.floor((now - offset_s) / period_s) + 1) * period_s + offset_s
 
 def _pct(a, b): return (a / b - 1) * 100 if b else 0.0
 
@@ -530,7 +540,7 @@ def main():
             else:
                 log(f"hunt: report only ({'--dry' if dry else 'hunt.on=0'}); would: winds={v['winds']} adds={v['adds']} top={v['top']}")
         if once: break
-        time.sleep(max(60, float(hunt["every_min"]) * 60 - (time.time() - t0)))
+        time.sleep(max(60, next_scan_t(time.time(), float(hunt["every_min"]) * 60) - time.time()))   # the first scan runs at start; the rest sit on the bar clock
 
 if __name__ == "__main__":
     main()

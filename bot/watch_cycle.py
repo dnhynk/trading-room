@@ -32,7 +32,7 @@ def selector_age():
     from bot.ws import load_params
     p = load_params() or {}
     if not (p.get("hunt") or {}).get("on"): return None
-    every = float((p.get("hunt") or {}).get("every_min") or 10)
+    every = float((p.get("hunt") or {}).get("every_min") or 15)
     try: age = time.time() - os.path.getmtime(os.path.join(LOGS, "hunt.json"))
     except OSError: return (None, every)
     return (age, every)

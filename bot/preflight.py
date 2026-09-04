@@ -86,7 +86,7 @@ def main():
         try: pid, alive = alive_pid("select")
         except Exception: alive = False
         rep("FAIL" if alive else "PASS", f"hunt mode: bot.select {'is RUNNING — two writers of params.books' if alive else 'stopped'}")
-        every = float((p.get("hunt") or {}).get("every_min") or 10)   # a hung selector writes no event, so only its silence shows it:
+        every = float((p.get("hunt") or {}).get("every_min") or 15)   # a hung selector writes no event, so only its silence shows it:
         try: age = time.time() - os.path.getmtime(os.path.join(LOGS, "hunt.json"))   # nothing can write a phase exit and the exchange
         except OSError: age = None                                                  # stop is all that is left (audit NEXT 17c)
         rep("PASS" if age is not None and age <= every * 60 * 3 else "FAIL",

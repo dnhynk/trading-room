@@ -403,6 +403,18 @@ class AiOnlyExit(unittest.TestCase):
         v = verdict([row("A", "distribution", phase_det="unknown", atr_pct=0.2)], self.bk, HUNT, self.held(), 1000.0)
         self.assertEqual(v["winds"], [("A", "still0.2,hold:distribution")])                                    # a measured flag beside it: one scan, as before
 
+class ScanClock(unittest.TestCase):
+    """Scans sit on the bar clock: the period grid plus SCAN_OFFSET_S after each close (user 2026-09-04 "정렬"): the phase comes from closed 15m
+    bars, so an unaligned scan only added latency (mean 7.6 min after the close) and same-bar re-reads (37%, where the AI flipped 12% on dice)."""
+    def test_the_next_scan_is_the_next_grid_slot_after_now(self):
+        from bot.hunt import next_scan_t, SCAN_OFFSET_S
+        b = 1_788_500_000 - 1_788_500_000 % 900                                 # a 15-minute boundary
+        self.assertEqual(next_scan_t(b + 10, 900), b + SCAN_OFFSET_S)           # just after the close: this period's slot
+        self.assertEqual(next_scan_t(b + 100, 900), b + 900 + SCAN_OFFSET_S)    # past the slot: the next close's
+        self.assertEqual(next_scan_t(b + 899, 900), b + 900 + SCAN_OFFSET_S)
+        self.assertEqual(next_scan_t(b + SCAN_OFFSET_S, 900), b + 900 + SCAN_OFFSET_S)   # exactly on the slot: the next one, never a zero wait
+        self.assertEqual(next_scan_t(b + 100, 600), b + 600 + SCAN_OFFSET_S)    # another period aligns to its own grid
+
 class TheOtherWriter(unittest.TestCase):
     """pid_alive gates the only write of params.books, so both of its errors must be the safe one."""
     def setUp(self):
