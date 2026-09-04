@@ -186,6 +186,24 @@ Answer with ONE line of JSON and nothing else:
 {"reads":[{"symbol":"X","phase":"<one of the phases>","conf":0-100,"why":"<=12 words"}]}
 Every symbol below must appear exactly once."""
 
+def chart_symbols(rows, held=(), limit=0):
+    """Reserve chart slots for holdings, then phase-independent toll passers by churn.
+
+    Phase, side switch and funding flags are deliberately ignored here: AI may change the phase/side and the final toll is recomputed
+    afterwards. Volume, ATR, leverage, spot and two-way-path failures cannot be repaired by that reading, so they do not consume a slot.
+    """
+    limit = max(0, int(limit or 0))
+    if not limit: return []
+    by = {r["symbol"]: r for r in rows}
+    picked = []
+    for sym in held or ():
+        if sym in by and sym not in picked: picked.append(sym)
+    hard = ("vol", "atr", "lever", "twoway")
+    possible = [r for r in rows if r["symbol"] not in picked and not any(f == "nospot" or str(f).startswith(hard) for f in (r.get("flags") or ())) ]
+    possible.sort(key=lambda r: (-(r.get("twoway24") or 0.0), r["symbol"]))
+    picked.extend(r["symbol"] for r in possible)
+    return picked[:limit]
+
 def ai_read(rows, hunt, log=log, held=()):
     """국면을 AI 세션이 다시 읽는다(`codex exec`, 사용자 결정 2026-09-04). 결정론 판독은 `phase_det`/`side_det` 로 남아
     그림자가 된다 — 매 스캔 둘 다 `hunt-history` 에 기록되므로 나중에 "밀려난 쪽이 옳았나" 를 전방 가격으로 계산할 수 있다
@@ -206,7 +224,7 @@ def ai_read(rows, hunt, log=log, held=()):
     shots = []
     if hunt.get("ai_charts"):
         from bot.chart import draw
-        pick = [r["symbol"] for r in rows if not r.get("flags") or r["symbol"] in (held or ())][:int(hunt.get("ai_charts") or 0)]
+        pick = chart_symbols(rows, held, hunt.get("ai_charts"))
         for sym in pick:
             try:
                 f = draw(sym)

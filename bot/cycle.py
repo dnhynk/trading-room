@@ -42,6 +42,7 @@ ALERT = {"HALT", "STOP_HIT", "DAILY_LOSS", "WS_DOWN", "WS_UP", "EXTERNAL_FILL", 
 QUIET = {"PLACE", "CANCEL", "REPLACE", "ARM", "DISARM", "SKIP", "PULL_TRIM", "WS", "STOP_LIQ_GUARD"}   # events.jsonl only, not stdout
 GONE = ("not exist", "does not exist", "already", "finished", "completed")            # exchange says the order is terminal (never a bare "cancel")
 SLIP = 0.0005          # dry-mode stop-out slippage
+REJECT_RETRY_S = 5.0   # an explicit exchange rejection is known-not-placed; throttle persistent reduce desires and stale decisions
 
 
 def rnd(x): return round(x, 6) if isinstance(x, float) else x
@@ -96,6 +97,7 @@ class Book:
         self.pos = dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, halt=None, pause=False)
         self.realized, self.stops_today = 0.0, 0
         self.work, self.replaced = dict(buy=None, trim=None), dict(buy=0.0, trim=0.0)
+        self.place_retry_after = dict(buy=0.0, trim=0.0)
         self.stop, self.stop_fail, self.stop_trig_t, self.preset_plan, self.preset_retry_t = None, 0, 0.0, None, 0.0
         self.exch = dict(total=0.0, avg=None, upl=0.0, mark=None)
         self.mismatch_since, self.lever, self.margin_alert_t, self.taker_t, self.seq = None, None, 0.0, 0.0, 0
@@ -264,8 +266,9 @@ class Book:
             if w and want is not None and abs(want[0] - w["px"]) < self.cy.px_tick / 2 and abs(want[1] - (w["qty"] - w["filled"])) < self.cy.qstep / 2: continue
             if w and (want is None or time.time() - self.replaced[role] >= 1.0):
                 await self.cancel(role); w = self.work[role]
-            if want is not None and w is None: await self.place(role, want[0], want[1], want[3] if role == "trim" and len(want) > 3 else None,
-                                                                want[4] if role == "trim" and len(want) > 4 else None)
+            if want is not None and w is None and time.time() >= self.place_retry_after[role]:
+                await self.place(role, want[0], want[1], want[3] if role == "trim" and len(want) > 3 else None,
+                                 want[4] if role == "trim" and len(want) > 4 else None)
         if qty and d["stop"] is not None:
             px = self.guard(d["stop"], pos_stats(self.pos)[1])
             if self.stop is None or abs(px - self.stop["px"]) >= self.cy.px_tick / 2:
@@ -298,10 +301,15 @@ class Book:
                 w["order_id"] = r.get("orderId"); w["preset_sl"] = sl
             except BitgetError as e:
                 if str(e.code) == "22002": self.no_position(px, e); return   # "No position to close": the reduce-only side is empty, our lots are stale — resync,
-                self.ev("REJECT", role=role, px=px, qty=qty, err=str(e)[:160]); return   # do not re-submit (MUBARAK 2026-09-04 04:50-04:58: a hand close left the
-                #                                                                          standing blow-off order re-placed 205 times, ~1/s, for nine minutes)
+                self.place_retry_after[role] = time.time() + REJECT_RETRY_S
+                self.ev("REJECT", role=role, px=px, qty=qty, err=str(e)[:160])
+                if role == "buy":                                  # a hard entry rejection invalidates this arm (e.g. a hand trade locked the available margin)
+                    self.strat.arm = None; self.strat.arm_filled = 0.0
+                    self.ev("DISARM", why=f"reject:{e.code}")
+                return
             except Exception as e:                           # timeout etc.: the exchange may have accepted it — track it and settle by clientOid
                 w["unconfirmed"] = time.time(); self.ev("PLACE_UNCONFIRMED", role=role, px=px, qty=qty, oid=oid, err=f"{type(e).__name__}: {str(e)[:120]}")
+        self.place_retry_after[role] = 0.0
         self.work[role] = w; self.replaced[role] = time.time()
         self.ev("PLACE", role=role, px=px, qty=qty, oid=oid, queue=w.get("queue"), mid=self.feat.mid)   # mid = arrival price (slippage / impact measurement joins FILL by oid)
 
@@ -421,9 +429,10 @@ class Book:
 
     def fallback_stop(self):
         """A stop level that needs no features: the stop already set (persisted across a restart) or the money cap below the average
-        (over the full unit when the position is smaller — same rule as the Strategy)."""
+        (using the same campaign-vs-unit denominator as the Strategy)."""
         qty, avg = pos_stats(self.pos)
-        return self.guard(self.strat.stop_px if self.strat.stop_px is not None else avg - self.s * self.sp["cap_usdt"] / max(qty, self.sp["unit_qty"]), avg)
+        cap_qty = self.sp["unit_qty"] if self.sp.get("cap_per_unit") else max(qty, self.sp["unit_qty"])
+        return self.guard(self.strat.stop_px if self.strat.stop_px is not None else avg - self.s * self.sp["cap_usdt"] / cap_qty, avg)
 
     def guard(self, px, ref):
         """Liquidation guard: a stop is never left beyond the liquidation price — the exchange's own figure when it is a real price on the

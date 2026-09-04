@@ -1,12 +1,18 @@
 {
   "record": {
-    "CPUSDT": [
+    "MAGMAUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "AKEUSDT": [
+    "APRUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "CPUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -24,30 +30,12 @@
       "ticker",
       "candle1m"
     ],
-    "APRUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "BRUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
-    "MAGMAUSDT": [
-      "trade",
-      "books15",
-      "ticker",
-      "candle1m"
-    ],
     "BTCUSDT": [
       "candle1m"
     ]
   },
   "strat": {
-    "symbol": "CPUSDT",
+    "symbol": "MAGMAUSDT",
     "side": "short",
     "sides": [
       "long",
@@ -100,7 +88,7 @@
     "lever": 10
   },
   "books": {
-    "CPUSDT": {
+    "MAGMAUSDT": {
       "wallet_frac": 1.0,
       "sides": [
         "short"

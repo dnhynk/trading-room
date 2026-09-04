@@ -173,6 +173,35 @@ class Cancels(unittest.TestCase):
         self.assertIn(("cancel", "L2"), cy.b.calls); self.assertIsNotNone(bk.work["buy"]); self.assertTrue(bk.work["buy"]["cancel_pending"])
 
 class Stops(unittest.TestCase):
+    def test_per_unit_cap_is_used_by_the_restart_fallback_too(self):
+        cy, bk = book(lots=[[70, 3.0, "a"], [70, 3.0, "b"], [70, 3.0, "c"]])
+        bk.sp.update(unit_qty=70, cap_usdt=20, cap_per_unit=1)
+        self.assertAlmostEqual(bk.fallback_stop(), 3.0 - 20 / 70)
+        bk.sp["cap_per_unit"] = 0
+        self.assertAlmostEqual(bk.fallback_stop(), 3.0 - 20 / 210)
+
+    def test_a_hard_entry_rejection_ends_the_arm_and_does_not_retry_the_stale_decision(self):
+        cy, bk = book(); calls = []
+        def reject(*a, **kw): calls.append(1); raise BitgetError("40762", "insufficient available margin")
+        cy.b.limit_order = reject
+        bk.strat.arm = (time.time() + 30, 3.0, 70.0)
+        d = dict(buy=(2.999, 70.0), trim=None, stop=None, no_stop=False, events=[])
+        asyncio.run(bk.reconcile(d))
+        self.assertIsNone(bk.strat.arm); self.assertEqual(bk.strat.arm_filled, 0.0)
+        self.assertEqual(calls, [1]); self.assertIn("REJECT", kinds(cy)); self.assertIn("DISARM", kinds(cy))
+        asyncio.run(bk.reconcile(d))
+        self.assertEqual(calls, [1])
+
+    def test_a_persistent_trim_rejection_is_retried_no_faster_than_five_seconds(self):
+        cy, bk = book(lots=[[70, 3.0, "a"]]); calls = []
+        def reject(*a, **kw): calls.append(1); raise BitgetError("40762", "order size exceeded")
+        cy.b.limit_order = reject
+        d = dict(buy=None, trim=(3.1, 10.0, "maker", None), stop=None, no_stop=False, events=[])
+        asyncio.run(bk.reconcile(d)); asyncio.run(bk.reconcile(d))
+        self.assertEqual(calls, [1])
+        bk.place_retry_after["trim"] = 0.0
+        asyncio.run(bk.reconcile(d)); self.assertEqual(calls, [1, 1])
+
     def test_the_exchange_saying_there_is_no_position_asks_for_a_resync_instead_of_escalating(self):
         """43023: our lots are stale, so there is nothing to protect and nothing to market-close. Counting it as a stop failure
         drove a 3/s STOP_SET_FAIL -> STOP_FAILED loop that HALTed the book (EGLD 2026-09-03 20:30, audit NEXT 17e)."""

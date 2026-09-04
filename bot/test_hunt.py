@@ -285,6 +285,16 @@ class SecondOpinion(unittest.TestCase):
         thin.update(phase="markup", side="long")                        # AI 가 markup 이라 해도
         self.assertTrue([f for f in flags_of(thin, HUNT) if f.startswith("vol")])   # vol veto 는 그대로 선다
 
+    def test_chart_slots_reserve_the_holding_and_include_unknown_potential_candidates(self):
+        held = row("HELD", "quiet", qv=1e6, twoway24=1.0)               # 보유는 현재 통행료와 무관하게 첫 슬롯
+        thin = row("THIN", "unknown", qv=1e6, twoway24=100.0)          # AI가 고칠 수 없는 거래대금 veto
+        unknown = row("UNKNOWN", "unknown", twoway24=90.0)             # AI가 markup/markdown으로 바꿀 수 있으므로 차트가 필요
+        taxed = row("TAXED", "markup", fund=0.5, twoway24=80.0)        # 방향이 바뀌면 funding veto도 사라질 수 있다
+        self.assertEqual(hunt.chart_symbols([thin, taxed, unknown, held], ["HELD"], 3), ["HELD", "UNKNOWN", "TAXED"])
+
+    def test_chart_slot_limit_never_lets_a_candidate_displace_the_holding(self):
+        self.assertEqual(hunt.chart_symbols([row("HOT", twoway24=99), row("HELD", "quiet")], ["HELD"], 1), ["HELD"])
+
 class TheOtherWriter(unittest.TestCase):
     """pid_alive gates the only write of params.books, so both of its errors must be the safe one."""
     def setUp(self):
