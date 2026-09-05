@@ -22,7 +22,8 @@ def rule_cfg(**over):
     c = base_cfg()
     c.update(policy='rule', coins=['BTC'], notional_krw=10000, entry_ticks=0.0, cancel_ticks=-0.5, defend_ticks=-0.5, stop_ticks=3, hold_s=180,
              target_ticks=1, max_spread_ticks=2, entry_ttl_s=60, ratio_window_s=300, ratio_min_samples=60, leader_max_age_ms=30000,
-             decision_ms=500, liveness_ms=60000, mode='live', funding_confirmed=True, capital_mode='account_equity')
+             decision_ms=500, liveness_ms=60000, mode='live', funding_confirmed=True, capital_mode='account_equity',
+             momentum_window_s=30, momentum_recent_s=10, momentum_veto_ticks=1, momentum_decel_share=.3333, flow_gate=True)
     c.update(over)
     return c
 
@@ -66,11 +67,48 @@ class FairValueTests(unittest.TestCase):
         self.assertAlmostEqual(microprice(100, 102), 101)
         self.assertAlmostEqual(microprice(100, 102, 0, 0), 101)
 
+    def moving_reference(self):
+        f = FairValue(min_samples=1)
+        for t in range(32):
+            f.leader_quote('U', t*1000, 99+t, 101+t)
+            result = f.evaluate(t*1000, 100+t, 2)
+        return f, result
+
+    def test_momentum_is_in_ticks_with_thirty_second_history(self):
+        f, result = self.moving_reference()
+        self.assertEqual((result['m30'], result['m10']), (15., 5.))
+        count = len(f.history)
+        f.evaluate(31500, 131, 2)
+        self.assertEqual(len(f.history), count)
+        self.assertEqual(f.evaluate(31500, 131, 1)['m30'], 30.)
+
+    def test_momentum_resets_on_contributing_venue_change_and_disconnect(self):
+        f, _ = self.moving_reference()
+        for t in (32000, 33000):
+            f.leader_quote('B', t, 199, 201)
+            result = f.evaluate(t, 131, 2)
+        self.assertEqual(result['leaders'], 2)
+        self.assertIsNone(result['m30']); self.assertIsNone(result['m10'])
+        f.disconnect('U'); f.leader_quote('U', 33500, 130, 132)
+        self.assertIsNone(f.evaluate(33500, 131, 2)['m30'])
+
+    def test_no_momentum_across_gap_or_from_a_later_reference_sample(self):
+        f, _ = self.moving_reference()
+        self.assertIsNone(f.evaluate(34000, 131, 2)['m30'])
+        g = FairValue(min_samples=1)
+        # Irregular timestamps: F(30,100-30,000) must not use the sample at 900ms.
+        g.momentum(900, 100, 1, ('U',))
+        for t in range(1,31):
+            result = g.momentum(t*1000+100, 100+t, 1, ('U',))
+        self.assertIsNone(result['m30'])
+        self.assertEqual(g.momentum(30900, 130, 1, ('U',))['m30'], 30)
+
 
 class RuleTests(unittest.TestCase):
     def setUp(self):
         self.cfg = rule_cfg()
-        self.kw = dict(coin='BTC', bid=990.0, ask=991.0, tick=1.0, contract=CONTRACT, units=UNITS, cash=D(500000), risk_remaining=D(1000))
+        self.kw = dict(coin='BTC', bid=990.0, ask=991.0, tick=1.0, contract=CONTRACT, units=UNITS, cash=D(500000), risk_remaining=D(1000),
+                       flow32=0., m30=0., m10=0.)
 
     def test_refusals(self):
         self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=None))['reason'], 'fair_unavailable')
@@ -80,7 +118,7 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=1.0, risk_remaining=D(1)))['reason'], 'risk_budget')
 
     def test_plan_prices_follow_ladder_and_size(self):
-        r = rule.assess(self.cfg, **dict(self.kw, dev=0.0))
+        r = rule.assess(self.cfg, **dict(self.kw, dev=0.5))
         self.assertTrue(r['accepted'])
         p = r['plan']
         self.assertEqual((p['entry'], p['take_profit'], p['stop'], p['stop_limit']), ('990.0', '991', '987', '986'))
@@ -88,9 +126,9 @@ class RuleTests(unittest.TestCase):
         self.assertGreaterEqual(D(p['qty']) * D(p['entry']), D(10000))
         self.assertLess(D(p['qty']) * D(p['entry']), D(10000) + D('990'))
         # Ladder boundary: entry 999 -> take at 1000 (unit 5 above 1000 does not apply below it)
-        r = rule.assess(self.cfg, **dict(self.kw, dev=0.0, bid=999.0, ask=1000.0))
+        r = rule.assess(self.cfg, **dict(self.kw, dev=0.5, bid=999.0, ask=1000.0))
         self.assertEqual(r['plan']['take_profit'], '1000')
-        r = rule.assess(self.cfg, **dict(self.kw, dev=0.0, bid=1000.0, ask=1005.0, tick=5.0))
+        r = rule.assess(self.cfg, **dict(self.kw, dev=0.5, bid=1000.0, ask=1005.0, tick=5.0))
         self.assertEqual((r['plan']['take_profit'], r['plan']['stop']), ('1005', '997'))
 
     def test_hold_and_cancel(self):
@@ -102,7 +140,53 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(rule.hold(c, dev=None, bid=989, entry=990, tick=1, age_s=10)['hold'], True)
         self.assertTrue(rule.cancel_entry(c, dev=None))
         self.assertTrue(rule.cancel_entry(c, dev=-0.6))
-        self.assertFalse(rule.cancel_entry(c, dev=-0.4))
+        self.assertFalse(rule.cancel_entry(c, dev=-0.4, m30=0, m10=0))
+
+    def test_fair_must_reach_take_but_entry_floor_is_preserved(self):
+        self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=.499))['reason'], 'fair_below_take')
+        self.assertTrue(rule.assess(self.cfg, **dict(self.kw, dev=.5))['accepted'])
+        self.assertTrue(rule.assess(self.cfg, **dict(self.kw, dev=0, ask=992))['accepted'])
+        self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=-.01, ask=992))['reason'], 'rich_vs_fair')
+        # At a price-band boundary, nominal k*tick cannot understate the real take.
+        self.assertEqual(rule.assess(rule_cfg(target_ticks=2), **dict(self.kw, dev=2, bid=999, ask=1000))['reason'], 'fair_below_take')
+
+    def test_falling_veto_and_deceleration_exception(self):
+        falling = dict(self.kw, dev=2., m30=-3., m10=-1.)
+        self.assertEqual(rule.assess(self.cfg, **falling)['reason'], 'leader_falling')
+        self.assertTrue(rule.assess(self.cfg, **dict(falling, m10=-.5))['accepted'])
+        self.assertTrue(rule.assess(self.cfg, **dict(falling, m30=-.99))['accepted'])
+        self.assertTrue(rule.leader_falling(self.cfg, -1, -.3333))
+        self.assertFalse(rule.leader_falling(self.cfg, -1, -.3332))
+        self.assertTrue(rule.cancel_entry(self.cfg, dev=2, m30=-3, m10=-1))
+        self.assertFalse(rule.cancel_entry(self.cfg, dev=2, m30=-3, m10=-.5))
+
+    def test_missing_momentum_refuses_entry_and_cancels_pending(self):
+        for missing in (None, float('nan'), float('inf')):
+            self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=1, m30=missing))['reason'], 'momentum_unavailable')
+            self.assertTrue(rule.cancel_entry(self.cfg, dev=1, m30=missing, m10=0))
+
+    def test_brake_keeps_existing_stop_defend_time_protection(self):
+        kw = dict(dev=2, bid=990, entry=990, tick=1, stop=987, age_s=10, m30=-3, m10=-1)
+        self.assertEqual(rule.hold(self.cfg, **kw)['reason'], 'brake')
+        self.assertTrue(rule.hold(self.cfg, **dict(kw, m10=-.5))['hold'])
+        self.assertEqual(rule.hold(self.cfg, **dict(kw, bid=987))['reason'], 'stop')
+        self.assertEqual(rule.hold(self.cfg, **dict(kw, m10=-.5, dev=-.6))['reason'], 'defend')
+        self.assertEqual(rule.hold(self.cfg, **dict(kw, m10=-.5, age_s=180))['reason'], 'time')
+        self.assertTrue(rule.hold(self.cfg, **dict(kw, m30=None))['hold'])
+
+    def test_flow_sign_and_missing_flow(self):
+        for flow in (-1., -.1, 0.):
+            self.assertTrue(rule.assess(self.cfg, **dict(self.kw, dev=1, flow32=flow))['accepted'])
+        self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=1, flow32=.0001))['reason'], 'buy_dominant_flow')
+        for flow in (None, float('nan'), 2.):
+            self.assertEqual(rule.assess(self.cfg, **dict(self.kw, dev=1, flow32=flow))['reason'], 'flow_unavailable')
+        self.assertTrue(rule.assess(rule_cfg(flow_gate=False), **dict(self.kw, dev=1, flow32=.5))['accepted'])
+
+    def test_unconditional_counterfactual_removes_all_three_new_gates(self):
+        c = rule_cfg(entry_ticks=-1e9, cancel_ticks=-1e9, defend_ticks=-1e9)
+        self.assertTrue(rule.assess(c, **dict(self.kw, dev=-2, m30=-3, m10=-1, flow32=1), unconditional=True)['accepted'])
+        self.assertFalse(rule.cancel_entry(c, dev=-2, m30=-3, m10=-1, unconditional=True))
+        self.assertTrue(rule.hold(c, dev=-2, bid=990, entry=990, tick=1, age_s=10, m30=-3, m10=-1, unconditional=True)['hold'])
 
 
 class RestingExchange(FakeExchange):
@@ -123,7 +207,8 @@ class RestingFlowTests(unittest.TestCase):
         self.cfg = rule_cfg()
         self.pf = Portfolio(self.cfg, self.client, self.store, clock=lambda: self.now[0])
         self.pf.sync_cash(D(300000))
-        self.plan = rule.assess(self.cfg, coin='BTC', bid=990.0, ask=991.0, tick=1.0, dev=0.5, contract=CONTRACT, units=UNITS, cash=D(300000), risk_remaining=D(1000))['plan']
+        self.plan = rule.assess(self.cfg, coin='BTC', bid=990.0, ask=991.0, tick=1.0, dev=0.5, contract=CONTRACT, units=UNITS,
+                                cash=D(300000), risk_remaining=D(1000), flow32=0, m30=0, m10=0)['plan']
 
     def drive(self, **kw):
         kw.setdefault('bid', 990.0); kw.setdefault('fresh', True)
@@ -169,7 +254,8 @@ class RestingFlowTests(unittest.TestCase):
 
     def test_partial_take_fill_then_stop_sells_remainder_only(self):
         # 20,000 KRW so that half of it is still a sellable (>= 5,000 KRW) remainder.
-        plan = rule.assess(rule_cfg(notional_krw=20000), coin='BTC', bid=990.0, ask=991.0, tick=1.0, dev=0.5, contract=CONTRACT, units=UNITS, cash=D(300000), risk_remaining=D(1000))['plan']
+        plan = rule.assess(rule_cfg(notional_krw=20000), coin='BTC', bid=990.0, ask=991.0, tick=1.0, dev=0.5, contract=CONTRACT, units=UNITS,
+                           cash=D(300000), risk_remaining=D(1000), flow32=0, m30=0, m10=0)['plan']
         self.assertTrue(self.pf.enter('BTC', plan, {}, '5000'))
         self.client.fill(self.entry_cid(), plan['qty'], '990')
         self.now[0] += 1
@@ -213,7 +299,8 @@ class RestingFlowTests(unittest.TestCase):
         self.assertFalse([o for o in self.client.submissions if o['role'] == 'take'])
         # Next campaign merges the residual and sells everything with one resting order.
         self.pf.state['capital_at'] = self.now[0]
-        plan = rule.assess(self.cfg, coin='BTC', bid=990.0, ask=991.0, tick=1.0, dev=0.5, contract=CONTRACT, units=UNITS, cash=D(300000), risk_remaining=D(1000))['plan']
+        plan = rule.assess(self.cfg, coin='BTC', bid=990.0, ask=991.0, tick=1.0, dev=0.5, contract=CONTRACT, units=UNITS,
+                           cash=D(300000), risk_remaining=D(1000), flow32=0, m30=0, m10=0)['plan']
         self.assertTrue(self.pf.enter('BTC', plan, {}, '5000'))
         c = self.pf.campaigns['BTC']
         self.assertEqual(c['qty'], '2'); self.assertEqual(self.pf.state['residuals'], {})
@@ -313,6 +400,23 @@ class ConfigTests(unittest.TestCase):
         cfg = load(Path(__file__).with_name('config-c3.json'))
         self.assertEqual(cfg['policy'], 'rule')
         self.assertEqual(cfg['coins'], ['BTC', 'ETH', 'XRP', 'SOL'])
+
+    def test_invalid_v3_config_is_rejected(self):
+        current=json.loads(Path(__file__).with_name('config-c3.json').read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'config.json'
+            for over in (dict(momentum_recent_s=30),dict(momentum_window_s=30.5),dict(momentum_veto_ticks=float('nan')),
+                         dict(momentum_decel_share=0),dict(momentum_decel_share=1),dict(flow_gate='true')):
+                path.write_text(json.dumps(dict(current,**over)))
+                with self.assertRaises(ValueError): load(path)
+
+    def test_upgrade_preserves_live_size_stops_symbols_and_other_settings(self):
+        from .c3_upgrade import upgraded_config,V3_CONFIG_KEYS
+        live=rule_cfg()
+        desired=dict(live,mode='observe',funding_confirmed=False,coins=['ETH'],notional_krw=999999,stop_ticks=15)
+        updated=upgraded_config(live,desired)
+        self.assertEqual({k:v for k,v in updated.items() if k not in V3_CONFIG_KEYS},
+                         {k:v for k,v in live.items() if k not in V3_CONFIG_KEYS})
 
 
 if __name__ == '__main__':

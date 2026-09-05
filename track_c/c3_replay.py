@@ -35,6 +35,21 @@ from .sizing import price_unit
 KST_MS = 9 * 3600000
 
 
+def evaluation_blocks(curve, start_ms, end_ms):
+    """Fixed 24-hour wealth blocks anchored at activation, excluding earlier PnL."""
+    if start_ms is None or end_ms is None or not curve:
+        return {}
+    times = [t for t,_ in curve]
+    result = {}
+    for i,start in enumerate(range(start_ms, end_ms, 86400000)):
+        end = min(start+86400000, end_ms)
+        left, right = bisect_right(times,start)-1, bisect_right(times,end)-1
+        complete = left >= 0 and right >= 0 and times[-1] >= end
+        result[str(i)] = dict(start_ms=start,end_ms=end,complete=complete,
+                             net_krw=curve[right][1]-curve[left][1] if complete else None)
+    return result
+
+
 def coinone_rows(paths, quality=None):
     """Yields (recv_ms, message) from recorder files (object or string message)."""
     for path in paths:
@@ -53,11 +68,14 @@ def coinone_rows(paths, quality=None):
                     yield recv, msg
 
 
-def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, cash=594574, step_ms=None):
+def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, cash=594574, step_ms=None,
+        evaluation_start_ms=None, evaluation_end_ms=None):
     if control not in (None, 'flip', 'unconditional') or latency_ms < 0 or cash <= 0:
         raise ValueError('invalid replay scenario')
     step_ms = int(step_ms or cfg['decision_ms'])
     if step_ms <= 0: raise ValueError('invalid replay step')
+    if (evaluation_start_ms is None) != (evaluation_end_ms is None) or (evaluation_start_ms is not None and evaluation_start_ms >= evaluation_end_ms):
+        raise ValueError('evaluation start/end must be a valid explicit pair')
     coinone, leaders = list(coinone), list(leaders)
     if len(set(map(str, coinone))) != len(coinone) or len(set(map(str, leaders))) != len(leaders):
         raise ValueError('duplicate tape paths')
@@ -102,7 +120,8 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
     portfolio = Portfolio(cfg, client, store, clock=lambda: clock[0])
     portfolio.sync_cash(client.cash)
     fairs = {c: FairValue(window_s=cfg['ratio_window_s'], min_samples=cfg['ratio_min_samples'], leader_max_age_ms=cfg['leader_max_age_ms'],
-                          flip=(control == 'flip'), weights=cfg.get('leader_weights'), price=cfg.get('leader_price', 'microprice')) for c in coins}
+                          flip=(control == 'flip'), weights=cfg.get('leader_weights'), price=cfg.get('leader_price', 'microprice'),
+                          momentum_window_s=cfg['momentum_window_s'], momentum_recent_s=cfg['momentum_recent_s']) for c in coins}
     micros = {}
     last_fair = {}
     decisions = Counter()
@@ -133,6 +152,8 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
     # entry/holding horizon. Only the final drain uses operator_stop.
     drain_ms = max(5000, 4*latency_ms + 4*step_ms)
     drain_t = end - drain_ms
+    if evaluation_end_ms is not None:
+        drain_t = min(drain_t, evaluation_end_ms-drain_ms)
     entry_end = drain_t - (cfg['hold_s'] + cfg['entry_ttl_s']) * 1000
     for t in range(start_t, end + 1, step_ms):
         clock[0] = t / 1000
@@ -161,10 +182,13 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
             book = live_book(coin, t)
             fair = last_fair.get(coin)
             dev = fair['dev_ticks'] if fair else None
+            snap = micros[coin].snapshot(t, book['tick']) if book and coin in micros else None
+            motion = dict(m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'),
+                          flow32=snap['features'].get('flow_32') if snap else None, unconditional=(control == 'unconditional'))
             decision = rule.hold(cfg, dev=dev, bid=book['bid'] if book else None, entry=float(c['plan']['entry']),
                                  tick=float(c['plan'].get('tick', 1)), stop=c['stop'],
-                                 age_s=clock[0] - c['first_fill'] if c['first_fill'] is not None else None)
-            decision.update(cancel_entry=rule.cancel_entry(cfg, dev=dev), dev_ticks=dev)
+                                 age_s=clock[0] - c['first_fill'] if c['first_fill'] is not None else None, **motion)
+            decision.update(cancel_entry=rule.cancel_entry(cfg, dev=dev, **motion), dev_ticks=dev)
             portfolio.book(coin).drive(bid=book['bid'] if book else None, fresh=bool(book), quantitative_decision=decision, stopping=t > drain_t)
             if not book: quality['holding_without_fresh_book_steps'] += 1
         wealth = float(marked_equity(portfolio.state))
@@ -172,7 +196,7 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
         drawdown = max(drawdown, peak - wealth)
         curve.append((t, wealth))
         portfolio.state['capital_at'] = clock[0]
-        if t > entry_end or t // cfg['decision_ms'] == last_decision:
+        if (evaluation_start_ms is not None and t < evaluation_start_ms) or t > entry_end or t // cfg['decision_ms'] == last_decision:
             continue
         last_decision = t // cfg['decision_ms']
         ranked = []
@@ -191,7 +215,8 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
                 continue
             result = rule.assess(cfg, coin=coin, bid=snap['bid'], ask=snap['ask'], tick=snap['tick'], dev=fair['dev_ticks'] if fair else None,
                                  contract=contract, units=ladder, cash=D(portfolio.state['cash_krw']) - portfolio.reserved_cash(),
-                                 risk_remaining=portfolio.remaining_risk(coin))
+                                 risk_remaining=portfolio.remaining_risk(coin), flow32=snap['features'].get('flow_32'),
+                                 m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'), unconditional=(control == 'unconditional'))
             decisions[result['reason']] += 1
             if result['accepted']:
                 plan = dict(result['plan'], fair=fair)
@@ -212,7 +237,8 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
         if not notional: continue
         outcomes.append(dict(t=t, id=c['id'], day=(t + KST_MS) // 86400000, coin=c['coin'], net_krw=float(c['net']), net_bp=float(c['net']) / notional * 1e4,
                              inventory_flat=not bool(float(c['qty'])), capital_involved_krw=notional, first_fill=c['first_fill'],
-                             reason=c['exit_reason'], bought=float(c['bought']), sold=float(c['sold']), residual=residual, dev=c['plan'].get('dev_ticks')))
+                             reason=c['exit_reason'], bought=float(c['bought']), sold=float(c['sold']), residual=residual, dev=c['plan'].get('dev_ticks'),
+                             m30=c['plan'].get('m30'), m10=c['plan'].get('m10'), flow32=c['plan'].get('flow32')))
     days = defaultdict(list)
     for o in outcomes:
         days[o['day']].append(o['net_bp'])
@@ -258,6 +284,8 @@ def run(cfg, contracts_path, coinone, leaders, *, control=None, latency_ms=250, 
                 net_per_hour_krw=marked_net/((end-events[0][0])/3600000), max_drawdown_krw=drawdown,
                 max_drawdown_fraction=drawdown/float(cash), accounting_error_krw=identity_error,
                 daily_wealth=daily, quality=dict(quality), open_campaigns=deepcopy(portfolio.campaigns),
+                evaluation_window=dict(start_ms=evaluation_start_ms,end_ms=evaluation_end_ms),
+                evaluation_blocks=evaluation_blocks(curve,evaluation_start_ms,evaluation_end_ms),
                 boundary=dict(entry_end=entry_end, liquidation_start=drain_t),
                 stress_krw={str(bp):marked_net-turnover*bp/10000 for bp in (0, .5, 1, 2)},
                 admission='HOLD: diagnostic replay; prospective daily evidence required',
@@ -278,8 +306,11 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--control', choices=['flip', 'unconditional'])
     p.add_argument('--latency-ms', type=int, default=250)
+    p.add_argument('--start-ms', type=int, help='registered activation timestamp; earlier tape is warmup only')
+    p.add_argument('--end-ms', type=int, help='fixed evaluation end, exclusive')
     args = p.parse_args()
-    result = run(load(args.config), args.contracts, args.coinone, args.leaders, control=args.control, latency_ms=args.latency_ms)
+    result = run(load(args.config), args.contracts, args.coinone, args.leaders, control=args.control, latency_ms=args.latency_ms,
+                 evaluation_start_ms=args.start_ms, evaluation_end_ms=args.end_ms)
     Path(args.output).write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({k: result[k] for k in ('rule','control','attempts','campaigns','marked_net_krw','max_drawdown_krw','stress_krw','residuals','halt','admission')}, ensure_ascii=False))
 

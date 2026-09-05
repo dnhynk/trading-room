@@ -51,6 +51,14 @@ def load(path):
             raise ValueError('invalid rule cadence/liveness')
         if cfg.get('leader_price','microprice') not in ('microprice','mid'):
             raise ValueError('invalid leader price kind')
+        if not (type(cfg.get('momentum_window_s')) is int and type(cfg.get('momentum_recent_s')) is int
+                and 0 < cfg['momentum_recent_s'] < cfg['momentum_window_s'] <= 300):
+            raise ValueError('invalid momentum windows')
+        if (any(type(cfg.get(k)) not in (int,float) or not math.isfinite(cfg[k]) for k in ('momentum_veto_ticks','momentum_decel_share'))
+                or not (cfg['momentum_veto_ticks'] > 0 and 0 < cfg['momentum_decel_share'] < 1)):
+            raise ValueError('invalid momentum veto/deceleration settings')
+        if type(cfg.get('flow_gate')) is not bool:
+            raise ValueError('flow gate must be explicit')
         weights=cfg.get('leader_weights')
         if weights is not None and (not isinstance(weights,dict) or not weights or set(weights)-{'U','B'} or any(not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in weights.values()) or sum(weights.values())<=0):
             raise ValueError('invalid leader weights')

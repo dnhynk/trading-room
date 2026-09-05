@@ -2,7 +2,7 @@
 
 ## 현재 트랙 C 운영 (2026-09-05)
 
-C는 C3 `track_c.c3_runner`(현재 `c3-rule-v2`)와 state v3 포트폴리오를 사용한다. `bot/CONCEPT-C.md`가 계약, `track_c/README.md`가 운영, `track_c/AUDIT-C3-20260905.md`가 최신 수리 감사다. 컨셉·과거 통계 주장도 감사 대상이며 수익 우위는 아직 미입증이다. `track_c/evaluation-c3.json`의 9/6–9/15 고정 미래 평가 전 자동 증액하지 않는다. `python -m track_c.deploy_c3 status`로 mode·PAUSE·공정가·선행거래소 연결·캠페인·잔량 이월을 확인한다. C2 학습형 정책·`deploy_quant`·모델 worker는 폐기됐고 재기동하지 않는다. Slack 원화는 소수점 없이 표시한다. 사용자 지시로 C 진입 알림은 끄고 청산 체결만 발송하며 매수 회계·통계는 유지한다. 아래 A/B 변경·감독 규칙은 A/B에 해당하며 C 배포는 `c3_upgrade`의 flat·장부 호환성 절차를 따른다.
+C는 C3 `track_c.c3_runner`(현재 `c3-rule-v3`)와 state v3 포트폴리오를 사용한다. `bot/CONCEPT-C.md`가 계약, `track_c/README.md`가 운영, `track_c/AUDIT-C3-20260905.md`가 최신 수리 감사다. v3는 공정가≥익절가·30/10초 선행 모멘텀 veto/브레이크·32초 코인원 매도흐름 게이트다. 컨셉·과거 통계 주장도 감사 대상이며 수익 우위는 미입증이다. `track_c/evaluation-c3.json`은 2026-09-05 23:30:00.029KST 재개부터10×24시간 고정 미래 평가이며 자동 증액하지 않는다. 사용자 요청으로 표시 승률·캠페인·손익·수익률 기준선도 같은 재개 시각으로 초기화했다. 원본 장부·위험 예산과 구분한다. `python -m track_c.deploy_c3 status`로 mode·PAUSE·모멘텀·연결·캠페인·잔량을 확인한다. C2 학습형 정책·`deploy_quant`·모델 worker는 폐기됐고 재기동하지 않는다. Slack 원화는 정수 표시, 진입 알림OFF/청산체결만 발송하며 매수 회계는 유지한다. 아래 A/B 규칙은 A/B에 해당하며 C 배포는 `c3_upgrade`의 flat·장부 호환성과 승인된5개 설정 외 보존 절차를 따른다.
 
 `bot/TRACKS.json`과 `bot/BOOT.md`의 현재 운영 상태를 먼저 읽는다. A/B는 사용자 지시로 일시정지했고 아래 A/B 감시견·Monitor를 자동 재개하지 않는다. C는 AWS `trading-room-c.service`로 실거래하며 운용자본은 계좌 잔액 전체 복리다. C 계약은 `bot/CONCEPT-C.md`다. 알림은 독립 `trading-room-c-notify.service`가 `bot.notify`의 C 원화 경로로 보낸다. C `data/ledger.sqlite`/`status.json`만 읽으며 A/B USDT 계기판을 섞지 않는다. `python -m track_c.deploy_notify status`로 기존 worker를 확인하고 중복 릴레이를 시작하지 않는다. C 알림의 당일은 KST이며 엔진의 UTC 일일 위험 제한과 구분한다. C 알림 작업 때문에 매매 엔진을 재기동하지 않는다. 상세 운영·장애 확인은 `track_c/README.md`다.
 

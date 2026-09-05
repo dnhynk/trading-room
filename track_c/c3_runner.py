@@ -28,7 +28,8 @@ from .universe import ASSET_POLICY_VERSION
 class RuleRunner(QuantRunner):
     def __init__(self, cfg):
         self.fairs = {c: FairValue(window_s=cfg['ratio_window_s'], min_samples=cfg['ratio_min_samples'], leader_max_age_ms=cfg['leader_max_age_ms'],
-                                   weights=cfg.get('leader_weights'), price=cfg.get('leader_price', 'microprice')) for c in cfg['coins']}
+                                   weights=cfg.get('leader_weights'), price=cfg.get('leader_price', 'microprice'),
+                                   momentum_window_s=cfg['momentum_window_s'], momentum_recent_s=cfg['momentum_recent_s']) for c in cfg['coins']}
         self.last_fair = {}
         self.last_private_events = 0
         super().__init__(cfg)
@@ -141,7 +142,8 @@ class RuleRunner(QuantRunner):
         cash = self.cash() if self.cfg['funding_confirmed'] else self.oms.equity  # observe mode: hypothetical sizing
         result = rule.assess(self.cfg, coin=coin, bid=snapshot['bid'], ask=snapshot['ask'], tick=snapshot['tick'],
                              dev=fair['dev_ticks'] if fair else None, contract=m.contract, units=m.units,
-                             cash=cash, risk_remaining=self.oms.remaining_risk(coin))
+                             cash=cash, risk_remaining=self.oms.remaining_risk(coin), flow32=snapshot['features'].get('flow_32'),
+                             m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'))
         if any(float(v) for v in m.fees.values()):
             result = dict(result, accepted=False, reason='unreconciled_fee_currency')
         result['t'] = snapshot['t']
@@ -152,11 +154,15 @@ class RuleRunner(QuantRunner):
         coin = c['coin']
         fair = self.last_fair.get(coin)
         dev = fair['dev_ticks'] if fair else None
+        now = int(time.time()*1000)
+        snap = self.snapshot(coin, now) if coin in self.markets else None
+        motion = dict(m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'),
+                      flow32=snap['features'].get('flow_32') if snap else None)
         # Reconcile in drive may discover the first fill after this is calculated.
         decision = rule.hold(self.cfg, dev=dev, bid=book['bid'] if book else None, entry=float(c['plan']['entry']),
                              tick=float(c['plan'].get('tick', 1)), stop=c['stop'],
-                             age_s=time.time() - c['first_fill'] if c['first_fill'] is not None else None)
-        decision.update(cancel_entry=rule.cancel_entry(self.cfg, dev=dev), dev_ticks=dev)
+                             age_s=time.time() - c['first_fill'] if c['first_fill'] is not None else None, **motion)
+        decision.update(cancel_entry=rule.cancel_entry(self.cfg, dev=dev, **motion), dev_ticks=dev, **motion)
         return decision
 
     async def decisions(self):
@@ -167,14 +173,18 @@ class RuleRunner(QuantRunner):
                 selection[coin] = dict(reason='record_only')
                 continue
             if coin in self.oms.campaigns:
-                selection[coin] = dict(reason='campaign_active', dev_ticks=(self.last_fair.get(coin) or {}).get('dev_ticks'))
+                f = self.last_fair.get(coin) or {}
+                snap = self.snapshot(coin, now)
+                selection[coin] = dict(reason='campaign_active', dev_ticks=f.get('dev_ticks'), m30=f.get('m30'), m10=f.get('m10'),
+                                       flow32=snap['features'].get('flow_32') if snap else None)
                 continue
             if coin in self.foreign_assets:
                 selection[coin] = dict(reason='external_ownership')
                 continue
             snap = self.snapshot(coin, now)
             if not snap:
-                selection[coin] = dict(reason='stale_book', dev_ticks=(self.last_fair.get(coin) or {}).get('dev_ticks'))
+                f = self.last_fair.get(coin) or {}
+                selection[coin] = dict(reason='stale_book', dev_ticks=f.get('dev_ticks'), m30=f.get('m30'), m10=f.get('m10'), flow32=None)
                 continue
             result = self.evaluate(snap)
             selection[coin] = {k: v for k, v in result.items() if k not in ('plan',)}
@@ -209,6 +219,7 @@ class RuleRunner(QuantRunner):
         plan['decision_t'] = snap['t']
         plan['fair'] = result['fair']
         self.store.event('RULE_DECISION', coin=coin, policy=rule.VERSION, plan=plan, fair=result['fair'],
+                         m30=result['m30'], m10=result['m10'], flow32=result['flow32'],
                          book=dict(t=snap['t'], bid=snap['bid'], ask=snap['ask'], tick=snap['tick'], spread_ticks=snap['features']['spread_ticks']),
                          equity=str(self.oms.equity), cash=str(self.cash()))
         await asyncio.to_thread(self.oms.enter, coin, plan, snap['features'], self.markets[coin].contract['min_order_amount'])

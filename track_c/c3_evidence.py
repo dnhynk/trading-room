@@ -55,15 +55,30 @@ def assess(protocol, base, flip, unconditional):
             issues.append('unresolved_execution_or_accounting')
         if r.get('quality', {}).get('malformed_coinone_rows'):
             issues.append('malformed_tape')
-    start = dt.datetime.fromisoformat(protocol['start_kst']).replace(tzinfo=KST)
-    first = int(start.timestamp()*1000 + 9*3600000) // 86400000
-    days = [str(first+i) for i in range(protocol['days'])]
-    complete = [d for d in days if all(r['daily_wealth'].get(d, {}).get('complete') for r in reports)]
+    field = 'daily_wealth'
+    if 'start_ms' in protocol:
+        field = 'evaluation_blocks'
+        days = [str(i) for i in range(protocol['days'])]
+        start_ms, end_ms = protocol['start_ms'], protocol['end_ms']
+        if end_ms-start_ms != protocol['days']*86400000:
+            issues.append('invalid_registered_window')
+        for r in reports:
+            if r.get('evaluation_window') != dict(start_ms=start_ms,end_ms=end_ms):
+                issues.append('activation_window_mismatch')
+            for i,d in enumerate(days):
+                block=r.get(field,{}).get(d,{})
+                if block and (block.get('start_ms'),block.get('end_ms')) != (start_ms+i*86400000,start_ms+(i+1)*86400000):
+                    issues.append('activation_block_mismatch')
+    else:
+        start = dt.datetime.fromisoformat(protocol['start_kst']).replace(tzinfo=KST)
+        first = int(start.timestamp()*1000 + 9*3600000) // 86400000
+        days = [str(first+i) for i in range(protocol['days'])]
+    complete = [d for d in days if all(r.get(field,{}).get(d, {}).get('complete') for r in reports)]
     if len(complete) != len(days):
         issues.append('fixed_prospective_window_incomplete')
     if issues:
         return dict(verdict='HOLD', issues=sorted(set(issues)), complete_days=len(complete), required_days=len(days))
-    values = [[r['daily_wealth'][d]['net_krw'] for d in days] for r in reports]
+    values = [[r[field][d]['net_krw'] for d in days] for r in reports]
     comparisons = dict(net=values[0], versus_flip=[a-b for a,b in zip(values[0],values[1])],
                        versus_unconditional=[a-b for a,b in zip(values[0],values[2])])
     # All three claims must pass; Bonferroni correct the nominal tail probability.

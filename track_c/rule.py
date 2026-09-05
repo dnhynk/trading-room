@@ -8,8 +8,18 @@ import math
 
 from .sizing import floor, price_floor, price_unit
 
-VERSION = 'c3-rule-v2'
-PARAMS = ('entry_ticks', 'cancel_ticks', 'defend_ticks', 'stop_ticks', 'hold_s', 'target_ticks', 'max_spread_ticks', 'notional_krw', 'entry_ttl_s')
+VERSION = 'c3-rule-v3'
+PARAMS = ('entry_ticks', 'cancel_ticks', 'defend_ticks', 'stop_ticks', 'hold_s', 'target_ticks', 'max_spread_ticks', 'notional_krw', 'entry_ttl_s',
+          'momentum_window_s', 'momentum_recent_s', 'momentum_veto_ticks', 'momentum_decel_share', 'flow_gate')
+
+
+def momentum_available(m30, m10):
+    return all(x is not None and math.isfinite(x) for x in (m30, m10))
+
+
+def leader_falling(cfg, m30, m10):
+    return (momentum_available(m30, m10) and m30 <= -float(cfg['momentum_veto_ticks'])
+            and m10 <= m30 * float(cfg['momentum_decel_share']))
 
 
 def price_up(units, price, ticks):
@@ -28,9 +38,10 @@ def price_down(units, price, ticks):
     return value
 
 
-def assess(cfg, *, coin, bid, ask, tick, dev, contract, units, cash, risk_remaining):
+def assess(cfg, *, coin, bid, ask, tick, dev, contract, units, cash, risk_remaining,
+           flow32=None, m30=None, m10=None, unconditional=False):
     """Entry plan or a refusal reason. `dev` is the fair-value deviation in ticks (None = unavailable)."""
-    common = dict(coin=coin, accepted=False, dev_ticks=dev, policy=VERSION)
+    common = dict(coin=coin, accepted=False, dev_ticks=dev, policy=VERSION, flow32=flow32, m30=m30, m10=m10)
     if dev is None or not math.isfinite(dev):
         return dict(common, reason='fair_unavailable')
     if not all(math.isfinite(x) for x in (bid, ask, tick)) or not (0 < bid < ask) or tick <= 0:
@@ -39,6 +50,18 @@ def assess(cfg, *, coin, bid, ask, tick, dev, contract, units, cash, risk_remain
         return dict(common, reason='wide_spread')
     if dev < float(cfg['entry_ticks']):
         return dict(common, reason='rich_vs_fair')
+    if not unconditional:
+        if dev + (ask-bid)/(2*tick) < float(cfg['target_ticks']) - 1e-12:
+            return dict(common, reason='fair_below_take')
+        if not momentum_available(m30, m10):
+            return dict(common, reason='momentum_unavailable')
+        if leader_falling(cfg, m30, m10):
+            return dict(common, reason='leader_falling')
+        if cfg['flow_gate']:
+            if flow32 is None or not math.isfinite(flow32) or not -1 <= flow32 <= 1:
+                return dict(common, reason='flow_unavailable')
+            if flow32 > 0:
+                return dict(common, reason='buy_dominant_flow')
     entry = D(str(bid)); step = D(contract['qty_unit']); minimum = D(contract['min_order_amount'])
     if entry != price_floor(units, entry):
         return dict(common, reason='price_ladder')
@@ -51,6 +74,9 @@ def assess(cfg, *, coin, bid, ask, tick, dev, contract, units, cash, risk_remain
     take = price_up(units, entry, int(cfg['target_ticks']))
     if not (0 < stop_limit < stop < entry < take):
         return dict(common, reason='price_ladder')
+    # Multi-tick targets crossing a ladder boundary may cost more than k*current_tick.
+    if not unconditional and dev + (ask-bid)/(2*tick) < float((take-entry)/D(str(tick))) - 1e-12:
+        return dict(common, reason='fair_below_take')
     if qty * stop_limit < minimum:
         return dict(common, reason='minimum_at_stop')
     if qty * entry > D(str(cash)) * D(str(cfg['cash_fraction'])):
@@ -61,15 +87,18 @@ def assess(cfg, *, coin, bid, ask, tick, dev, contract, units, cash, risk_remain
     plan = dict(reason=None, qty=str(qty), entry=str(entry), stop=str(stop), stop_limit=str(stop_limit), take_profit=str(take),
                 notional_krw=str(qty * entry), nominal_loss_krw=str(loss), maker='0', taker='0', policy='rule', model=VERSION,
                 take_mode='resting', entry_ttl_s=int(cfg['entry_ttl_s']), hold_limit_s=int(cfg['hold_s']), horizon_s=int(cfg['hold_s']),
-                target_ticks=int(cfg['target_ticks']), tick=str(tick), dev_ticks=dev, research=True, score=dev, expected_net_bp=None, p_fill=None)
+                target_ticks=int(cfg['target_ticks']), tick=str(tick), dev_ticks=dev, flow32=flow32, m30=m30, m10=m10,
+                research=True, score=dev, expected_net_bp=None, p_fill=None)
     return dict(common, accepted=True, reason='rule', plan=plan, best=dict(score=dev))
 
 
-def hold(cfg, *, dev, bid, entry, tick, age_s, stop=None):
+def hold(cfg, *, dev, bid, entry, tick, age_s, stop=None, m30=None, m10=None, flow32=None, unconditional=False):
     """Holding decision after a fill. Unknown fair value keeps stop/time protection only."""
     floor = float(stop) if stop is not None else entry - float(tick) * int(cfg['stop_ticks'])
     if bid is not None and bid <= floor + 1e-12:
         return dict(hold=False, reason='stop')
+    if not unconditional and leader_falling(cfg, m30, m10):
+        return dict(hold=False, reason='brake')
     if dev is not None and math.isfinite(dev) and dev < float(cfg['defend_ticks']):
         return dict(hold=False, reason='defend')
     if age_s is not None and age_s >= float(cfg['hold_s']):
@@ -77,6 +106,7 @@ def hold(cfg, *, dev, bid, entry, tick, age_s, stop=None):
     return dict(hold=True, reason=None)
 
 
-def cancel_entry(cfg, *, dev):
+def cancel_entry(cfg, *, dev, m30=None, m10=None, flow32=None, unconditional=False):
     """A resting bid is withdrawn when Coinone turns rich versus fair or the fair value is unknown."""
-    return dev is None or not math.isfinite(dev) or dev < float(cfg['cancel_ticks'])
+    return (dev is None or not math.isfinite(dev) or dev < float(cfg['cancel_ticks'])
+            or (not unconditional and (not momentum_available(m30, m10) or leader_falling(cfg, m30, m10))))

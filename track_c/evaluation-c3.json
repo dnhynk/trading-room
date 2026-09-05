@@ -1,23 +1,25 @@
 {
-  "schema": 1,
-  "name": "C3 v2 fixed prospective checkpoint",
-  "registered_at_utc": "2026-09-05 14:09:05 UTC",
-  "start_kst": "2026-09-06",
-  "end_kst_exclusive": "2026-09-16",
+  "schema": 2,
+  "name": "C3 v3 activation-anchored prospective checkpoint",
+  "registered_at_utc": "2026-09-05T14:30:00.029000+00:00",
+  "start_ms": 1788618600029,
+  "end_ms": 1789482600029,
+  "start_kst": "2026-09-05T23:30:00.029000+09:00",
+  "end_kst_exclusive": "2026-09-15T23:30:00.029000+09:00",
   "days": 10,
-  "rule": "c3-rule-v2",
+  "rule": "c3-rule-v3",
   "source": {
-    "c3_replay.py": "d34c0c950b741ce009afd9d28e82decab309b2b2868feca85b9ebc229ec27a4d",
-    "c3_runner.py": "9414a2a36740089f7fb2e5f7844bdc8184cf197f5808c29c4117b170cdc998d7",
-    "c3_evidence.py": "b4c5b1444079e0098ae53e13a98fd73a068b404cd4fdd4c9b4c66d654e906ebc",
+    "c3_replay.py": "4811d87abb152abb041e85d2b11282787ab7e65dc20f9a7b0c8e49cd8776d8d2",
+    "c3_runner.py": "7c08e33e4459be42d2fcaf838941b4a793d6627389cb7bd739e1e56746c1c8a2",
+    "c3_evidence.py": "209dd7d0e54e508c69fca2fa5fcc760aed71527d4b35dddf1a04bc1aba02048a",
     "simulation.py": "46f71a1c57af28b893f8eec10c3f51f3e5a2d0fa8ced887007552250a9fe6953",
     "oms.py": "354b68afcaa8d8c366dc93507e571c63bc06c4ba7d323bd6b7b46f45c06f41f0",
     "portfolio.py": "d1c1c049da77da186839449124598723e1c8dedd21ad584c41c1691ea9a3fe1c",
     "accounting.py": "6abccb2d617f3e48adead766a0d4acaf498dcffd9004ade0f6d1b3453e464f92",
-    "fair.py": "5d0bf1a3472c9327b246ccafe1dc3999ef5f31c0281cd4476f9996c694d2c2cf",
-    "rule.py": "8d0721d02c9ffbb59664f4abb5e2221ed28da6bb9b7d370639e192e54fc96737",
+    "fair.py": "7da9c476232e2d078a3a90093f70528477959691899f4c700f912b251683bc45",
+    "rule.py": "c3ccae565ef52507a94b5e1f7d1018d615d2c24838d5a284742a7cfc0b1125c2",
     "microstructure.py": "ab274cf02758c5d5b910cdb97d93cdef9d6a5d6f9ccbce9a9c958b635ef74103",
-    "settings.py": "954d89b3c87fac6361521b363337caecd535bc51973d89add5136f4d504622d9",
+    "settings.py": "72fa50400c6842e3dfca0cb706d4e3e3eec6112a925810b633168dec4ee7342b",
     "sizing.py": "5262b6feec334975113a2ce625c06b5b2889190968635f0caa06873c27f1e34a",
     "dataset.py": "3f4b1ad46e1b0e8d655c1d7f0b34766e6ef0f535b02a6592f667592f92379818",
     "leaders.py": "6380d56e83644b18628829855ac166cb62b79315f7054d2ae8149060e295dbce",
@@ -36,7 +38,7 @@
     "../bot/risk.py": "8947c72661b32483f592f5781754fb6b4812270d97cdc3c1b7520efecde43928"
   },
   "config": {
-    "entry_ticks": 0,
+    "entry_ticks": 0.0,
     "cancel_ticks": -0.5,
     "defend_ticks": -0.5,
     "stop_ticks": 3,
@@ -45,6 +47,11 @@
     "max_spread_ticks": 2,
     "notional_krw": 10000,
     "entry_ttl_s": 60,
+    "momentum_window_s": 30,
+    "momentum_recent_s": 10,
+    "momentum_veto_ticks": 1,
+    "momentum_decel_share": 0.3333,
+    "flow_gate": true,
     "policy": "rule",
     "coins": [
       "BTC",
@@ -67,7 +74,7 @@
   "scenario": {
     "latency_ms": 250,
     "step_ms": 500,
-    "initial_cash_krw": 594574
+    "initial_cash_krw": 594574.0
   },
   "family_alpha": 0.1,
   "controls": [
@@ -76,25 +83,22 @@
     "unconditional"
   ],
   "bootstrap": {
-    "method": "circular two-day blocks",
+    "method": "circular blocks of two consecutive activation-anchored 24-hour periods",
     "block_days": 2,
     "draws": 20000,
     "seed": 20260905,
     "claims": 3
   },
-  "primary": "KST daily marked equity changes, including carried residual inventory and zero-trade days",
+  "primary": "marked equity changes in 10 complete 24-hour periods anchored at activation; earlier PnL excluded",
   "automatic_size_change": false,
-  "development_dates_excluded": [
-    "2026-09-05"
-  ],
+  "development_before_ms": 1788618600029,
+  "smoke_cutoff_ms": 1788617850043,
   "manual_review_required": [
-    "complete per-venue data and valid as-of contract coverage",
-    "warmup before the fixed start; full liquidation horizon after the fixed end",
-    "inventory continuity across days and fresh residual marks",
-    "paired replay comparisons plus absolute net profit",
-    "latency 1000ms and per-side added costs 0.5, 1, 2bp",
-    "same-period actual attempts/fills/net equity versus replay; public queue is only a counterfactual",
-    "no changes to strategy/source/config/window selected after examining outcomes"
+    "complete venue/contract coverage and fresh residual marks",
+    "warmup only before start; no earlier entries",
+    "same-period actual fills versus counterfactual queues",
+    "1000ms latency and extra per-side costs 0.5, 1, 2bp",
+    "no post-result threshold, symbol, stop, size or endpoint selection"
   ],
-  "interpretation": "Ten days is a fixed checkpoint, not a proof of sufficient sample size. Approximate intervals do not establish future profitability. Passing permits review only. Altered rules or endpoint require a new future experiment."
+  "interpretation": "Development smoke is not adoption evidence. Fixed 10-day checkpoint is not proof of sufficient sample size. REVIEW_ONLY never changes live size."
 }

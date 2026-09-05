@@ -172,7 +172,7 @@ REASONS = {'time':'보유 기한 도달','premise':'진입 전제 무효화','ex
            'daily_loss':'일일 손실 제한','operator_stop':'운영 정지','market_data_unavailable':'시세 확인 불가',
            'opposite_stall':'반등 정체','protection_rejected':'보호 주문 거절','halt':'엔진 중단','account_error':'계정 조회 장애',
            'one_tick_profit':'짧은 목표 수익 실현','continuation_value':'보유 기대값 소멸',
-           'take_profit':'지정가 익절 체결','defend':'공정가 하회 방어 청산','stop':'손절 거리 도달',
+           'take_profit':'지정가 익절 체결','defend':'공정가 하회 방어 청산','stop':'손절 거리 도달','brake':'선행거래소 하락 지속으로 조기 청산',
            'dust':'최소 주문액 미만 잔량 이월','take_rejected':'익절 주문 거절 후 시장가 청산'}
 HALTS = {'DAILY_LOSS':'일일 손실 제한','ORDER_RECONCILIATION':'주문 접수·체결 결과 미확정',
          'UNTRADEABLE_PARTIAL':'최소 주문액 미만 잔량','INVENTORY_UNAVAILABLE':'C 잔량과 계좌 가용수량 불일치',

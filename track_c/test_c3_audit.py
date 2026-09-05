@@ -63,8 +63,8 @@ class AuditOMSTests(unittest.TestCase):
 
 class AuditMathTests(unittest.TestCase):
     def assess(self, **over):
-        args = dict(coin='BTC', bid=1000., ask=1005., tick=5., dev=0., contract=CONTRACT,
-                    units=UNITS, cash=D(300000), risk_remaining=D(1000))
+        args = dict(coin='BTC', bid=1000., ask=1005., tick=5., dev=.5, contract=CONTRACT,
+                    units=UNITS, cash=D(300000), risk_remaining=D(1000), flow32=0, m30=0, m10=0)
         args.update(over)
         return rule.assess(rule_cfg(), **args)
 
@@ -133,6 +133,7 @@ class RunnerAuditTests(unittest.IsolatedAsyncioTestCase):
         r.refresh_account = AsyncMock()
         r.fair_for = lambda *args: None
         r.last_fair = {}
+        r.markets = {}
         r.snapshot = lambda *args: None
         return r
 
@@ -162,6 +163,15 @@ class RunnerAuditTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QueueAuditTests(unittest.TestCase):
+    def test_activation_wealth_blocks_exclude_earlier_pnl_and_require_end_coverage(self):
+        from .c3_replay import evaluation_blocks
+        day = 86400000
+        curve = [(0,100.),(1000,110.),(day+1000,112.),(2*day+1000,109.)]
+        blocks = evaluation_blocks(curve,1000,2*day+1000)
+        self.assertEqual([b['net_krw'] for b in blocks.values()], [2.,-3.])
+        self.assertTrue(all(b['complete'] for b in blocks.values()))
+        self.assertFalse(evaluation_blocks(curve[:-1],1000,2*day+1000)['1']['complete'])
+
     def test_better_levels_do_not_create_phantom_same_price_queue(self):
         from .simulation import Exchange
         from .outcomes import Path
