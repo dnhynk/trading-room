@@ -1275,4 +1275,6 @@ class Cycle:
 
 
 if __name__ == "__main__":
+    from bot.lifecycle import require_active
+    require_active("cycle", ROOT)
     asyncio.run(Cycle(sys.argv[1] if len(sys.argv) > 1 else None).run())   # 심볼을 주면 그 심볼에 못박힌다(포트폴리오); 없으면 strat.symbol

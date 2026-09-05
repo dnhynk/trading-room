@@ -1,0 +1,310 @@
+{
+  "version": 1,
+  "name": "extracted-b-single-unit-timing-reference",
+  "equity": 100.0,
+  "signal": {
+    "vol_hl": 300,
+    "v_hl": 8,
+    "a_lag": 5,
+    "swing_s": 600,
+    "dip_min_atr": 3.0,
+    "v_fast": 1.0,
+    "v_slow": 0.3,
+    "hold_s": 3,
+    "brk_lookback": 1800,
+    "brk_atr": 0.3,
+    "brk_vol": 2.0,
+    "brk_cooldown": 300,
+    "cooldown": 60,
+    "refire_atr": 1.0,
+    "depth_levels": 5,
+    "rg_window": 90,
+    "rg_theta": 0.7,
+    "rg_drift": 6.0,
+    "rg_counter_max": 1,
+    "rg_confirm": 3,
+    "rg_dead_sw": 2,
+    "rg_drift_min_pct": 2.0,
+    "rg_leg_on": 1,
+    "rg_leg_pct": 2.0,
+    "vp_window": 360,
+    "vp_bucket_ticks": 5,
+    "vp_hvn": 1.5,
+    "c1_on": 1,
+    "c1_dev": 0.4,
+    "c1_vr": 1.5,
+    "c1_wick": 0.33,
+    "c1_roc": 0.3,
+    "c1_decel": 0.35,
+    "s8_on": 0,
+    "s8_h": 8,
+    "s8_decel": 0.3,
+    "s8_rebuild": 0.5,
+    "s8_cool": 60,
+    "s8_hold": 1,
+    "s8_vd": 0,
+    "s8_dip": 1,
+    "s8_pop": 1,
+    "s8_gap_s": 0,
+    "stop_lookback": 180,
+    "vd_spike": 2.0,
+    "vd_decay": 0.5,
+    "vd_gate": 0
+  },
+  "strategy": {
+    "side": "long",
+    "unit_qty": 70,
+    "max_units": 1,
+    "max_notional": 900,
+    "step_add_pct": 0.5,
+    "step_add_atr": 0.4,
+    "gap_rebuy_pct": 0.3,
+    "step_add_max_pct": 0.0,
+    "lever": 20,
+    "margin_mode": "crossed",
+    "pop_min_pct": 0.4,
+    "unit_min_pct": 0.15,
+    "full_exit_pct": 3.0,
+    "trim_taker_after_s": 60,
+    "trim_taker_slip_pct": 0.1,
+    "trim_rest_pct": 0,
+    "trim_retrace_atr": 0.5,
+    "retrace_frac": 0.2,
+    "fee_rt_pct": null,
+    "wallet_frac": 1.0,
+    "blowoff_atr": 0.0,
+    "blowoff_frac": 0.5,
+    "exit": false,
+    "exit_after_s": 600,
+    "exit_atr": 3.0,
+    "wind_down": false,
+    "unit_frac": 0.75,
+    "cap_frac": 0.05,
+    "daily_loss_frac": 0.15,
+    "notional_frac": 0.75,
+    "cap_min_atr": 15,
+    "trim_market_atr": 0.0,
+    "trim_market_frac": 0.0,
+    "trim_market_only": 0,
+    "trim_market_against": 0,
+    "trim_market_core": 0,
+    "gate_relax": 0.5,
+    "gate_floor_unit_pct": 0.05,
+    "add_confirm": 0,
+    "confirm_within_s": 90,
+    "fail_exit_n": 0,
+    "flow_exit_n": 0,
+    "exit_random": 0.0,
+    "exit_seed": 0,
+    "entry_v": 1,
+    "entry_flow": 1,
+    "entry_decay": 1,
+    "entry_mult": 0,
+    "add_mult": 0.5,
+    "entry_random": 0.0,
+    "entry_seed": 0,
+    "against_daily_mult": 1.0,
+    "against_regime_mult": 1.0,
+    "core_units": 1,
+    "favor_pop_mult": 2.0,
+    "derisk_pct": 0,
+    "derisk_on_breakdown": true,
+    "derisk_core_frac": 0.5,
+    "derisk_on_against": 0,
+    "derisk_under_units": 0,
+    "cap_usdt": 20,
+    "cap_per_unit": 1,
+    "stop_structural": null,
+    "stop_structural_on": 1,
+    "stop_buffer_atr": 0.3,
+    "stop_trail": 1,
+    "stop_lock_atr": 2.0,
+    "stop_trail_atr": 1.5,
+    "stop_cooldown_s": 300,
+    "max_stops_day": 3,
+    "buy_ttl_s": 90,
+    "cancel_v": 1.0,
+    "tick": 0.001,
+    "qstep": 0.1,
+    "mode": "dry"
+  },
+  "books": {
+    "AKEUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-07
+    },
+    "APRUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "ARBUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.01,
+      "tick": 0.0001
+    },
+    "BRUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "CPUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-06
+    },
+    "DASHUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.01,
+      "tick": 0.01
+    },
+    "EDGEUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 0.0001
+    },
+    "EGLDUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.1,
+      "tick": 0.001
+    },
+    "ETHUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.01,
+      "tick": 0.01
+    },
+    "FLOCKUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "HYPEUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.01,
+      "tick": 0.001
+    },
+    "MAGMAUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "MARSCOINUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "MUBARAKUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "SKRUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-06
+    },
+    "TRIAUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-06
+    },
+    "TRUMPUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.1,
+      "tick": 0.001
+    },
+    "UAIUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 1,
+      "tick": 1e-05
+    },
+    "XAGUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.01,
+      "tick": 0.01
+    },
+    "ZECUSDT": {
+      "sides": [
+        "long",
+        "short"
+      ],
+      "qstep": 0.001,
+      "tick": 0.01
+    }
+  },
+  "execution": {
+    "maker": 0.0002,
+    "taker": 0.0006,
+    "slip_bps": 5.0,
+    "latency_ms": 1000,
+    "quote_max_age_ms": 5000,
+    "max_participation": 0.1
+  },
+  "validation": {
+    "min_days": 20,
+    "min_campaigns": 100,
+    "max_drawdown_frac": 0.15,
+    "horizon_s": 900,
+    "embargo_s": 900,
+    "bootstrap_samples": 2000,
+    "seed": 20260905
+  }
+}

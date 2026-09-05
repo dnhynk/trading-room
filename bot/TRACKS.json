@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "active_focus": "C",
+  "updated_at": "2026-09-05T19:11:44+09:00",
+  "tracks": {
+    "A": {"status": "paused", "restart_requires_user_instruction": true},
+    "B": {"status": "paused", "restart_requires_user_instruction": true},
+    "C": {
+      "status": "live",
+      "venue": "coinone",
+      "hosting": "aws-ap-northeast-2",
+      "instance_id": "i-0db0329527b7b3533",
+      "capital_mode": "account_equity",
+      "observed_equity_krw": "594563.957",
+      "order_sizing": "fixed_minimum_grid_10000_krw_until_preregistered_adoption",
+      "policy": "c3-rule-v1",
+      "state_schema": 3,
+      "evaluation_state": "preregistered_multiday_replay_pending",
+      "simultaneous_campaigns": true,
+      "trading_coins": ["BTC", "ETH", "XRP", "SOL"],
+      "leaders": ["upbit", "bithumb"],
+      "funding_allocation": "entire_account_balance_compounding",
+      "installed_mode": "observe_then_live",
+      "host_state": "running",
+      "c2_retired_by": "track_c/AUDIT-20260905.md"
+    }
+  },
+  "suspension": {
+    "archive": "logs/suspensions/track-ab-20260905-162614",
+    "controls": ["STOP", "PAUSE"],
+    "engine_positions_at_verification": 0,
+    "engine_orders_at_verification": 0,
+    "pool_claims_at_verification": 0,
+    "last_close": {
+      "symbol": "DASHUSDT", "side": "long", "quantity": "0.43",
+      "price": "69.31", "order_id": "1480033807485259779"
+    }
+  }
+}

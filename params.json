@@ -1,6 +1,30 @@
 {
   "record": {
-    "MAGMAUSDT": [
+    "DASHUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "MARSCOINUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "ZENUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "FLOCKUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "EDGEUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -12,13 +36,19 @@
       "ticker",
       "candle1m"
     ],
-    "CPUSDT": [
+    "ARBUSDT": [
       "trade",
       "books15",
       "ticker",
       "candle1m"
     ],
-    "EGLDUSDT": [
+    "BRUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "MAGMAUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -30,7 +60,13 @@
       "ticker",
       "candle1m"
     ],
-    "CHIPUSDT": [
+    "ROBOUSDT": [
+      "trade",
+      "books15",
+      "ticker",
+      "candle1m"
+    ],
+    "TRIAUSDT": [
       "trade",
       "books15",
       "ticker",
@@ -41,8 +77,8 @@
     ]
   },
   "strat": {
-    "symbol": "MAGMAUSDT",
-    "side": "short",
+    "symbol": "DASHUSDT",
+    "side": "long",
     "sides": [
       "long",
       "short"
@@ -94,24 +130,129 @@
     "lever": 10
   },
   "books": {
-    "MAGMAUSDT": {
+    "DASHUSDT": {
+      "wallet_frac": 1.0,
+      "sides": [
+        "long"
+      ],
+      "hunt": 1,
+      "unit_frac": 0.75,
+      "cap_frac": 0.05,
+      "daily_loss_frac": 0.15,
+      "notional_frac": 0.75,
+      "max_stops_day": 3,
+      "lever": 20,
+      "cap_min_atr": 15,
+      "max_units": 1,
+      "stop_lock_atr": 2.0,
+      "stop_trail_atr": 1.5,
+      "cap_per_unit": 1,
+      "against_regime_mult": 1.0,
+      "entry_v": 1,
+      "entry_flow": 1,
+      "entry_decay": 1,
+      "entry_mult": 0,
+      "add_mult": 0.5,
+      "blowoff_atr": 8.0,
+      "blowoff_frac": 0.5
+    },
+    "MARSCOINUSDT": {
       "wallet_frac": 1.0,
       "sides": [
         "short"
       ],
       "hunt": 1,
-      "unit_frac": 1.5,
-      "cap_frac": 0.1,
-      "daily_loss_frac": 0.3,
-      "notional_frac": 4.5,
+      "unit_frac": 0.75,
+      "cap_frac": 0.05,
+      "daily_loss_frac": 0.15,
+      "notional_frac": 0.75,
       "max_stops_day": 3,
       "lever": 20,
       "cap_min_atr": 15,
-      "max_units": 3,
+      "max_units": 1,
       "stop_lock_atr": 2.0,
       "stop_trail_atr": 1.5,
       "cap_per_unit": 1,
-      "against_regime_mult": 1.0
+      "against_regime_mult": 1.0,
+      "entry_v": 1,
+      "entry_flow": 1,
+      "entry_decay": 1,
+      "entry_mult": 0,
+      "add_mult": 0.5
+    },
+    "ZENUSDT": {
+      "wallet_frac": 1.0,
+      "sides": [
+        "long"
+      ],
+      "hunt": 1,
+      "unit_frac": 0.75,
+      "cap_frac": 0.05,
+      "daily_loss_frac": 0.15,
+      "notional_frac": 0.75,
+      "max_stops_day": 3,
+      "lever": 20,
+      "cap_min_atr": 15,
+      "max_units": 1,
+      "stop_lock_atr": 2.0,
+      "stop_trail_atr": 1.5,
+      "cap_per_unit": 1,
+      "against_regime_mult": 1.0,
+      "entry_v": 1,
+      "entry_flow": 1,
+      "entry_decay": 1,
+      "entry_mult": 0,
+      "add_mult": 0.5,
+      "blowoff_atr": 8.0,
+      "blowoff_frac": 0.5
+    },
+    "FLOCKUSDT": {
+      "wallet_frac": 1.0,
+      "sides": [
+        "short"
+      ],
+      "hunt": 1,
+      "unit_frac": 0.75,
+      "cap_frac": 0.05,
+      "daily_loss_frac": 0.15,
+      "notional_frac": 0.75,
+      "max_stops_day": 3,
+      "lever": 20,
+      "cap_min_atr": 15,
+      "max_units": 1,
+      "stop_lock_atr": 2.0,
+      "stop_trail_atr": 1.5,
+      "cap_per_unit": 1,
+      "against_regime_mult": 1.0,
+      "entry_v": 1,
+      "entry_flow": 1,
+      "entry_decay": 1,
+      "entry_mult": 0,
+      "add_mult": 0.5
+    },
+    "EDGEUSDT": {
+      "wallet_frac": 1.0,
+      "sides": [
+        "short"
+      ],
+      "hunt": 1,
+      "unit_frac": 0.75,
+      "cap_frac": 0.05,
+      "daily_loss_frac": 0.15,
+      "notional_frac": 0.75,
+      "max_stops_day": 3,
+      "lever": 20,
+      "cap_min_atr": 15,
+      "max_units": 1,
+      "stop_lock_atr": 2.0,
+      "stop_trail_atr": 1.5,
+      "cap_per_unit": 1,
+      "against_regime_mult": 1.0,
+      "entry_v": 1,
+      "entry_flow": 1,
+      "entry_decay": 1,
+      "entry_mult": 0,
+      "add_mult": 0.5
     }
   },
   "sig": {
@@ -173,14 +314,14 @@
     "universe": 5000000.0,
     "max_atr": 2.0,
     "strat": {
-      "unit_frac": 1.5,
-      "cap_frac": 0.1,
-      "daily_loss_frac": 0.3,
-      "notional_frac": 4.5,
+      "unit_frac": 0.75,
+      "cap_frac": 0.05,
+      "daily_loss_frac": 0.15,
+      "notional_frac": 0.75,
       "max_stops_day": 3,
       "lever": 20,
       "cap_min_atr": 15,
-      "max_units": 3,
+      "max_units": 1,
       "stop_lock_atr": 2.0,
       "stop_trail_atr": 1.5,
       "cap_per_unit": 1,
@@ -196,6 +337,10 @@
     "ai_effort": "xhigh",
     "ai_timeout_s": 300,
     "ai_runs": 3,
-    "ai_charts": 6
+    "ai_charts": 6,
+    "pool": 1,
+    "max_books": 12,
+    "min_twoway": 8,
+    "every_min": 15
   }
 }

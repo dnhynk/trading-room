@@ -97,6 +97,8 @@ def name_of(sym): return f"cycle-{sym}" if sym else "cycle"
 def main():
     job = sys.argv[1]                                   # cycle:SYMBOL = 그 심볼에 못박힌 엔진(포트폴리오)
     base, _, sym = job.partition(":")
+    from bot.lifecycle import require_active
+    require_active(base, ROOT)
     cmd = JOBS[base] + ([sym] if sym else [])
     job = job.replace(":", "-")                         # 로그·pid 파일명: Windows 는 콜론을 못 쓴다
     os.makedirs(os.path.join(ROOT, "logs"), exist_ok=True)

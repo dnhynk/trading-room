@@ -1,5 +1,11 @@
 # trading-room — 순환매 엔진 레포 규약
 
+## 현재 트랙 C 운영 (2026-09-05)
+
+C는 C3 `track_c.c3_runner`(선행거래소 공정가 규칙형 메이커)와 state v3 포트폴리오를 사용한다. `bot/CONCEPT-C.md`가 계약, `track_c/README.md`가 운영, `track_c/AUDIT-20260905.md`가 근거다. `python -m track_c.deploy_c3 status`로 mode·PAUSE·공정가·선행거래소 연결·캠페인·잔량 이월을 확인한다. C2 학습형 정책·`deploy_quant`·모델 worker는 폐기됐고 재기동하지 않는다. Slack 원화는 소수점 없이 표시한다. 아래 A/B 변경·감독 규칙은 A/B에 해당하며 C 배포는 C의 flat·장부 호환성 절차를 따른다.
+
+`bot/TRACKS.json`과 `bot/BOOT.md`의 현재 운영 상태를 먼저 읽는다. A/B는 사용자 지시로 일시정지했고 아래 A/B 감시견·Monitor를 자동 재개하지 않는다. C는 AWS `trading-room-c.service`로 실거래하며 운용자본은 계좌 잔액 전체 복리다. C 계약은 `bot/CONCEPT-C.md`다. 알림은 독립 `trading-room-c-notify.service`가 `bot.notify`의 C 원화 경로로 보낸다. C `data/ledger.sqlite`/`status.json`만 읽으며 A/B USDT 계기판을 섞지 않는다. `python -m track_c.deploy_notify status`로 기존 worker를 확인하고 중복 릴레이를 시작하지 않는다. C 알림의 당일은 KST이며 엔진의 UTC 일일 위험 제한과 구분한다. C 알림 작업 때문에 매매 엔진을 재기동하지 않는다. 상세 운영·장애 확인은 `track_c/README.md`다.
+
 이 레포의 세션은 둘 중 하나다. 사용자가 말하지 않으면 감독 세션이다.
 - **감독 세션**(기본): `bot/BOOT.md`대로 부팅한다(메모리 → CONCEPT/RULES → preflight → Monitor). 매매의 95%는 결정론 엔진(`bot/cycle.py`)이 하고, 세션은 이상 이벤트 판단·종목/방향·params 한 줄 조정만 한다. 컨텍스트를 가볍게 유지한다 — 코드 수정은 하지 않고 사용자에게 수정 세션을 제안한다.
 - **수정 세션**(사용자가 "수정 세션" / "메커니즘 바꾸자"라고 열 때): 메모리 `cycle-harness-plan` → `bot/CONCEPT.md`(+ 트랙 B를 만지면 `bot/CONCEPT-B.md`) → `bot/RULES.md` → `bot/NEXT.md`(미뤄둔 작업과 착수 조건)를 읽고 아래 "엔진 변경 절차"대로 일한다. 끝나면 메모리·RULES를 현재 계약으로 갱신하고 한 줄 보고 후 종료한다.

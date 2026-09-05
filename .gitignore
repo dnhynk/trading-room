@@ -4,4 +4,6 @@ __pycache__/
 *.pyc
 bot.pid
 STOP
+PAUSE
+RESUME
 data/
