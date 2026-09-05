@@ -44,6 +44,7 @@ GONE = ("not exist", "does not exist", "already", "finished", "completed")      
 SLIP = 0.0005          # dry-mode stop-out slippage
 REJECT_RETRY_S = 5.0   # an explicit exchange rejection is known-not-placed; throttle persistent reduce desires and stale decisions
 NO_POS_RETRY_S = 60.0  # the exchange said this side is EMPTY (43023 on a stop / 22002 on a reduce): one probe a minute until it shows a position again, not one per tick
+RESUME_GRACE_S = 5.0   # a RESUME file stays this long after it was written so that EVERY engine of the basket (one per book, polling once a second) honours it before one deletes it
 LIVE_ZERO = ("entry_random", "exit_random")   # measurement-only strat keys (the random baselines of the entry / exit grids): a live book must not carry them - the file is rejected as PARAMS_INVALID
 
 
@@ -121,13 +122,13 @@ class Pool:
     def day_loss(self, exclude=None):
         """Today's realized P&L summed over every engine's state file (a book's `realized` is the UTC day's: day_close resets it); `exclude`
         leaves one symbol out (the asking book adds its own live figure instead of its up-to-5-s-old snapshot). Cached 5 s: check_daily asks every tick."""
-        now = time.time(); c = self._dl.get(exclude)
-        if c and now - c[0] < 5: return c[1]
-        day = time.strftime("%Y-%m-%d", time.gmtime()); tot = 0.0
+        now = time.time(); day = time.strftime("%Y-%m-%d", time.gmtime()); c = self._dl.get(exclude)
+        if c and now - c[0] < 5 and c[2] == day: return c[1]   # a cache entry from the previous UTC day is not today's sum: at 09:00:01 KST 2026-09-05 the 4-s-old
+        tot = 0.0                                              # figure (-21.0 of the day just closed) re-halted DASH and MARSCOIN one second after day_close had lifted them
         for sym, st in (self.states() or {}).items():
             if sym == exclude or st.get("day") != day: continue
             for b in (st.get("books") or {}).values(): tot += float(b.get("realized") or 0.0)
-        self._dl[exclude] = (now, tot)
+        self._dl[exclude] = (now, tot, day)
         return tot
 
 
@@ -1002,12 +1003,7 @@ class Cycle:
             await asyncio.sleep(1)
             try:
                 if os.path.exists(os.path.join(ROOT, "STOP")): await self.shutdown("STOP file")
-                rp = os.path.join(ROOT, "RESUME")
-                if os.path.exists(rp):                              # always consumed: a stale RESUME must not lift a later HALT
-                    for bk in self.books.values():
-                        if bk.pos["halt"]: bk.ev("RESUME", was=bk.pos["halt"]); bk.pos["halt"] = None; bk.mismatch_since = None
-                    if not any(bk.pos["halt"] for bk in self.books.values()): self.ev("RESUME", was=None)
-                    os.remove(rp)
+                self.consume_resume()
                 if self.mode == "live" and self.prv.connected and (self.resync_due or time.time() - self.resync_t >= 60):
                     self.resync_due, self.resync_t = False, time.time()
                     for bk in self.books.values():
@@ -1049,6 +1045,23 @@ class Cycle:
                 else: self.hint_since = None
                 if self.dirty or time.time() - last_state >= 5: self.write_state(); last_state = time.time()
             except Exception as e: self.err("housekeeping", e)
+
+    def consume_resume(self, path=None):
+        """The RESUME control file lifts every HALT of this engine — once per file (its mtime), and the file is removed only RESUME_GRACE_S
+        after it was written. The basket runs one engine per book, and the first engine to poll used to delete the file before the halted
+        ones ever saw it: 2026-09-05 09:31 FLOCK (not halted) consumed six RESUMEs in a row while DASH and MARSCOIN stayed DAILY_LOSS.
+        A file older than the grace at first sight is still honoured once by that engine (a human wrote it), then removed."""
+        rp = path or os.path.join(ROOT, "RESUME")
+        try: mt = os.path.getmtime(rp)
+        except OSError: return
+        if mt != getattr(self, "resume_seen", None):
+            self.resume_seen = mt
+            for bk in self.books.values():
+                if bk.pos["halt"]: bk.ev("RESUME", was=bk.pos["halt"]); bk.pos["halt"] = None; bk.mismatch_since = None
+            if not any(bk.pos["halt"] for bk in self.books.values()): self.ev("RESUME", was=None)
+        if time.time() - mt > RESUME_GRACE_S:                   # every engine has had its second: gone, so a stale file never lifts a later HALT
+            try: os.remove(rp)
+            except OSError: pass
 
     async def reload_params(self):
         try: m = os.path.getmtime(PARAMS)

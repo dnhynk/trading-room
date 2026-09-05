@@ -603,6 +603,28 @@ class CapitalPool(unittest.TestCase):
         states = lambda: {"XUSDT": dict(day=day, books=dict(short=dict(realized=-40.0))), "AUSDT": dict(day=day, books=dict(long=dict(realized=-5.0)))}
         a = self.pool("AUSDT", states=states)
         self.assertEqual(a.day_loss(), -45.0); self.assertEqual(a.day_loss(exclude="AUSDT"), -40.0)   # the asker adds its own live figure instead of its snapshot
+        a._dl["AUSDT"] = (time.time(), -999.0, "2000-01-01")                                          # a fresh cache entry from another UTC day is not reused
+        self.assertEqual(a.day_loss(exclude="AUSDT"), -40.0)                                          # (09:00:01 KST 2026-09-05: yesterday's -21 re-halted two books a second after day_close)
+        a._dl["AUSDT"] = (time.time(), -999.0, day); self.assertEqual(a.day_loss(exclude="AUSDT"), -999.0)   # same day, under 5 s: the cache answers
+
+class ResumeFile(unittest.TestCase):
+    """RESUME lifts every engine's HALT once per file and the file outlives the first reader by RESUME_GRACE_S: with one engine per book, the
+    first engine to poll used to delete it before the halted ones saw it (2026-09-05 09:31: FLOCK ate six RESUMEs, DASH / MARSCOIN stayed halted)."""
+    def test_every_engine_honours_a_resume_once_and_the_file_survives_the_grace(self):
+        from bot.cycle import Cycle
+        d = tempfile.mkdtemp(); rp = os.path.join(d, "RESUME")
+        cy1, bk1 = book(); cy1.books = {"long": bk1}; bk1.pos["halt"] = "DAILY_LOSS"
+        cy2, bk2 = book(); cy2.books = {"long": bk2}; bk2.pos["halt"] = "DAILY_LOSS"
+        open(rp, "w").close()
+        Cycle.consume_resume(cy1, rp)                                                     # the first engine: lifted, file kept (inside the grace)
+        self.assertIsNone(bk1.pos["halt"]); self.assertTrue(os.path.exists(rp)); self.assertIn("RESUME", kinds(cy1))
+        Cycle.consume_resume(cy1, rp); self.assertEqual(kinds(cy1).count("RESUME"), 2)   # the same file again: not honoured twice (the book-level and the engine-level event once each)
+        Cycle.consume_resume(cy2, rp); self.assertIsNone(bk2.pos["halt"])                # the second engine still finds it
+        os.utime(rp, (time.time() - 10, time.time() - 10))                                # past the grace: whoever polls next removes it
+        cy3, bk3 = book(); cy3.books = {"long": bk3}; bk3.pos["halt"] = "STOP_FAILED"
+        Cycle.consume_resume(cy3, rp); self.assertIsNone(bk3.pos["halt"]); self.assertFalse(os.path.exists(rp))   # honoured once by the remover too
+        Cycle.consume_resume(cy3, rp); self.assertEqual(kinds(cy3).count("RESUME"), 2)   # no file: nothing
+        shutil.rmtree(d, ignore_errors=True)
 
 class BasketDailyBrake(unittest.TestCase):
     """With the pool on, a campaign in flight is braked by the day's realized losses of the OTHER books too: the pool's shield only refuses
