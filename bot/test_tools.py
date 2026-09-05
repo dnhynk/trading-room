@@ -321,5 +321,5 @@ class MultiBook(unittest.TestCase):
         finally: backtest.load_seconds, backtest.seed_history, backtest.latest_equity, backtest.contract_meta, backtest.load_params = old
         self.assertEqual(sorted(m["books"]), ["AUSDT:long", "BUSDT:short"]); self.assertEqual(m["pool"]["book_seconds"], 10); self.assertEqual(m["pool"]["cap"], 1)
         self.assertEqual((m["books"]["AUSDT:long"]["side"], m["books"]["BUSDT:short"]["side"]), ("long", "short"))
-        self.assertAlmostEqual(m["books"]["AUSDT:long"]["sizing"]["unit_qty"], 10.5, 6)                              # 700 x 1.0 (wallet/cap) x 1.5 / 100.01, as a whole-wallet book
+        self.assertAlmostEqual(m["books"]["AUSDT:long"]["sizing"]["unit_qty"], 10.49, 6)  # B floors below 700 * 1.5 / 100.01
         self.assertEqual((m["pool"]["total"], m["pool"]["campaigns"], m["pool"]["refused"]), (0.0, 0, 0))     # a flat tape: nothing traded, nothing refused

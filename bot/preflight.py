@@ -83,6 +83,25 @@ def main():
             rep("PASS" if alive else "FAIL", f"supervisor {job} pid {pid} {'alive' if alive else 'NOT running'}")
         except Exception as e: rep("FAIL", f"supervisor {job}: {e}")
     if hunt_on:
+        # New B entries require readable durable risk accounting. This is a pure
+        # read: never claim/release a slot or repair a lock during preflight.
+        try:
+            from bot.risk import FillLedger
+            pnl, stops = FillLedger(os.path.join(LOGS, "events.jsonl")).summary()
+            rep("PASS", f"B UTC fill ledger: net {pnl:+.6f}, distinct stops {stops} (fees included; funding excluded)")
+        except Exception as e:
+            rep("FAIL", f"B fill ledger unreadable: {type(e).__name__}; reconcile before enabling entries")
+        pool_path = os.path.join(LOGS, "pool.json")
+        if os.path.exists(pool_path + ".lock"):
+            rep("WARN", "B pool lock exists; do not break by age, verify its owner if it persists")
+        try:
+            with open(pool_path, encoding="utf-8") as fh: claims = json.load(fh)["claims"]
+            if not isinstance(claims, dict): raise ValueError("invalid claims")
+            rep("PASS", f"B pool file readable: {len(claims)} reservation(s); fresh owners must publish the new risk budget after rollout")
+        except FileNotFoundError:
+            rep("FAIL", "B pool file missing: existing live engines refuse new claims until the owner reconciles exposure and initializes it")
+        except Exception as e:
+            rep("FAIL", f"B pool file unreadable: {type(e).__name__}; do not overwrite evidence")
         try: pid, alive = alive_pid("select")
         except Exception: alive = False
         rep("FAIL" if alive else "PASS", f"hunt mode: bot.select {'is RUNNING — two writers of params.books' if alive else 'stopped'}")
@@ -96,7 +115,8 @@ def main():
         last = [l for l in lines if " REC " in l][-1]; rep("INFO", f"recorder last stats: {last[:120]}")
     except Exception: rep("WARN", "recorder has no REC line yet")
     # track B too (test_hunt / test_whale / test_phases): without them the selector and the evidence tables can break while preflight says PASS
-    mods = ["bot.test_signal", "bot.test_cycle", "bot.test_select", "bot.test_tools", "bot.test_hunt", "bot.test_whale", "bot.test_phases", "bot.test_supervise"]
+    mods = ["bot.test_signal", "bot.test_cycle", "bot.test_select", "bot.test_tools", "bot.test_hunt", "bot.test_whale", "bot.test_phases", "bot.test_supervise",
+            "bot.test_risk", "bot.test_research_b", "bot.test_replay_b"]
     r = subprocess.run([sys.executable, "-m", "unittest"] + mods, cwd=ROOT, capture_output=True, text=True)
     rep("PASS" if r.returncode == 0 else "FAIL", f"unit tests: {(r.stderr or r.stdout).strip().splitlines()[-1]}")
     fails = [m for lv, m in out if lv == "FAIL"]

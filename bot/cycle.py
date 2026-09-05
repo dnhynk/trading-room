@@ -26,12 +26,13 @@ are placed only while the private feed is up (all five channels acknowledged); a
 whose response was lost stay tracked until the exchange settles them (limit: by clientOid; market: no second one until known).
 An existing stop is never moved against the position; a stop the market has already passed (40917) or a position without a valid
 stop level is market-closed (after the resting orders are confirmed gone) and booked as a stop hit; one stop order counts once."""
-import asyncio, glob, json, os, sys, time
+import asyncio, glob, hashlib, json, math, os, sys, time
 from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import from_env, BitgetError
 from bot.signal import Features, Strategy, STRAT, SIG, apply_fill, pos_stats, book_params, sim_match, sim_book, unit_under_cap
 from bot.ws import WS, PUB_URL, PRV_URL, PRIVATE_ARGS, INST, load_params, PARAMS, strat_for, portfolio, outside_books, load_states
+from bot.risk import FillLedger, floor_qty
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
@@ -51,57 +52,118 @@ LIVE_ZERO = ("entry_random", "exit_random")   # measurement-only strat keys (the
 class Pool:
     """The hunt basket's first-come capital pool (CONCEPT-B 바구니, user 2026-09-04): every eligible coin has a book, but at most `cap` of them
     hold a campaign at once — whichever confirmed its first unit first. logs/pool.json = {"claims": {SYMBOL: {"t": epoch, "pid": pid}}} is
-    the truth across engine processes. A claim is a lease: the holder refreshes it while positioned or armed (tend), so a claim older than
-    TTL belongs to a dead engine and is swept by the next claimant. Engines exclude each other by creating pool.json.lock (an owner that
-    died leaves it; older than LOCK_TTL it is broken). cap 0 = no pool (the book never asks). The day's realized loss summed over every
-    engine's state file at or under -limit (this book's daily_loss_limit = wallet x daily_loss_frac) refuses every claim (pool_daily):
-    per-book daily limits alone would let the basket lose that once per coin."""
+    the reservation across engine processes. Lease expiry alone never proves flat: reclaim needs a newer, complete, fresh live snapshot.
+    Missing claims are reconstructed from held/pending exposure; a missing file with existing live engines needs reconciliation.
+    The exclusive file lock is never stolen by age. cap 0 = no pool.
+    Append-only live fills enforce the UTC day's basket-wide loss and stop limits across symbol/side/process rotation; reservations
+    must also fit the remaining nominal campaign-loss budget (fees included, gaps/funding not guaranteed)."""
     TTL, LOCK_TTL, LOCK_WAIT = 180.0, 10.0, 3.0
     def __init__(self, sym, ev=None, path=None, states=None):
         self.sym, self.ev, self.path = sym, ev or (lambda kind, **kw: None), path or os.path.join(LOGS, "pool.json")
         self.cap, self.limit, self.mine, self.refreshed = 0, None, False, 0.0
+        self.max_stops = 0
+        self.risk = 0.0
         self.states = states or load_states                     # today's realized across engines (a test passes its own)
+        self.ledger = FillLedger(EVENTS) if states is None else None
         self._dl = {}                                           # day_loss cache per `exclude`: check_daily asks every tick
 
     def _locked(self, fn):
-        lock = self.path + ".lock"; t0 = time.time()
+        lock = self.path + ".lock"; t0 = time.monotonic()
         while True:
             try: os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)); break
             except FileExistsError:
-                try:
-                    if time.time() - os.path.getmtime(lock) > self.LOCK_TTL: os.remove(lock); continue
-                except OSError: continue
-                if time.time() - t0 > self.LOCK_WAIT: raise TimeoutError("pool lock held")
+                # Age does not prove the holder is dead. Stealing a slow holder's
+                # lock lets two processes allocate the same wallet concurrently.
+                if time.monotonic() - t0 > self.LOCK_WAIT: raise TimeoutError("pool lock held; verify owner before recovery")
                 time.sleep(0.05)
         try:
             try:
-                with open(self.path, encoding="utf-8") as fh: claims = json.load(fh).get("claims") or {}
-            except (OSError, ValueError): claims = {}
+                with open(self.path, encoding="utf-8") as fh: claims = json.load(fh)["claims"]
+                if not isinstance(claims, dict): raise ValueError("invalid pool claims")
+            except FileNotFoundError:
+                states = self.states(strict=True) if self.states is load_states else self.states()
+                if any(st.get("mode") == "live" for st in states.values()):
+                    raise FileNotFoundError("pool file missing with existing live engines; reconcile before initialization")
+                claims = {}
             out = fn(claims)
-            with open(self.path, "w", encoding="utf-8") as fh: json.dump(dict(claims=claims, t=time.strftime("%Y-%m-%d %H:%M:%S")), fh)
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(dict(claims=claims, t=time.strftime("%Y-%m-%d %H:%M:%S")), fh, allow_nan=False)
+                    fh.flush(); os.fsync(fh.fileno())
+                os.replace(tmp, self.path)
+            finally:
+                if os.path.exists(tmp): os.remove(tmp)
             return out
         finally:
             try: os.remove(lock)
             except OSError: pass
 
     def _sweep(self, claims, now):
+        states = self.states(strict=True) if self.states is load_states else self.states()
+        for sym, st in states.items():
+            if st.get("mode") == "dry": continue
+            try: recent = 0 <= now - time.mktime(time.strptime(st["t"], "%Y-%m-%d %H:%M:%S")) <= self.TTL
+            except (KeyError, ValueError): recent = False
+            if self._occupied(st, exchange=recent) and sym not in claims:
+                claims[sym] = dict(t=now, pid=0)  # a missing reservation does not erase exposure
         for s, c in list(claims.items()):
-            if s != self.sym and now - float(c.get("t") or 0) > self.TTL:
-                del claims[s]; self.ev("POOL_STALE", pool_symbol=s, age=int(now - float(c.get("t") or 0)))
+            stamp = float(c["t"])
+            if not math.isfinite(stamp): raise ValueError("invalid pool timestamp")
+            if s != self.sym and now - stamp > self.TTL:
+                st = states.get(s) or {}
+                try: seen = time.mktime(time.strptime(st["t"], "%Y-%m-%d %H:%M:%S"))
+                except (KeyError, ValueError): continue
+                if (st.get("mode") == "live" and st.get("books") and stamp < seen <= now
+                        and now - seen <= self.TTL and self._flat_proven(st)):
+                    del claims[s]; self.ev("POOL_STALE", pool_symbol=s, age=int(now - stamp))
 
-    def _lease(self): return dict(t=time.time(), pid=os.getpid())
+    @staticmethod
+    def _occupied(st, exchange=True):
+        for b in (st.get("books") or {}).values():
+            pos, ex = b.get("pos") or {}, b.get("exch") or {}
+            lots = pos.get("qty") or sum(l[0] for l in pos.get("lots") or [])
+            if (((lots or (exchange and ex.get("total"))) and not b.get("phantom")) or b.get("arm")
+                    or any((b.get("working") or {}).values()) or b.get("market_pending")):
+                return True
+        return False
+
+    @classmethod
+    def _flat_proven(cls, st):
+        """Missing fields are not proof. Old snapshots must be refreshed by their owner."""
+        if (st.get("ws") or {}).get("prv") is not True: return False
+        for b in (st.get("books") or {}).values():
+            pos, ex, work = b.get("pos"), b.get("exch"), b.get("working")
+            if not isinstance(pos, dict) or not isinstance(ex, dict) or not isinstance(work, dict): return False
+            for d, key in ((pos, "qty"), (ex, "total")):
+                v = d.get(key)
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0: return False
+            if not isinstance(pos.get("lots"), list) or "buy" not in work or "trim" not in work or "arm" not in b: return False
+            if not isinstance(b.get("market_pending"), bool): return False
+        return bool(st.get("books")) and not cls._occupied(st)
+
+    def _lease(self): return dict(t=time.time(), pid=os.getpid(), risk=self.risk)
 
     def claim(self):
         """"" when this book holds the pool (took it now, or already had it); else why not: pool (cap reached), pool_daily, pool_error."""
-        if self.mine: return ""
-        if self.limit and self.day_loss() <= -float(self.limit): return "pool_daily"
         def fn(claims):
             self._sweep(claims, time.time())
+            if self.limit and self.day_loss() <= -float(self.limit): return "pool_daily"
+            if self.max_stops and self.day_stops() >= self.max_stops: return "pool_stops"
             if self.sym not in claims and len(claims) >= self.cap: return "pool"
+            reserves = [c.get("risk") for sym, c in claims.items() if sym != self.sym]
+            if self.limit and any(r is None for r in reserves): return "pool_budget"  # reconstructed/old owner's budget is unknown
+            if any(r is not None and (isinstance(r, bool) or not isinstance(r, (int, float)) or not math.isfinite(r) or r < 0) for r in reserves):
+                raise ValueError("invalid reserved risk")
+            reserved = sum(r or 0 for r in reserves)
+            if self.limit and self.risk and self.day_loss() - reserved - self.risk < -float(self.limit) - 1e-9:
+                return "pool_budget"
             claims[self.sym] = self._lease(); return ""
         try: why = self._locked(fn)
         except Exception as e: self.ev("POOL_ERROR", msg=f"{type(e).__name__}: {str(e)[:120]}"); return "pool_error"   # no campaign without the pool's word
-        if not why: self.mine, self.refreshed = True, time.time(); self.ev("POOL_CLAIM", cap=self.cap)
+        if not why:
+            if not self.mine: self.ev("POOL_CLAIM", cap=self.cap)
+            self.mine, self.refreshed = True, time.time()
         return why
 
     def release(self):
@@ -120,8 +182,8 @@ class Pool:
             self._locked(fn); self.refreshed = time.time()
 
     def day_loss(self, exclude=None):
-        """Today's realized P&L summed over every engine's state file (a book's `realized` is the UTC day's: day_close resets it); `exclude`
-        leaves one symbol out (the asking book adds its own live figure instead of its up-to-5-s-old snapshot). Cached 5 s: check_daily asks every tick."""
+        """UTC-day live fill P&L, durable across book rotation. Injected test states use the legacy 5-s snapshot cache."""
+        if self.ledger is not None: return self.ledger.summary(exclude=exclude)[0]
         now = time.time(); day = time.strftime("%Y-%m-%d", time.gmtime()); c = self._dl.get(exclude)
         if c and now - c[0] < 5 and c[2] == day: return c[1]   # a cache entry from the previous UTC day is not today's sum: at 09:00:01 KST 2026-09-05 the 4-s-old
         tot = 0.0                                              # figure (-21.0 of the day just closed) re-halted DASH and MARSCOIN one second after day_close had lifted them
@@ -130,6 +192,12 @@ class Pool:
             for b in (st.get("books") or {}).values(): tot += float(b.get("realized") or 0.0)
         self._dl[exclude] = (now, tot, day)
         return tot
+
+    def day_stops(self):
+        if self.ledger is not None: return self.ledger.summary()[1]
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        return sum(b.get("stops_today", 0) for st in self.states().values() if st.get("day") == day
+                   for b in (st.get("books") or {}).values())
 
 
 def rnd(x): return round(x, 6) if isinstance(x, float) else x
@@ -166,10 +234,10 @@ def valid_params(sp, sig):
             if k in TYPED:
                 if not TYPED[k](v): bad.append(k)
             elif k in OPTIONAL_NUM:
-                if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0): bad.append(k)
+                if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0): bad.append(k)
             elif isinstance(dv, bool):
                 if not isinstance(v, bool) and v not in (0, 1): bad.append(k)
-            elif isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0 or (k in pos and v <= 0): bad.append(k)
+            elif isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0 or (k in pos and v <= 0): bad.append(k)
     return sorted(set(bad))
 
 
@@ -257,7 +325,7 @@ class Book:
                              last_trim_px=self.pos["last_trim_px"], halt=self.pos["halt"], pause=self.pos["pause"]),
                     realized=rnd(self.realized), working={r: (w and dict(px=w["px"], qty=w["qty"], filled=w["filled"], oid=w["oid"])) for r, w in self.work.items()},
                     stop=self.stop, struct_stop=self.strat.struct_stop, blow_base=self.strat.blow_base, campaign_atr=self.campaign_atr, stops_today=self.stops_today, cooldown_until=self.pos.get("cooldown_until"), preset_plan=self.preset_plan,
-                    exch=self.exch, lever=self.lever, sizing=self.dyn, arm=self.strat.arm, pull=self.strat.pull, regime=self.strat.regime,
+                    exch=self.exch, phantom=self.phantom, market_pending=bool(self.market_pending), lever=self.lever, sizing=self.dyn, arm=self.strat.arm, pull=self.strat.pull, regime=self.strat.regime,
                     **{k: self.sp.get(k) for k in SIZED},   # 자본 비례 한도는 전부 실효값으로 — params 절은 파일 값이고 sizing은 덮어쓴 것만 담는다
                     unit_mult=self.pos.get("unit_mult", 1.0),
                     fail_n=self.strat.fail_n, gate_eff=self.strat.gate_eff, add_confirm=self.sp.get("add_confirm"))
@@ -270,7 +338,12 @@ class Book:
                              or bool(self.unmatched_close))   # 정체불명 close 를 분류하는 15초 동안은 담지 않는다 — 그 사이 담은 로트를 나중에 손절 수량이 LIFO 로 지운다
         self.pos["avail"], self.pos["lever"] = (self.cy.acct["avail"] if self.mode == "live" else None), self.lever
         pool = getattr(self.cy, "pool", None)                        # the hunt basket's FCFS capital pool (hunt.pool = its cap; 0 = none): a campaign's first unit must take it
-        if pool: pool.cap = int((self.cy.p.get("hunt") or {}).get("pool") or 0); pool.limit = self.sp.get("daily_loss_limit")
+        if pool:
+            h = self.cy.p.get("hunt") or {}
+            pool.cap = int(h.get("pool") or 0) if h.get("on") and self.sp.get("hunt") else 0
+            pool.limit, pool.max_stops = self.sp.get("daily_loss_limit"), self.sp.get("max_stops_day", 0)
+            pool.risk = (self.sp["cap_usdt"] * (self.sp["max_units"] if self.sp.get("cap_per_unit") else 1)
+                         + self.sp["max_notional"] * (self.cy.maker + self.cy.taker))
         self.pos["pool"] = pool if pool and pool.cap else None
         dt = self.feat.daily_trend                                   # against the daily trend: smaller units, never a veto
         self.pos["unit_mult"] = self.sp["against_daily_mult"] if dt and dt != ("up" if self.s > 0 else "down") else 1.0
@@ -289,7 +362,16 @@ class Book:
         upl = self.exch["upl"] if self.mode == "live" else (self.s * (f["mid"] - avg) * qty if qty else 0.0)
         lim = self.sp.get("daily_loss_limit")
         pool = getattr(self.cy, "pool", None)                    # the hunt basket (cycle.Pool): the other books' realized today brakes a campaign in flight too — the pool's
-        others = pool.day_loss(exclude=self.symbol) if pool and pool.cap else 0.0   # shield only refuses NEW campaigns, so a book starting at 0 could add a whole ladder after the day's losses
+        try:
+            others = pool.day_loss(exclude=self.symbol) if pool and pool.cap else 0.0
+            if pool and pool.cap:
+                if pool.ledger is not None: others = pool.day_loss() - self.realized
+                stops = pool.day_stops()
+                if pool.max_stops and stops >= pool.max_stops and not self.pos["halt"]:
+                    self.halt("DAILY_STOPS", stops=stops, scope="pool")
+        except Exception as e:
+            if not self.pos["halt"]: self.halt("POOL_ERROR", cause=type(e).__name__)
+            return  # risk entries stop; the caller still reconciles trims and stops
         if lim and others + self.realized + upl <= -lim and not self.pos["halt"]:
             self.ev("DAILY_LOSS", realized=rnd(self.realized), others=rnd(others), upl=rnd(upl), limit=lim); self.halt("DAILY_LOSS")
 
@@ -334,14 +416,18 @@ class Book:
             cap = wallet * self.sp["cap_frac"] if self.sp.get("cap_frac") else self.sp.get("cap_usdt")
             tgt = unit_under_cap(tgt, cap, atr, self.sp.get("cap_min_atr"))   # 돈 한도는 그대로, 유닛이 줄어 한도가 ≥ k ATR 아래에
             cur = self.dyn.get("unit_qty"); step = self.cy.qstep or 0.0   # 이전 동적 값이 있을 때만 damp 한다. 파일의 unit_qty 는 심볼별 계약수라
+            ceiling = tgt
             if cur and cur > step:                                # 다른 심볼로 새로 뜬 엔진의 기준이 못 된다(ZECUSDT 841$ 에 TRUMP 기준 70 이 걸려 60배 유닛); a unit AT the
                 tgt = max(min(tgt, max(cur * 1.25, cur + step)), max(min(cur * 0.75, cur - step), step))   # floor is no reference either. The band is at least one qstep
             new["unit_qty"] = round(quantize_unit(tgt, cur, self.cy.qstep), self.cy.vp)                    # wide: x1.25 of a few steps quantizes back to where it was
+            if self.sp.get("hunt"):
+                new["unit_qty"] = round(floor_qty(min(new["unit_qty"], ceiling), self.cy.qstep), self.cy.vp)
         if self.sp.get("cap_frac"): new["cap_usdt"] = round(wallet * self.sp["cap_frac"], 2)
         if self.sp.get("daily_loss_frac"): new["daily_loss_limit"] = round(wallet * self.sp["daily_loss_frac"], 2)
         if self.sp.get("notional_frac"): new["max_notional"] = round(wallet * self.sp["notional_frac"], 2)
         if qty: new = {k: v for k, v in new.items() if k != "cap_usdt" and self.sp.get(k) is not None and v < self.sp[k]}   # positioned: reductions only, never the cap
-        if any(abs(self.sp.get(k, 0) - v) > 0.02 * max(abs(v), 1e-9) for k, v in new.items()):   # only moves of >= 2%: no per-minute jitter
+        shrinking = self.sp.get("hunt") and any(v < self.sp.get(k, 0) - 1e-12 for k, v in new.items())
+        if shrinking or any(abs(self.sp.get(k, 0) - v) > 0.02 * max(abs(v), 1e-9) for k, v in new.items()):
             self.dyn.update(new); self.sp.update(new); self.strat.p = self.sp
             uq, cap = self.sp.get("unit_qty"), self.sp.get("cap_usdt")
             self.ev("SIZING", wallet=round(wallet, 2), mid=mid, atr=atr, cap_atr=round(cap / (uq * atr), 1) if atr and uq and cap else None, **new)   # cap_atr = 1유닛 기준 한도의 ATR 거리; atr = the sizing reference (the campaign's while positioned)
@@ -545,7 +631,7 @@ class Book:
         """A stop level that needs no features: the stop already set (persisted across a restart) or the money cap below the average
         (using the same campaign-vs-unit denominator as the Strategy)."""
         qty, avg = pos_stats(self.pos)
-        cap_qty = self.sp["unit_qty"] if self.sp.get("cap_per_unit") else max(qty, self.sp["unit_qty"])
+        cap_qty = max(self.sp["unit_qty"], self.cy.qstep) if self.sp.get("cap_per_unit") else max(qty, self.sp["unit_qty"], self.cy.qstep)
         return self.guard(self.strat.stop_px if self.strat.stop_px is not None else avg - self.s * self.sp["cap_usdt"] / cap_qty, avg)
 
     def guard(self, px, ref):
@@ -633,6 +719,13 @@ class Book:
 
     # ---- fills --------------------------------------------------------------------
     async def on_fill(self, role, qty, px, fee, oid, scope="maker", lot=None):
+        if role == "buy" and not self.pos["lots"] and self.sp.get("hunt"):
+            equity = self.cy.acct["equity"]
+            wallet = (equity - (self.cy.acct["upl_all"] or 0.0)) * self.sp.get("wallet_frac", 1.0) if equity is not None else None
+            self.ev("CAMPAIGN_OPEN", wallet=wallet, atr=self.feat.f.get("atr"),
+                    profile={k: v for k, v in self.sp.items() if k not in SIZED and k not in ("symbol", "side", "sides", "tick", "qstep")},
+                    sig=self.feat.p, build=getattr(self.cy, "build_id", None), fees=dict(maker=self.cy.maker, taker=self.cy.taker),
+                    sizing={k: self.sp.get(k) for k in SIZED})
         if lot is None and role == "trim": lot = self.trim_lot.get(oid)
         pnl = apply_fill(self.pos, self.s, role == "buy", qty, px, oid=oid, fee=fee, lot=lot)
         self.realized += pnl; self.strat.on_fill(role, qty)
@@ -799,6 +892,10 @@ class Book:
 
 class Cycle:
     def __init__(self, symbol=None):
+        build = hashlib.sha256()
+        for name in ("cycle.py", "signal.py", "risk.py", "ws.py"):
+            with open(os.path.join(ROOT, "bot", name), "rb") as fh: build.update(fh.read())
+        self.build_id = build.hexdigest()  # startup snapshot, never hash newly edited source at a later fill
         self.want = symbol                                            # CLI 로 못박은 심볼: params 의 strat.symbol 이 바뀌어도 이 엔진은 안 따라간다
         self.p = load_params() or {}; self.pmtime = os.path.getmtime(PARAMS)
         sp = strat_for(self.p, symbol)
@@ -881,7 +978,7 @@ class Cycle:
 
     # ---- run loop -----------------------------------------------------------
     async def run(self):
-        self.ev("START", mode=self.mode, symbol=self.symbol, sides=self.sides, tick=self.px_tick, qstep=self.qstep,
+        self.ev("START", mode=self.mode, track="B" if self.sp.get("hunt") else "A", build=self.build_id, symbol=self.symbol, sides=self.sides, tick=self.px_tick, qstep=self.qstep,
                 books={sd: dict(halt=bk.pos["halt"], lots=bk.pos["lots"], unit=bk.sp["unit_qty"], cap=bk.sp["cap_usdt"]) for sd, bk in self.books.items()})
         self.pub = WS(PUB_URL, lambda r: self.q.put_nowait(("pub", r)), self.on_local, name="pub")
         self.prv = WS(PRV_URL, lambda r: self.q.put_nowait(("prv", r)), self.on_local, auth=(self.b.key, self.b.secret, self.b.passphrase), name="prv")
@@ -1034,7 +1131,12 @@ class Cycle:
                 for bk in self.books.values():
                     if self.mode == "live" and bk.stop_fail >= 3: await bk.stop_failed()
                     if time.time() - bk.sized_t >= 60: bk.resize()
-                if self.pool.cap: self.pool.tend(any(pos_stats(bk.pos)[0] and not bk.phantom for bk in self.books.values()), any(bk.strat.arm or bk.work["buy"] for bk in self.books.values()))   # phantom lots (the exchange says empty) hold no campaign
+                if self.pool.cap:
+                    positioned = any(pos_stats(bk.pos)[0] and not bk.phantom for bk in self.books.values())
+                    armed = any(bk.strat.arm or bk.work["buy"] or bk.market_pending for bk in self.books.values())
+                    if self.pool.mine and not positioned and not armed:
+                        self.write_state(); last_state = time.time()  # publish flat before another owner can reconstruct a stale position
+                    self.pool.tend(positioned, armed)
                 if time.time() - self.lever_t >= 300: await self.refresh_lever()
                 if time.time() - self.daily_t >= 3600: await self.refresh_daily()
                 hint = self.feat.side_hint

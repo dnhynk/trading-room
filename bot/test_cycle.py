@@ -573,6 +573,10 @@ class CapitalPool(unittest.TestCase):
         d["claims"]["AUSDT"]["t"] -= 400                                                   # older than TTL: its engine is gone
         with open(self.path, "w", encoding="utf-8") as f: json.dump(d, f)
         evs = []; b = self.pool("BUSDT", ev=lambda k, **kw: evs.append(k))
+        self.assertEqual(b.claim(), "pool")  # a dead process does not prove a flat exchange position
+        b.states = lambda: {"AUSDT": dict(mode="live", ws=dict(prv=True), t=time.strftime("%Y-%m-%d %H:%M:%S"),
+                                             books=dict(long=dict(pos=dict(qty=0, lots=[]), exch=dict(total=0),
+                                                                  working=dict(buy=None, trim=None), arm=None, market_pending=False)))}
         self.assertEqual(b.claim(), ""); self.assertIn("POOL_STALE", evs); self.assertEqual(set(self.claims()), {"BUSDT"})
         evs2 = []; c = self.pool("CUSDT", ev=lambda k, **kw: evs2.append(k)); c.tend(positioned=True, armed=False)
         self.assertTrue(c.mine); self.assertIn("POOL_ADOPT", evs2); self.assertEqual(set(self.claims()), {"BUSDT", "CUSDT"})   # the position is the fact

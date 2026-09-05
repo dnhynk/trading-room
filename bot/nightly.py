@@ -110,8 +110,12 @@ def report(day):
         out.append(run_cmd(["bot.slip", "--day", day]))
         out.append("\n## estimator vs live (scan-history p_up / trials per hour against the day's live cycles per symbol; NEXT 6.1-2, 8)\n")
         out.append(run_cmd(["bot.pair", "--day", day]))
-        out.append("\n## tuner (report only; every candidate is judged on the whole basket's tapes)\n")
-        out.append(run_cmd(["bot.tune", "--days", "7", "--workers", "4"], timeout=7200))
+        if (p.get("hunt") or {}).get("on"):
+            out.append("\n## track B campaign evidence (entry capital, profiles, tails, costs; research only)\n")
+            out.append(run_cmd(["bot.research_b", "--day", day], timeout=300))
+        else:
+            out.append("\n## tuner (report only; every candidate is judged on the whole basket's tapes)\n")
+            out.append(run_cmd(["bot.tune", "--days", "7", "--workers", "4"], timeout=7200))
     else: out.append("no recordings for this day\n")
     out.append("\n## scanner\n")
     out.append(run_cmd(["bot.scan", "--top", "12"], timeout=900))

@@ -44,7 +44,7 @@ def outside_books(params, symbol):
     books = (params or {}).get("books") or {}
     return bool(books) and symbol not in books
 
-def load_states():
+def load_states(strict=False):
     """엔진마다 logs/state-<SYMBOL>.json 을 쓴다(동시 기록자가 한 파일을 덮어쓰지 않도록). {심볼: 스냅샷}.
     하나도 없으면 예전 단일 logs/state.json 으로 물러선다 — 전환 직후 한 번만 해당된다."""
     out = {}
@@ -52,12 +52,15 @@ def load_states():
         try:
             with open(p, encoding="utf-8") as f: st = json.load(f)
             if st.get("symbol"): out[st["symbol"]] = st
-        except Exception: pass
+        except Exception:
+            if strict: raise
     if not out:
         try:
             with open(os.path.join(ROOT, "logs", "state.json"), encoding="utf-8") as f: st = json.load(f)
             if st.get("symbol"): out[st["symbol"]] = st
-        except Exception: pass
+        except FileNotFoundError: pass
+        except Exception:
+            if strict: raise
     return out
 
 def pub_args(params, extra=()):

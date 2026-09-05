@@ -4,7 +4,8 @@
 각 스캔의 각 행에 **현재 live 설정으로 진입 자격을 다시 판정**하고(`flags_of`), 통과한 자리마다 캠페인을 열어 스캔마다
 `exit_flags` 를 건다. 진입가 대비 스탑 거리만큼 역행이 먼저면 stop, 퇴출 조건이 먼저면 exit. 스탑 거리는 기본이 **live 기하**다
 (`stop_pct`: 유닛당 돈거리 cap_frac/unit_frac 과 cap_min_atr × ATR1m 중 큰 것 — 행마다 다르다); `--stop N` 은 고정 N%. p = stop / (stop + exit) 이고
-이 p 가 NEXT 14 의 기하 성장률 부호를 정한다(손익분기 ~10.5%). `fuel` = 보유 중 지나간 총 경로 % — 사이클이 태우는 재료라
+이 p 는 **스캔 종가 경로의 장벽 도달 비율**이며 엔진 손절률·기하 성장률·켈리 계산에 쓰지 않는다(2026-09-05 정정).
+감속 진입·메이커 체결·봉 사이 고저가·wind_down 보유·exit 지연을 재생하지 않는다. `fuel` = 보유 중 지나간 총 경로 % — 사이클이 태우는 재료라
 캠페인의 이익 잠재력을 근사한다(퇴출이 너무 빠르면 여기가 먼저 줄어든다).
 
 두 가지를 조심해서 읽어라 (2026-09-04 감사에서 둘 다 당했다, NEXT 18):
@@ -85,18 +86,20 @@ def main():
           f"exit_atr_min {cfg['exit_atr_min']}  exit_twoway {cfg['exit_twoway']}  min_twoway {cfg['min_twoway']}")
     k_atr = prof.get("cap_min_atr") or 0
     print(f"  stop: {f'-{fixed:g}% fixed' if fixed is not None else f'live geometry per entry row = max(cap_frac/unit_frac {money:.1f}%, cap_min_atr {k_atr:g} x ATR1m)'}")
-    rows = []
+    print("  RESEARCH ONLY: scan-close barriers, not engine campaigns or an executable return; unresolved horizons are censored.")
+    rows = []; censored = 0
     for i in range(len(SC)):
         for sym, r in SC[i][1].items():
             if not DEEP(r) or not r.get("side") or flags_of(r, cfg): continue
             stop = stop_pct(r, prof, fixed)
             o = campaign(SC, sym, i, r["side"], cfg, stop, hours)
-            if not o: continue
+            if not o: censored += 1; continue
             prior = [SC[k][1][sym]["px"] for k in range(max(0, i - 6), i + 1) if sym in SC[k][1] and SC[k][1][sym].get("px")]
             d = (max(prior) / r["px"] - 1) * 100 if len(prior) > 2 else None       # 진입이 직전 ~1시간 고점 아래로 몇 % (long 기준)
             rows.append(dict(sym=sym, kind=o[0], mv=o[1], h=o[2], fuel=o[3], why=o[4], _depth=d, _stop=stop, **r))
     if not rows: print("no finished campaign in the horizon"); return
     st = sum(1 for r in rows if r["kind"] == "stop")
+    print(f"  unresolved / censored entries: {censored}; the following ratio is conditional on an observed ending")
     print(f"\n진입 자리 중 결말이 관측된 것 {len(rows)} (stop 중앙 -{statistics.median(r['_stop'] for r in rows):.1f}%, 지평 {hours:.0f}h)  코인 {len(set(r['sym'] for r in rows))}종")
     print(f"  p = {st / len(rows) * 100:.1f}%  ({st} stop / {len(rows) - st} exit)   지속 중앙 {statistics.median(r['h'] for r in rows):.1f}h   "
           f"fuel 중앙 {statistics.median(r['fuel'] for r in rows):.1f}%   손익 중앙 {statistics.median(r['mv'] for r in rows):+.2f}%")

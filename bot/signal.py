@@ -12,6 +12,7 @@ v = EMA(1s log return, v_hl) / sigma, sigma = sqrt(EMA(r^2, vol_hl)); a = v - v[
 Confirmation features are computed and attached to every signal but do not gate it (tune first, then gate via params)."""
 import math
 from collections import deque
+from bot.risk import floor_qty
 
 SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0, v_slow=0.3, hold_s=3,
            brk_lookback=1800, brk_atr=0.3, brk_vol=2.0, brk_cooldown=300, cooldown=60, refire_atr=1.0, depth_levels=5,
@@ -736,6 +737,7 @@ class Strategy:
         qs = p.get("qstep") or 0.1                                  # the unit is a whole number of exchange quantity steps before it is armed
         mult = pos.get("unit_mult", 1.0) * (p["against_regime_mult"] if self.regime == "AGAINST" and p["against_regime_mult"] else 1.0)   # AGAINST: smaller adds, not none
         unit = round(max(round(p["unit_qty"] * mult / qs) * qs, qs), 9)
+        if p.get("hunt"): unit = floor_qty(p["unit_qty"] * mult, qs)
         confirm_on = p["add_confirm"] if p["add_confirm"] is not None else 0
         for x in sigs:                                              # remember when each rule last fired the buy-side signal
             if x["sig"] == buy_sig: self.sig_seen[x.get("src", "?")] = t
@@ -750,6 +752,7 @@ class Strategy:
             if ext and atr and s * (mid - ext) >= p["trim_retrace_atr"] * atr: return True, "retrace"
             return False, ""
         def caps_why(extra):   # caps are quantity-based (a partially filled unit does not count as a whole one)
+            if extra < qs - 1e-9: return "risk_min_qty"
             if qty + extra > p["max_units"] * unit + 1e-9: return "max_units"
             if (qty + extra) * mid > p["max_notional"]: return "max_notional"
             return None                                              # the money cap is the exchange stop itself: an add above it moves that stop up (loss at the stop stays = cap), never down
@@ -767,7 +770,9 @@ class Strategy:
             eunit = unit
             if fails:
                 m = p.get("add_mult") if qty else p.get("entry_mult")   # the quality tier's size: 0 = none
-                if m: eunit = round(max(round(unit * m / qs) * qs, qs), 9); fails = []
+                if m:
+                    eunit = floor_qty(unit * m, qs) if p.get("hunt") else round(max(round(unit * m / qs) * qs, qs), 9)
+                    fails = []
             why = None
             if blocked: why = blocked
             elif fails: why = fails[0]
@@ -942,7 +947,7 @@ class Strategy:
             # 그 조임이 캠페인당 스탑 확률을 사다리 깊이에 종속시켰다(1유닛 3.4% / 2유닛 9.5% / 3유닛 55%, 손익분기 ~10.5%).
             # 1 = 한도를 유닛당으로 읽는다: 거리가 cap/unit 로 고정되어 깊어져도 조여지지 않고, 총 위험만 유닛 수에 비례한다
             # (거래소 스탑은 방향당 하나뿐이므로 이것이 유닛별 손절의 총합 백스톱이다).
-            cap_px = avg - s * p["cap_usdt"] / (unit if p.get("cap_per_unit") else max(qty, unit))   # a unit still filling (or a sub-unit orphan) uses the full unit's distance: cap over a 4.3-contract partial put a long stop at −0.16 → 43011 ×3 → needless market close + HALT (2026-08-31 18:16); the loss at this stop stays ≤ qty/unit × cap
+            cap_px = avg - s * p["cap_usdt"] / (max(unit, qs) if p.get("cap_per_unit") else max(qty, unit, qs))
             # the premise level is the 15m/1H pivot that leaves room for the remaining add ladder below the last buy; a level inside the
             # ladder is ignored. Structure only when switched on, or riding a FAVOR one-way. A position without a premise takes the first
             # level that qualifies (a pivot confirms with a lag; an adopted or guarded exchange stop is not a premise and never blocks this).

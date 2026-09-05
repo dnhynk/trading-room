@@ -302,10 +302,18 @@ class PositivelyNotOurSide(unittest.TestCase):
 
 class SecondOpinion(unittest.TestCase):
     """AI 판독은 국면과 방향만 대체한다. 자격(통행료 veto)은 못 뒤집고, 실패하면 결정론이 그대로 선다."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.logs = hunt.LOGS
+        hunt.LOGS = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(setattr, hunt, "LOGS", self.logs)
+
     def run_with(self, out, rc=0):
         real = hunt.subprocess.run
         def fake(cmd, **kw):
-            i = cmd.index("-o"); open(cmd[i + 1], "w", encoding="utf-8").write(out)
+            i = cmd.index("-o")
+            with open(cmd[i + 1], "w", encoding="utf-8") as fh: fh.write(out)
             return types.SimpleNamespace(returncode=rc, stdout="", stderr="")
         hunt.subprocess.run = fake
         try: return hunt.ai_read([row("A", "unknown"), row("B", "markdown")], {**HUNT, "ai_read": 1}, log=lambda *a: None)
@@ -330,9 +338,9 @@ class SecondOpinion(unittest.TestCase):
         hunt.subprocess.run = fake
         try: r = hunt.ai_read([row("A", "markup"), row("B", "markup")], {**HUNT, "ai_read": 1, "ai_runs": 3}, log=lambda *a: None)
         finally: hunt.subprocess.run = real
-        self.assertEqual(r["A"][0], "markdown"); self.assertEqual(r["A"][3:], (2, 2))    # 둘 다 같은 답
+        self.assertEqual(r["A"][0], "markdown"); self.assertEqual(r["A"][3:], (2, 3))
         self.assertEqual(r["A"][1], 85)                                                  # 이긴 라벨의 평균 conf
-        self.assertEqual(r["B"][3:], (1, 2))                                             # 갈렸다: 합의 1/2 로 기록된다
+        self.assertEqual(r["B"][0], "markup"); self.assertEqual(r["B"][3:], (1, 3))  # no majority: rule, not first run
 
     def test_every_run_failing_keeps_the_deterministic_read(self):
         real = hunt.subprocess.run
@@ -378,7 +386,16 @@ class SecondOpinion(unittest.TestCase):
         try: r = hunt.ai_read([row("A", "markup"), row("B", "unknown")], {**HUNT, "ai_read": 1, "ai_runs": 3}, log=lambda *a: None)
         finally: hunt.subprocess.run = real
         self.assertEqual(r["A"][0], "markup"); self.assertEqual(r["A"][3:], (1, 3))      # the rule reader's markup is among the three answers
-        self.assertEqual(r["B"][0], "markdown"); self.assertEqual(r["B"][3:], (1, 3))    # unknown is not: the first run, as before
+        self.assertEqual(r["B"][0], "unknown"); self.assertEqual(r["B"][3:], (0, 3))
+
+    def test_failed_process_output_is_not_a_vote(self):
+        self.assertEqual(self.run_with('{"reads":[{"symbol":"A","phase":"markup"}]}', rc=1), {})
+
+    def test_new_hunt_settings_or_a_failed_read_invalidate_the_finished_scan(self):
+        p = {"hunt": {"on": 1, "strat": {"cap_frac": .05}}, "record": {}}
+        self.assertTrue(hunt.scan_config_current(p, {**p, "record": {"X": []}}))
+        self.assertFalse(hunt.scan_config_current(p, {"hunt": {"on": 0}}))
+        self.assertFalse(hunt.scan_config_current(p, None))
 
 class AiOnlyExit(unittest.TestCase):
     """A phase the AI alone reads (the rule reader disagrees) leaves after `confirm` scans, like an entry; a measured flag or a flip the rule

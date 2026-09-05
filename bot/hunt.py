@@ -22,7 +22,7 @@ merely going still (ATR floor) — an episode death or a coin that cooled off it
 Rank among the eligible = 1h two-way path (churn) — the order of the overflow (and of the single slot without a pool), never a reason to replace a holding.
 Events: HUNT (every scan) in logs/events.jsonl; HUNT_ADD / HUNT_WIND_DOWN / HUNT_DROP / HUNT_BLOCKED also in logs/alerts.jsonl.
 State (streaks, cooldowns, the held coin's side / peak volume / climax high / exit reason) in logs/hunt-state.json."""
-import json, math, os, statistics, subprocess, sys, time
+import json, math, os, statistics, subprocess, sys, tempfile, time
 from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.bitget import Bitget
@@ -260,16 +260,17 @@ def ai_read(rows, hunt, log=log, held=()):
 
     def one(n):
         """한 번의 판독. 실패·형식오류는 {} 이고 앙상블이 나머지로 진행한다."""
-        out = os.path.join(d, f"read{n}.json")
         try:
-            if os.path.exists(out): os.remove(out)
-            cmd = [hunt.get("ai_cmd") or "codex", "exec", "--skip-git-repo-check", "-s", "read-only", "--cd", d, "-o", out]
-            for f in shots: cmd += ["-i", f]
-            if hunt.get("ai_model"): cmd += ["-m", str(hunt["ai_model"])]      # 없으면 ~/.codex/config.toml 기본값
-            if hunt.get("ai_effort"): cmd += ["-c", f"model_reasoning_effort={hunt['ai_effort']}"]
-            subprocess.run(cmd + ["-"], input=AI_PROMPT + chr(10) + body, capture_output=True, text=True,
-                           errors="replace", timeout=float(hunt.get("ai_timeout_s") or 240))
-            with open(out, encoding="utf-8") as fh: raw = fh.read()
+            with tempfile.TemporaryDirectory(prefix="read-", dir=d) as run_dir:
+                out = os.path.join(run_dir, f"read{n}.json")
+                cmd = [hunt.get("ai_cmd") or "codex", "exec", "--skip-git-repo-check", "-s", "read-only", "--cd", run_dir, "-o", out]
+                for f in shots: cmd += ["-i", f]
+                if hunt.get("ai_model"): cmd += ["-m", str(hunt["ai_model"])]
+                if hunt.get("ai_effort"): cmd += ["-c", f"model_reasoning_effort={hunt['ai_effort']}"]
+                result = subprocess.run(cmd + ["-"], input=AI_PROMPT + chr(10) + body, capture_output=True, text=True,
+                                        errors="replace", timeout=float(hunt.get("ai_timeout_s") or 240))
+                if result.returncode: raise ValueError("AI process failed")
+                with open(out, encoding="utf-8") as fh: raw = fh.read()
             i, j = raw.find("{"), raw.rfind("}")
             return {x["symbol"]: (x["phase"], x.get("conf"), str(x.get("why") or "")[:60])
                     for x in json.loads(raw[i:j + 1])["reads"]
@@ -293,13 +294,14 @@ def ai_read(rows, hunt, log=log, held=()):
         votes = [g[sym] for g in ok if sym in g]
         if not votes: continue
         c = Counter(v[0] for v in votes); mc = c.most_common(); tied = [x for x, n in mc if n == mc[0][1]]
-        # a tie is no majority (1:1:1 of three runs, 1:1 of two): the rule reader breaks it when its phase is one of the tied answers, else
-        # the first run stands (user decision 2026-09-04; the run order alone decided before — 11 of 688 rows that day, ai_agree 1/3)
-        ph = det.get(sym) if len(tied) > 1 and det.get(sym) in tied else tied[0]; n_ph = c[ph]
+        # Strict majority of CONFIGURED runs, not merely survivors. Ties or
+        # insufficient successful votes keep the deterministic phase, even if no AI voted for it.
+        ph = tied[0] if mc[0][1] > runs / 2 else det.get(sym)
+        n_ph = c.get(ph, 0)
         if len(tied) > 1: ties += 1
-        confs = [v[1] for v in votes if v[0] == ph and isinstance(v[1], (int, float))]
-        why = next(v[2] for v in votes if v[0] == ph)
-        reads[sym] = (ph, round(sum(confs) / len(confs)) if confs else None, why, n_ph, len(votes))   # 합의 n/N 이 실측 신뢰도다
+        confs = [v[1] for v in votes if v[0] == ph and not isinstance(v[1], bool) and isinstance(v[1], (int, float)) and math.isfinite(v[1])]
+        why = next((v[2] for v in votes if v[0] == ph), "no majority; deterministic fallback")
+        reads[sym] = (ph, round(sum(confs) / len(confs)) if confs else None, why, n_ph, runs)
     split = sum(1 for v in reads.values() if v[3] < v[4])
     log(f"hunt: ai_read {len(reads)}/{len(rows)} coins from {len(ok)}/{len(got)} runs, "
         f"{sum(1 for r in rows if reads.get(r['symbol'], (None,))[0] != r.get('phase'))} disagree, {split} split, {ties} tied")
@@ -348,6 +350,7 @@ def scan(hunt, held=(), st=None, b=None, log=log):
             log(f"  {s}: shape failed {type(e).__name__}: {str(e)[:60]}"); r.update(phase="unread", votes=[], side=None, twoway24=None, run=None, off=None, high48=None, atr_pct=None, hint15=None, dead=False)
         r["flags"] = flags_of(r, hunt)
     if hunt.get("ai_read") and deep:
+        for r in deep: r["phase_det"], r["side_det"] = r.get("phase"), r.get("side")
         for sym, (ph, conf, why, agree, n) in ai_read([r for r in deep if r.get("phase") not in (None, "unread")], hunt, log, held).items():
             r = next(x for x in deep if x["symbol"] == sym)
             r["phase_det"], r["side_det"] = r.get("phase"), r.get("side")      # 그림자: 결정론이 무엇이라 했는지 매 스캔 남는다
@@ -501,6 +504,11 @@ def pid_alive(path, match=("bot.supervise select", "bot.select")):
     hit = next((m for m in match if m in out), "")
     return f"{hit} is running (pid {pid})" if hit else ""
 
+def scan_config_current(before, after):
+    """A completed scan may only apply under the hunt configuration it read."""
+    return after is not None and (before.get("hunt") or {}) == (after.get("hunt") or {})
+
+
 def main():
     once, dry = "--once" in sys.argv, "--dry" in sys.argv
     while True:
@@ -517,9 +525,12 @@ def main():
             with open(os.path.join(LOGS, "hunt-history.jsonl"), "a", encoding="utf-8") as f: f.write(json.dumps(rec) + "\n")
             log("\n" + table(rows))
             now = time.time(); flats = flats_now()
-            p = load_params() or p; books = p.get("books") or {}   # re-read AFTER the scan (60-320 s with the AI read): the copy read before it would overwrite an edit made meanwhile — every key but ours is the supervising session's
+            fresh = load_params()
+            current = scan_config_current(p, fresh)
+            p = fresh or p; books = p.get("books") or {}
             v = verdict(rows, books, hunt, st, now)
-            owner = bool(hunt.get("on")) and not dry
+            owner = bool(hunt.get("on")) and not dry and current
+            if not current: ev("HUNT_CONFIG_CHANGED", why="configuration changed or unreadable during scan; decision not applied")
             ev("HUNT", on=int(bool(hunt.get("on"))), dry=dry, held=held, flat={s: flats.get(s) for s in held}, winds=v["winds"], adds=v["adds"], resumes=v["resumes"], overflow=v["overflow"], top=v["top"],
                refuse=v["refuse"], streak=st.get("streak"), xstreak={s: st.get("xstreak", {}).get(s) for s in held},
                phases={r["symbol"]: [r.get("phase"), r.get("votes")] for r in rows if r.get("phase") not in ("shallow", None)}, took_s=int(now - t0),

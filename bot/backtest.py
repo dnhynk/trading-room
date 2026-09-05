@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bot.signal import Features, Strategy, STRAT, SPLIT_KEYS, apply_fill, pos_stats, book_params, sim_match, sim_book, unit_under_cap, wilder_atr
 from bot.ws import load_params, load_states, strat_for
 from bot.bitget import Bitget
+from bot.risk import floor_qty
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "data", "cache"); CACHE_VER = "v2"
@@ -78,7 +79,7 @@ def size_from_equity(strat, equity, mid, qstep, atr=None):
         if fixed == "unit_qty":
             cap = wallet * strat["cap_frac"] if strat.get("cap_frac") else strat.get("cap_usdt")
             v = unit_under_cap(v / mid, cap, atr, strat.get("cap_min_atr")) * mid      # the money cap's ATR floor, as resize
-            v = max(round(v / mid / qstep) * qstep, qstep)
+            v = floor_qty(v / mid, qstep) if strat.get("hunt") else max(round(v / mid / qstep) * qstep, qstep)
         out[fixed], out[frac] = round(v, 9), 0.0
     return out
 
@@ -160,8 +161,8 @@ def load_seconds(path, sym):
 # ---- engine --------------------------------------------------------------------------
 class Book:
     """One side's position, orders and stop (a long book and a short book can run on the same feature stream = 쌍검술)."""
-    def __init__(self, feat, strat, side, n_sides=1, qstep=0.1):
-        bp = book_params(strat or {}, side, 0.001, n_sides, qstep, fee_rt=(MAKER + TAKER) * 100)   # the unit gate's floor covers a taker exit, as live
+    def __init__(self, feat, strat, side, n_sides=1, qstep=0.1, fee_rt=None):
+        bp = book_params(strat or {}, side, 0.001, n_sides, qstep, fee_rt=(MAKER + TAKER) * 100 if fee_rt is None else fee_rt)
         if bp.get("add_confirm") is None: bp["add_confirm"] = 1 if n_sides > 1 else 0          # same auto rule as live
         self.strat = Strategy(bp, feat.p); self.side, self.s = side, (1 if side == "long" else -1)   # same per-side budget split as live
         self.pos = dict(lots=[], avg=None, last=None, last_buy_px=None, last_trim_px=None, halt=None, pause=False)
@@ -169,14 +170,18 @@ class Book:
         self.realized = self.day_realized = self.upl = 0.0; self.cycles = self.adds = self.campaigns = self.stops = self.stops_today = 0; self.taker_t = -1e9; self.seq = 0
 
 class Engine:
-    def __init__(self, sig=None, strat=None, qstep=0.1, sides=None, follow=None, pool=None):
+    def __init__(self, sig=None, strat=None, qstep=0.1, sides=None, follow=None, pool=None, execution=None):
         self.feat = Features(sig); strat = strat or {}
+        self.execution = {"maker": MAKER, "taker": TAKER, "stop_slip": SLIP, "taker_slip": 0.0, **(execution or {})}
+        if any(not isinstance(v, (int, float)) or not 0 <= v < 1 for v in self.execution.values()):
+            raise ValueError("execution rates must be finite fractions in [0, 1)")
         sides = list(sides or strat.get("sides") or [strat.get("side", STRAT["side"])])
         self.px_tick, self.qstep = None, qstep
         self.follow, self.flips, self.active_s = follow, 0, {}       # follow="15m"|"1h": one side at a time, chosen by that structure hint, flipped only when flat (the side automation counterfactual)
         self.follow_confirm_s, self.hint_last, self.hint_t = 0, None, None   # a flip needs the hint to have held for follow_confirm_s (0 = at once)
         self.active = strat.get("side", STRAT["side"]) if follow else None   # starts on the configured side (the incumbent's, as select leaves it); the hint flips it
-        self.books = {sd: Book(self.feat, strat, sd, 1 if follow else len(sides), qstep) for sd in sides}
+        self.books = {sd: Book(self.feat, strat, sd, 1 if follow else len(sides), qstep,
+                               fee_rt=(self.execution["maker"] + self.execution["taker"]) * 100) for sd in sides}
         for bk in self.books.values(): bk.pos["pool"] = pool                  # a shared capital pool across engines (the FCFS basket simulation; None = none)
         self.peak = self.max_dd = 0.0; self.in_mkt = self.n = 0; self.last_t = None; self.day = None
         self.events = []
@@ -205,7 +210,7 @@ class Engine:
 
     def on_stop_hit(self, bk, px):
         q, avg = pos_stats(bk.pos)
-        pnl = apply_fill(bk.pos, bk.s, False, q, px, fee=q * px * TAKER); bk.realized += pnl; bk.day_realized += pnl; bk.stops += 1; bk.stops_today += 1
+        pnl = apply_fill(bk.pos, bk.s, False, q, px, fee=q * px * self.execution["taker"]); bk.realized += pnl; bk.day_realized += pnl; bk.stops += 1; bk.stops_today += 1
         bk.stop = None; bk.work = dict(buy=None, trim=None)
         self.events.append((self.feat.f.get("t"), "STOP_HIT", bk.side, q, px, round(pnl, 4)))
         if bk.stops_today >= bk.strat.p["max_stops_day"]: bk.pos["halt"] = "DAILY_STOPS"
@@ -240,10 +245,19 @@ class Engine:
 
     def tick_book(self, bk, sigs):
         f = self.feat.f; qty, avg = pos_stats(bk.pos)
+        bk.upl = bk.s * (f["mid"] - avg) * qty if qty else 0.0
         if qty and bk.stop and bk.s * ((f.get("mark") or f["mid"]) - bk.stop) <= 0:
-            self.on_stop_hit(bk, bk.stop * (1 - bk.s * SLIP)); return
+            px = bk.stop
+            if bk.strat.p.get("hunt"):
+                touch = f["bid"] if bk.s > 0 else f["ask"]
+                px = min(px, touch) if bk.s > 0 else max(px, touch)
+            self.on_stop_hit(bk, px * (1 - bk.s * self.execution["stop_slip"])); return
         lim = bk.strat.p.get("daily_loss_limit")
-        if lim and not bk.pos["halt"] and bk.day_realized + bk.upl <= -lim: bk.pos["halt"] = "DAILY_LOSS"; self.events.append((f["t"], "DAILY_LOSS", bk.side))
+        handle = bk.pos.get("pool")
+        total = handle.pool.day_loss() if isinstance(handle, PoolHandle) else bk.day_realized
+        if isinstance(handle, PoolHandle) and bk.strat.p.get("max_stops_day") and handle.pool.day_stops() >= bk.strat.p["max_stops_day"]:
+            bk.pos["halt"] = "DAILY_STOPS"
+        if lim and not bk.pos["halt"] and total + bk.upl <= -lim: bk.pos["halt"] = "DAILY_LOSS"; self.events.append((f["t"], "DAILY_LOSS", bk.side))
         dt = self.feat.daily_trend                                   # against the daily trend: smaller units, never a veto (as live)
         bk.pos["unit_mult"] = bk.strat.p["against_daily_mult"] if dt and dt != ("up" if bk.s > 0 else "down") else 1.0
         working = {r: (w["px"], w["qty"] - w["filled"]) for r, w in bk.work.items() if w}
@@ -257,14 +271,15 @@ class Engine:
 
     def reconcile(self, bk, d, t):
         qty, _ = pos_stats(bk.pos)
-        if qty and d.get("no_stop"): self.on_stop_hit(bk, self.feat.f["mid"] * (1 - bk.s * SLIP)); return
+        if qty and d.get("no_stop"): self.on_stop_hit(bk, self.feat.f["mid"] * (1 - bk.s * self.execution["stop_slip"])); return
         for role in ("buy", "trim"):
             want, w = d[role], bk.work[role]
             if want is not None and role == "trim" and want[2] == "taker":
                 if w: bk.work[role] = None
                 if t - bk.taker_t >= 5:
                     bk.taker_t = t; px = self.feat.bid if bk.s > 0 else self.feat.ask; bk.seq += 1
-                    self.on_fill(bk, "trim", want[1], px, want[1] * px * TAKER, f"{OID}{bk.side[0]}m{bk.seq}", lot=want[3] if len(want) > 3 else None)
+                    px *= 1 - bk.s * self.execution["taker_slip"]
+                    self.on_fill(bk, "trim", want[1], px, want[1] * px * self.execution["taker"], f"{OID}{bk.side[0]}m{bk.seq}", lot=want[3] if len(want) > 3 else None)
                 continue
             if w and want is not None and abs(want[0] - w["px"]) < self.px_tick / 2 and abs(want[1] - (w["qty"] - w["filled"])) < self.qstep / 2: continue
             if w and (want is None or t - bk.replaced[role] >= 1.0): bk.work[role] = None; bk.replaced[role] = t; w = None
@@ -285,7 +300,7 @@ class Engine:
             orders = [((bk, role), w, (role == "buy") == (bk.s > 0)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])]
             for (bk, role), w, fill in sim_match(orders, px, size, side, self.qstep, t=sec):
                 if fill is None: bk.work[role] = None; self.events.append((sec, "CANCEL", bk.side, role, w["px"], "crossed")); continue
-                self.on_fill(bk, role, fill, w["px"], fill * w["px"] * MAKER, w["oid"], lot=w.get("lot"))
+                self.on_fill(bk, role, fill, w["px"], fill * w["px"] * self.execution["maker"], w["oid"], lot=w.get("lot"))
 
     def sim_book(self, bids, asks, sec):
         """The second's book snapshot: the queue ahead of resting orders drains by the cancellations it shows; an opposite touch at our
@@ -293,7 +308,7 @@ class Engine:
         orders = [((bk, role), w, (role == "buy") == (bk.s > 0)) for bk in self.books.values() for role in ("buy", "trim") if (w := bk.work[role])]
         for (bk, role), w, fill in sim_book(orders, bids, asks, t=sec, qstep=self.qstep):
             if fill is None: bk.work[role] = None; self.events.append((sec, "CANCEL", bk.side, role, w["px"], "crossed")); continue
-            self.on_fill(bk, role, fill, w["px"], fill * w["px"] * MAKER, w["oid"], lot=w.get("lot"))
+            self.on_fill(bk, role, fill, w["px"], fill * w["px"] * self.execution["maker"], w["oid"], lot=w.get("lot"))
 
     def run(self, seconds):
         """Per condensed second N, in live order: the first message of N closes N-1 -> the tick decides on N-1's features with N-1's
@@ -361,23 +376,47 @@ class SimPool:
     at its first unit; adds never ask (Strategy); a positioned or armed book keeps its claim and a flat one releases it (Engine.tick_book,
     as the live housekeeping); the day's realized loss summed over every book at or under the asking book's daily limit refuses new
     campaigns (pool_daily). `refused` counts the first units turned away."""
-    def __init__(self, cap): self.cap, self.claims, self.books, self.refused = max(int(cap), 1), [], [], 0
+    def __init__(self, cap):
+        self.cap, self.claims, self.books, self.refused = max(int(cap), 1), [], [], 0
+        self.owners, self.day = {}, None
     def handle(self, sym, book): self.books.append(book); return PoolHandle(self, sym, book)
     def day_loss(self): return sum(bk.day_realized for bk in self.books)
+    def day_stops(self): return sum(getattr(bk, "stops_today", 0) for bk in self.books)
+    def advance(self, sec):
+        day = sec // 86400
+        if self.day is not None and day != self.day:
+            for bk in self.books:
+                bk.day_realized, bk.stops_today = 0.0, 0
+                if bk.pos["halt"] in ("DAILY_STOPS", "DAILY_LOSS"): bk.pos["halt"] = None
+        self.day = day
 
 class PoolHandle:
     def __init__(self, pool, sym, book): self.pool, self.sym, self.book = pool, sym, book
     @property
-    def mine(self): return self.sym in self.pool.claims
+    def mine(self): return self.pool.owners.get(self.sym) is self
+    @property
+    def risk(self):
+        p = self.book.strat.p
+        return ((p.get("cap_usdt") or 0) * (p.get("max_units", 1) if p.get("cap_per_unit") else 1)
+                + (p.get("max_notional") or 0) * (p.get("fee_rt_pct") or 0) / 100)
     def claim(self):
         if self.mine: return ""
         lim = self.book.strat.p.get("daily_loss_limit")
         if lim and self.pool.day_loss() <= -float(lim): self.pool.refused += 1; return "pool_daily"
-        if len(self.pool.claims) >= self.pool.cap: self.pool.refused += 1; return "pool"
-        self.pool.claims.append(self.sym); return ""
+        stops = self.book.strat.p.get("max_stops_day")
+        if stops and self.pool.day_stops() >= stops: self.pool.refused += 1; return "pool_stops"
+        if self.sym in self.pool.owners or len(self.pool.claims) >= self.pool.cap: self.pool.refused += 1; return "pool"
+        p = self.book.strat.p
+        reserved = sum(h.risk for h in self.pool.owners.values() if h is not self)
+        if lim and p.get("hunt") and self.pool.day_loss() - reserved - self.risk < -float(lim) - 1e-9:
+            self.pool.refused += 1; return "pool_budget"
+        self.pool.claims.append(self.sym); self.pool.owners[self.sym] = self; return ""
     def tend(self, positioned, armed):
-        if positioned and not self.mine: self.pool.claims.append(self.sym)                     # adopt: the position is the fact (parity with cycle.Pool)
-        elif self.mine and not positioned and not armed: self.pool.claims.remove(self.sym)
+        if positioned and not self.mine:
+            if self.sym in self.pool.owners: raise ValueError("two simulated owners of one symbol")
+            self.pool.claims.append(self.sym); self.pool.owners[self.sym] = self
+        elif self.mine and not positioned and not armed:
+            self.pool.claims.remove(self.sym); del self.pool.owners[self.sym]
 
 def _prepare(p, files, sym, strat, qstep, equity, fixed):
     """What a live start would give `sym` on these files: the strat sized from `equity` (unless fixed), the contract step, the seed and
@@ -400,7 +439,7 @@ def _prepare(p, files, sym, strat, qstep, equity, fixed):
         else: print(f"sizing: no equity ({equity}) or no quote on the tape; the file's fixed sizes apply", file=sys.stderr)
     return strat, qstep, seed, loaded, first, equity
 
-def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=None, sides=None, follow=None, equity=None, fixed=False):
+def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=None, sides=None, follow=None, equity=None, fixed=False, execution=None):
     """params.json is the base as live sees it — `strat_for(params, sym)` (the book's wallet_frac / sides on the common strat) — with
     sig/strat overrides on top; sides default to strat.sides; follow="15m"|"1h" runs both sides with the structure hint choosing which
     one may trade (flat-only flips). qstep defaults to the symbol's contract step; equity-scaled params are frozen into fixed sizes at
@@ -409,7 +448,7 @@ def run_files(files, sym="TRUMPUSDT", sig=None, strat=None, events=False, qstep=
     p = load_params() or {}
     sig = {**(p.get("sig") or {}), **(sig or {})}
     strat, qstep, seed, loaded, first, equity = _prepare(p, files, sym, strat, qstep, equity, fixed)
-    eng = Engine(sig, strat, qstep=qstep, sides=["long", "short"] if follow else sides, follow=follow)
+    eng = Engine(sig, strat, qstep=qstep, sides=["long", "short"] if follow else sides, follow=follow, execution=execution)
     if first: eng.seed(*seed)
     for path in files: eng.run(loaded[path] if path in loaded else load_seconds(path, sym))
     m = eng.metrics()
@@ -430,7 +469,7 @@ def _merge(entries):
     def tagged(order, sym, secs): return ((sec[0], order, sym, sec) for sec in secs)      # bound per stream (a nested genexp would late-bind sym/order to the last book)
     return ((sym, sec) for _, _, sym, sec in heapq.merge(*(tagged(o, s, x) for o, (s, x) in enumerate(entries)), key=lambda t: (t[0], t[1])))
 
-def run_multi(spec, sig=None, strat=None, pool_cap=1, equity=None, fixed=False, events=False):
+def run_multi(spec, sig=None, strat=None, pool_cap=1, equity=None, fixed=False, events=False, execution=None):
     """Several books on one clock sharing one capital pool — the FCFS basket (RULES 트랙 B, NEXT 22) replayed as hunt would have held it.
     spec = [{"sym", "side", "files", "strat"?}, ...]: a book exists over its own files (the hours its coin was eligible), each sizes on
     wallet/pool_cap (`equity` frozen at its first quote, as run_files) under the common `strat` overrides and then its own, and the pool
@@ -442,19 +481,20 @@ def run_multi(spec, sig=None, strat=None, pool_cap=1, equity=None, fixed=False, 
     pool = SimPool(pool_cap); engs, byhour, sizing = {}, {}, {}
     for b in spec:
         sym, side = b["sym"], b["side"]
-        st = {"wallet_frac": 1.0 / max(int(pool_cap), 1), **(strat or {}), **(b.get("strat") or {})}
+        st = {"hunt": 1, "wallet_frac": 1.0 / max(int(pool_cap), 1), **(strat or {}), **(b.get("strat") or {})}
         st, qstep, seed, loaded, first, eq = _prepare(p, b["files"], sym, st, None, equity, fixed)
-        eng = Engine(sig, st, qstep=qstep, sides=[side])
+        eng = Engine(sig, st, qstep=qstep, sides=[side], execution=execution)
         if first: eng.seed(*seed)
         for bk in eng.books.values(): bk.pos["pool"] = pool.handle(sym, bk)                  # the pool is per coin (one book per coin at a time, as hunt)
         key = f"{sym}:{side}"                                                                  # a coin may hold a short window and a long window (EGLD, MUBARAK): two books
+        if key in engs: raise ValueError(f"duplicate simulation book: {key}; merge its file list")
         engs[key] = eng; sizing[key] = dict(qstep=qstep, equity=None if fixed else eq, **{k: st.get(k) for k in SIZED})
         for path in b["files"]: byhour.setdefault(_hour_key(path), []).append((key, sym, path, loaded.get(path)))
     peak = dd = 0.0; n = 0
     for key in sorted(byhour):
         entries = [(k, secs if secs is not None else load_seconds(path, sym)) for k, sym, path, secs in byhour[key]]
         for k, sec in _merge(entries):
-            engs[k].step(*sec); n += 1
+            pool.advance(sec[0]); engs[k].step(*sec); n += 1
             eq_all = sum(bk.realized + bk.upl for e in engs.values() for bk in e.books.values())
             peak = max(peak, eq_all); dd = max(dd, peak - eq_all)
     books = {}
