@@ -83,7 +83,8 @@ class Replay:
         if not coin and len(books)==1: coin=next(iter(books))
         c=books.get(coin)
         if kind == 'CAMPAIGN_INTENT':
-            books[body['coin']] = dict(coin=body['coin'], started_ms=None, qty='0', orders={}, buy_gross='0', sell_gross='0', fees='0')
+            books[body['coin']] = dict(coin=body['coin'], started_ms=None, qty='0', orders={}, buy_gross='0', sell_gross='0', fees='0',
+                                      entry_dev_ticks=(body.get('plan') or {}).get('dev_ticks'))
         elif kind == 'ORDER_INTENT':
             if c is None:
                 raise DataUnavailable('C campaign context missing')
@@ -103,12 +104,13 @@ class Replay:
             c[field] = str(number(c[field])+gross)
             c['fees'] = str(number(c['fees'])+fee)
             return dict(body,type='fill',seq=seq,t_ms=t,coin=c['coin'],first=first,started_ms=c['started_ms'],
-                        remaining=c['qty'],buy=buy)
+                        remaining=c['qty'],buy=buy,entry_dev_ticks=c.get('entry_dev_ticks'))
         elif kind == 'CLOSE':
             campaign = body['campaign']
             started = c['started_ms'] if c else int(float(campaign['first_fill'])*1000) if campaign['first_fill'] is not None else None
             return dict(type='close',seq=seq,t_ms=t,coin=campaign['coin'],campaign=campaign,started_ms=started,
-                        sell_gross=c['sell_gross'] if c else None,fees=c['fees'] if c else None)
+                        sell_gross=c['sell_gross'] if c else None,fees=c['fees'] if c else None,
+                        entry_dev_ticks=c.get('entry_dev_ticks') if c else (campaign.get('plan') or {}).get('dev_ticks'))
         elif kind in ('NO_FILL','FLAT'):
             books.pop(coin,None)
             self.context['campaign'] = None
@@ -129,11 +131,14 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
         start = int(dt.datetime.combine(date,dt.time(),KST).timestamp()*1000)
         end = start+86400000
         coins = (status.get('rule') or {}).get('coins')
+        entry_floor = None
         baseline = Path(directory)/'notifications/baseline.json'
         if baseline.exists():
             b = json.loads(baseline.read_text())
-            # The display universe persists across midnight; the daily time cutoff does not.
+            # Display scopes persist across midnight; the daily time cutoff does not.
             coins = b.get('coins', coins)
+            if b.get('entry_dev_min_ticks') is not None:
+                entry_floor = number(b['entry_dev_min_ticks'])
             if b.get('day') == date.isoformat():
                 start = max(start,int(b['start_ms']))
         if coins is not None and (not isinstance(coins,list) or not coins or
@@ -148,6 +153,14 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
             # Replay every coin first so interleaved order/fill context remains intact.
             if not fact or (allowed is not None and fact.get('coin') not in allowed):
                 continue
+            if entry_floor is not None and fact['type'] in ('fill','close'):
+                # Classify the whole campaign by its original entry intent, including
+                # partial fills/fees. Missing historical deviations cannot qualify.
+                try:
+                    if number(fact.get('entry_dev_ticks')) < entry_floor:
+                        continue
+                except (InvalidOperation,ValueError,TypeError):
+                    continue
             if fact['type'] == 'fill':
                 if start <= fact['t_ms'] < end:
                     pnl += number(fact['pnl'])

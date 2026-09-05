@@ -2,7 +2,8 @@
 
 Each command is bounded. An existing operator PAUSE is preserved. State is never
 rolled back. The v3 profile updates only the five v3 settings; btc-only updates
-only the trading/recording universe and restarts its evaluation/display window.
+only the trading/recording universe. entry-2 updates only the entry deviation floor.
+Both BTC profiles restart their evaluation/display window.
 All other live settings are preserved. Credentials are never copied.
 """
 import argparse
@@ -16,7 +17,8 @@ from .deploy_c3 import GUARD, ENGINE, status
 
 RECORD = ROOT / 'logs/track-c/c3-upgrade-staged.json'
 V3_CONFIG_KEYS = ('momentum_window_s','momentum_recent_s','momentum_veto_ticks','momentum_decel_share','flow_gate')
-CONFIG_PROFILES = {'v3': V3_CONFIG_KEYS, 'btc-only': ('coins','record_coins')}
+CONFIG_PROFILES = {'v3': V3_CONFIG_KEYS, 'btc-only': ('coins','record_coins'), 'entry-2': ('entry_ticks',)}
+EVALUATION_PROFILES = ('btc-only', 'entry-2')
 EVALUATION = ROOT / 'track_c/evaluation-c3.json'
 
 
@@ -32,24 +34,30 @@ def upgraded_config(current, desired, profile='v3'):
                 not {'ETH','XRP','SOL'} <= set(records) or
                 set(current['coins']+current.get('record_coins',[])) != {'BTC',*records}):
             raise ValueError('BTC-only must retain the full recorded universe')
+    if profile == 'entry-2' and (current.get('coins') != ['BTC'] or desired.get('entry_ticks') != 2.0):
+        raise ValueError('entry-2 requires BTC-only trading and a two-tick deviation floor')
     return dict(current, **{k:desired[k] for k in CONFIG_PROFILES[profile]})
 
 
-def activation_records(previous, cfg, start_ms, release):
+def activation_records(previous, cfg, start_ms, release, profile='btc-only'):
     """Pure reset of the prospective clock and display scope; no risk/accounting reset."""
     if previous.get('schema') != 2 or cfg.get('coins') != ['BTC'] or start_ms <= previous['start_ms']:
         raise ValueError('a new BTC-only activation is required')
+    if profile not in EVALUATION_PROFILES or (profile == 'entry-2' and cfg.get('entry_ticks') != 2.0):
+        raise ValueError('invalid activation profile or deviation floor')
     protocol = json.loads(json.dumps(previous))
     when = dt.datetime.fromtimestamp(start_ms/1000, dt.timezone(dt.timedelta(hours=9)))
     end_ms = start_ms + int(previous['days'])*86400000
-    protocol.update(name='C3 v3 BTC-only activation-anchored prospective checkpoint',
+    label = 'BTC entry >=2 ticks' if profile == 'entry-2' else 'BTC-only'
+    protocol.update(name='C3 v3 '+label+' activation-anchored prospective checkpoint',
                     registered_at_utc=when.astimezone(dt.timezone.utc).isoformat(),
                     start_ms=start_ms,end_ms=end_ms,start_kst=when.isoformat(),
                     end_kst_exclusive=dt.datetime.fromtimestamp(end_ms/1000,when.tzinfo).isoformat(),
                     development_before_ms=start_ms,
                     config={k:cfg.get(k) for k in previous['config']},
                     previous_registration=dict(name=previous['name'],start_ms=previous['start_ms'],
-                                               end_ms=previous['end_ms'],coins=previous['config']['coins']))
+                                               end_ms=previous['end_ms'],coins=previous['config']['coins'],
+                                               entry_ticks=previous['config'].get('entry_ticks')))
     baseline = dict(day=when.date().isoformat(),start_ms=start_ms,coins=['BTC'],rule=protocol['rule'],release=release)
     return protocol, baseline
 
@@ -57,7 +65,7 @@ def activation_records(previous, cfg, start_ms, release):
 def prepare(profile='v3'):
     if profile not in CONFIG_PROFILES:
         raise ValueError('unknown C3 upgrade profile')
-    template = json.loads(EVALUATION.read_text(encoding='utf-8')) if profile == 'btc-only' else None
+    template = json.loads(EVALUATION.read_text(encoding='utf-8')) if profile in EVALUATION_PROFILES else None
     if template:
         assert all(hashlib.sha256((ROOT/'track_c'/k).read_bytes()).hexdigest()==v for k,v in template['source'].items()), 'evaluation source changed'
     result = stage(DEFAULT_AWS, DEFAULT_KEY)
@@ -172,7 +180,7 @@ print(json.dumps(dict(switched=True,service_started=True,rule=VERSION,pause_owne
 def resume():
     result = json.loads(RECORD.read_text())
     assert result.get('switched')
-    if result.get('profile') == 'btc-only':
+    if result.get('profile') in EVALUATION_PROFILES:
         assert hashlib.sha256(EVALUATION.read_bytes()).hexdigest() == result['previous_evaluation_sha256'], 'local evaluation changed during rollout'
     code = GUARD + f'''
 import hashlib,os
@@ -197,11 +205,11 @@ activation={{}}
 if {result.get('pause_owned',False)!r}:
     assert pause.read_text()=={result['pause_owner']!r}, 'pause owner changed'
     resumed_at_ms=int(time.time()*1000)
-    if {result.get('profile','v3')!r}=='btc-only':
+    if {result.get('profile','v3')!r} in {EVALUATION_PROFILES!r}:
         from track_c.c3_upgrade import activation_records
         template={result.get('evaluation_template')!r}
         assert all(hashlib.sha256((pathlib.Path({result['release']!r})/'track_c'/k).read_bytes()).hexdigest()==v for k,v in template['source'].items())
-        evaluation,baseline=activation_records(template,cfg,resumed_at_ms,{result['release']!r})
+        evaluation,baseline=activation_records(template,cfg,resumed_at_ms,{result['release']!r},{result.get('profile','v3')!r})
         owner=(base/'data').stat()
         def write_owned(target,body):
             temp=target.with_name(target.name+'.c3-upgrade.tmp')
@@ -210,7 +218,8 @@ if {result.get('pause_owned',False)!r}:
             os.chmod(temp,0o600); os.chown(temp,owner.st_uid,owner.st_gid); temp.replace(target)
         folder=base/'data/evaluation'; folder.mkdir(exist_ok=True)
         os.chown(folder,owner.st_uid,owner.st_gid)
-        immutable=folder/('c3-v3-btc-'+str(resumed_at_ms)+'.json')
+        prefix={'c3-v3-btc-entry-2-' if result.get('profile') == 'entry-2' else 'c3-v3-btc-'!r}
+        immutable=folder/(prefix+str(resumed_at_ms)+'.json')
         assert not immutable.exists()
         write_owned(immutable,evaluation)
         write_owned(folder/'evaluation-c3.json',evaluation)
@@ -222,7 +231,7 @@ if {result.get('pause_owned',False)!r}:
         activation=dict(evaluation=evaluation,baseline=baseline,evaluation_path=str(immutable),
                         evaluation_sha256=hashlib.sha256(immutable.read_bytes()).hexdigest())
         write_owned(base/'data/upgrade-c3'/pathlib.Path({result['release']!r}).name/'activation.json',activation)
-    # Both new clocks/scopes are durable before the first BTC-only entry is possible.
+    # Both clocks/scopes are durable before the first entry under the new settings.
     pause.unlink(); removed=True
 print(json.dumps(dict(verified=True,resumed=removed,resumed_at_ms=resumed_at_ms,operator_pause_preserved=not removed,rule=VERSION,**activation)))
 '''
@@ -230,7 +239,7 @@ print(json.dumps(dict(verified=True,resumed=removed,resumed_at_ms=resumed_at_ms,
     RECORD.write_text(json.dumps(result, indent=2)+'\n')
     if result.get('resumed') and result.get('evaluation'):
         temp=EVALUATION.with_suffix('.json.tmp')
-        temp.write_text(json.dumps(result['evaluation'],indent=2)+'\n',encoding='utf-8')
+        temp.write_bytes((json.dumps(result['evaluation'],indent=2)+'\n').encode('utf-8'))
         temp.replace(EVALUATION)
     return result
 

@@ -7,7 +7,7 @@
   "coins": ["BTC"],
   "record_coins": ["ETH", "XRP", "SOL", "ADA", "DOGE", "ENA", "FIL", "KAIA", "ONDO", "ONE", "PENGU", "RIVER", "SKYAI", "SUI", "TRUMP", "TRX", "WLD", "XLM", "ZORA"],
   "notional_krw": 10000,
-  "entry_ticks": 0.0,
+  "entry_ticks": 2.0,
   "cancel_ticks": -0.5,
   "defend_ticks": -0.5,
   "stop_ticks": 3,

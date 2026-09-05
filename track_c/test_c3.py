@@ -457,6 +457,36 @@ class ConfigTests(unittest.TestCase):
                          {k:v for k,v in old['config'].items() if k!='coins'})
         self.assertEqual(json.dumps(old,sort_keys=True),saved)
 
+    def test_entry_upgrade_ignores_unrelated_desired_changes_and_requires_btc(self):
+        from .c3_upgrade import upgraded_config
+        live=dict(rule_cfg(),record_coins=['ETH','XRP','SOL'],mode='live',funding_confirmed=True)
+        desired=dict(live,entry_ticks=2.0,coins=['ETH'],record_coins=[],mode='observe',
+                     notional_krw=999999,stop_ticks=15,cancel_ticks=2.0)
+        self.assertEqual(upgraded_config(live,desired,'entry-2'),dict(live,entry_ticks=2.0))
+        with self.assertRaises(ValueError):
+            upgraded_config(dict(live,coins=['BTC','ETH']),desired,'entry-2')
+        for floor in (None,1.0,2.1,float('nan')):
+            with self.subTest(floor=floor),self.assertRaises(ValueError):
+                upgraded_config(live,dict(desired,entry_ticks=floor),'entry-2')
+
+    def test_entry_activation_preserves_protocol_and_records_previous_threshold(self):
+        from .c3_upgrade import activation_records
+        old=dict(schema=2,name='previous BTC baseline',start_ms=1788620790977,end_ms=1789484790977,
+                 days=10,rule='c3-rule-v3',config=rule_cfg(),source={},scenario=dict(latency_ms=250),
+                 bootstrap=dict(block_days=2,seed=20260905),controls=['none','flip','unconditional'],
+                 family_alpha=0.1,automatic_size_change=False)
+        saved=json.dumps(old,sort_keys=True)
+        cfg=dict(old['config'],entry_ticks=2.0)
+        start=old['start_ms']+3600000
+        protocol,baseline=activation_records(old,cfg,start,'release','entry-2')
+        self.assertEqual(protocol['config'],cfg)
+        self.assertEqual(protocol['previous_registration']['entry_ticks'],0.0)
+        self.assertEqual(protocol['start_ms'],baseline['start_ms'])
+        self.assertEqual(protocol['end_ms']-start,old['end_ms']-old['start_ms'])
+        for key in ('source','scenario','bootstrap','controls','family_alpha','automatic_size_change'):
+            self.assertEqual(protocol[key],old[key])
+        self.assertEqual(json.dumps(old,sort_keys=True),saved)
+
 
 if __name__ == '__main__':
     unittest.main()

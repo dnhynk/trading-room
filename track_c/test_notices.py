@@ -39,8 +39,8 @@ class Fixture(unittest.TestCase):
         self.db.execute('INSERT INTO events(t_ms,kind,body) VALUES (?,?,?)',(int((self.now if t is None else t)*1000),kind,json.dumps(body)))
         self.db.commit()
 
-    def intent(self, *, cid='private-entry', coin='BTC', t=None):
-        self.event('CAMPAIGN_INTENT',dict(coin=coin,plan={}),t)
+    def intent(self, *, cid='private-entry', coin='BTC', t=None, plan=None):
+        self.event('CAMPAIGN_INTENT',dict(coin=coin,plan=plan or {}),t)
         self.event('ORDER_INTENT',dict(coin=coin,order=dict(cid=cid,side='BUY',role='entry')),t)
 
     def fill(self, q='1', gross='100', pnl='0', *, cid='private-entry', role='entry', fee='0', t=None):
@@ -180,6 +180,38 @@ class AccountingTests(Fixture):
     def test_invalid_scope_never_silently_includes_all_coins(self):
         self.status['rule']=dict(coins='BTC'); self.save()
         self.assertTrue(all('확인 불가' in value for value in self.fields().values()))
+
+    def test_deviation_scope_filters_whole_campaign_including_fees_and_survives_midnight(self):
+        folder=self.path/'notifications'; folder.mkdir()
+        (folder/'baseline.json').write_text(json.dumps(dict(day='2026-09-04',start_ms=int((self.now-86400)*1000),
+                                                            coins=['BTC'],entry_dev_min_ticks=2.0)))
+        for i,(coin,dev,net) in enumerate([('BTC',1.999999,100),('ETH',3.0,100),('BTC',2.0,10),('BTC',2.5,-5)]):
+            self.intent(cid='entry'+str(i),coin=coin,plan=dict(dev_ticks=dev))
+            self.fill(cid='entry'+str(i),q='0.4',gross='40',fee='1',pnl='-1')
+            self.fill(cid='entry'+str(i),q='0.6',gross='60')
+            self.event('ORDER_INTENT',dict(coin=coin,order=dict(cid='sale'+str(i),side='SELL',role='exit')))
+            self.fill(cid='sale'+str(i),role='exit',gross=str(101+net),pnl=str(1+net))
+            self.closed(ident=str(i),coin=coin,net=str(net))
+            self.event('FLAT',dict(coin=coin))
+        before=self.db.execute('SELECT seq,t_ms,kind,body FROM events ORDER BY seq').fetchall()
+        fields=self.fields()
+        self.assertEqual(fields['누적 손익'],'+5.0원')
+        self.assertEqual(fields['캠페인 횟수'],'2회')
+        self.assertEqual(fields['승률'],'50.0% · 1승/2회')
+        self.assertEqual(fields['잔고'],'500,000원')
+        self.assertEqual(fields['가용'],'500,000원')
+        self.assertEqual(self.db.execute('SELECT seq,t_ms,kind,body FROM events ORDER BY seq').fetchall(),before)
+
+    def test_unknown_deviation_cannot_qualify_for_filtered_statistics(self):
+        folder=self.path/'notifications'; folder.mkdir()
+        (folder/'baseline.json').write_text(json.dumps(dict(coins=['BTC'],entry_dev_min_ticks=2.0)))
+        for i,dev in enumerate([None,float('nan'),float('inf'),'bad',2.0]):
+            self.intent(plan=dict(dev_ticks=dev)); self.fill(pnl='1')
+            self.closed(ident=str(i),net='1'); self.event('FLAT',{})
+        fields=self.fields()
+        self.assertEqual(fields['누적 손익'],'+1.0원')
+        self.assertEqual(fields['캠페인 횟수'],'1회')
+        self.assertEqual(fields['승률'],'100.0% · 1승/1회')
 
     def test_detail_precedes_c_dashboard_and_private_ids_not_rendered(self):
         self.intent(); self.fill()
