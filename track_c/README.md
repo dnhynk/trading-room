@@ -67,6 +67,8 @@ python -m track_c.c3_live_evidence --data-dir <C data> --start-ms <evaluation st
 
 사용자 지시(2026-09-05): **매수 진입 알림은 보내지 않고 체결 알림은 청산만 보낸다.** 재기동 전 큐에 남은 진입 알림도 suppressed로 보존하고 발송하지 않는다. 매수 체결은 장부·캠페인 통계에 계속 반영한다. 매도 없는 잔량 이월도 발송하지 않는다. `notifications/status.json`의 `trade_notifications: exits_only`로 적용 여부를 확인한다.
 
+2026-09-06 03:16 수정: 잔량은 실제로 팔릴 때까지 승패 미확정이며, 다음 거래와 함께 팔리면 원래 진입 캠페인까지 완료한다. 병합 매도는 잔여 수량 비례로 귀속하고 원래 종목·편차·시작일 필터를 유지한다. 총 진입/완료/진행/잔량 대기와 승·패·보합을 나눠 표시하며 상태 카드도 이월 재고를 포함한다. 같은 매도에 대한 FILL/CLOSE 알림은 합치고 이미 전송한 수량은 재전송하지 않는다. 알림 release `20260906-031638-9f5d6c3ad7a6`; 매매 엔진·평가 창·표시 기준선·원본 장부는 유지했다.
+
 기존 릴레이가 새 청산 사유(`take_profit`·`defend`·`stop`·`brake`·`dust`·`take_rejected`)와 `take` 체결 라벨을 읽으려면 `python -m track_c.deploy_notify install`로 릴레이를 갱신한다. 손익은 원화 소수점 첫째 자리, 잔고·가격은 정수로 표시하고 내부 Decimal은 유지한다.
 
 ## 롤백

@@ -10,6 +10,7 @@ import time
 KST = dt.timezone(dt.timedelta(hours=9))
 TERMINAL = {'FILLED','CANCELED','REJECTED','NOT_TRIGGERED_CANCELED','CANCELED_NO_ORDER','CANCELED_LIMIT_PRICE_EXCEED','CANCELED_UNDER_PRODUCT_UNIT'}
 HISTORY = ('CAMPAIGN_INTENT','ORDER_INTENT','FILL','CLOSE','NO_FILL','FLAT','SCAN')
+REPLAY_VERSION = 2
 
 
 class DataUnavailable(RuntimeError):
@@ -83,7 +84,9 @@ class Replay:
         if not coin and len(books)==1: coin=next(iter(books))
         c=books.get(coin)
         if kind == 'CAMPAIGN_INTENT':
-            books[body['coin']] = dict(coin=body['coin'], started_ms=None, qty='0', orders={}, buy_gross='0', sell_gross='0', fees='0',
+            residual = body.get('residual') or {}
+            books[body['coin']] = dict(coin=body['coin'], started_ms=None, qty=residual.get('qty','0'), orders={}, buy_gross='0', sell_gross='0', fees='0',
+                                      campaign_seq=seq, sell_roles=[],
                                       entry_dev_ticks=(body.get('plan') or {}).get('dev_ticks'))
         elif kind == 'ORDER_INTENT':
             if c is None:
@@ -103,13 +106,16 @@ class Replay:
             field = 'buy_gross' if buy else 'sell_gross'
             c[field] = str(number(c[field])+gross)
             c['fees'] = str(number(c['fees'])+fee)
+            if not buy and body['role'] not in c.setdefault('sell_roles',[]):
+                c['sell_roles'].append(body['role'])
             return dict(body,type='fill',seq=seq,t_ms=t,coin=c['coin'],first=first,started_ms=c['started_ms'],
-                        remaining=c['qty'],buy=buy,entry_dev_ticks=c.get('entry_dev_ticks'))
+                        remaining=c['qty'],buy=buy,entry_dev_ticks=c.get('entry_dev_ticks'),campaign_seq=c.get('campaign_seq'))
         elif kind == 'CLOSE':
             campaign = body['campaign']
             started = c['started_ms'] if c else int(float(campaign['first_fill'])*1000) if campaign['first_fill'] is not None else None
             return dict(type='close',seq=seq,t_ms=t,coin=campaign['coin'],campaign=campaign,started_ms=started,
                         sell_gross=c['sell_gross'] if c else None,fees=c['fees'] if c else None,
+                        order_cids=list(c['orders']) if c else [],sell_roles=c.get('sell_roles',[]) if c else [],
                         entry_dev_ticks=c.get('entry_dev_ticks') if c else (campaign.get('plan') or {}).get('dev_ticks'))
         elif kind in ('NO_FILL','FLAT'):
             books.pop(coin,None)
@@ -123,13 +129,127 @@ class Replay:
             return dict(type=kind,seq=seq,t_ms=t,coin=c['coin'] if c else None,body=body)
 
 
+class CampaignStatistics:
+    """Display-only attribution; carry/merge never completes an unsold campaign.
+
+    Mixed inventory uses proportional allocation, matching the engine's pooled
+    cost basis. Each original entry retains its date/deviation and sale proceeds.
+    The last allocation absorbs Decimal rounding so fill PnL is conserved.
+    """
+    def __init__(self, start, end, coins=None, entry_floor=None):
+        self.start, self.end = start, end
+        self.coins, self.entry_floor = coins, entry_floor
+        self.replay = Replay()
+        self.records, self.active, self.carried = [], {}, {}
+        self.seen_closes = set()
+        self.pnl = D(0)
+
+    def eligible(self, c):
+        if self.coins is not None and c['coin'] not in self.coins:
+            return False
+        if self.entry_floor is not None:
+            try:
+                return number(c['dev']) >= self.entry_floor
+            except (InvalidOperation, ValueError, TypeError):
+                return False
+        return True
+
+    def credit(self, c, pnl, t):
+        c['net'] += pnl
+        if self.start <= t < self.end and self.eligible(c):
+            self.pnl += pnl
+
+    def apply(self, row):
+        seq, t, kind, body = row
+        if t >= self.end:
+            return  # A later sale must not retroactively alter a past day's wins.
+        coin = body.get('coin') or body.get('campaign',{}).get('coin')
+        if not coin and len(self.active) == 1:
+            coin = next(iter(self.active))
+        fact = self.replay.apply(row)
+        if kind == 'CAMPAIGN_INTENT':
+            residual = body.get('residual') or {}
+            owners = self.carried.pop(coin,[]) if residual else []
+            if sum((c['qty'] for c in owners),D(0)) != number(residual.get('qty','0')):
+                raise DataUnavailable('C residual attribution missing')
+            own = dict(coin=coin,dev=(body.get('plan') or {}).get('dev_ticks'),
+                       started=None,closed=None,ended=False,qty=D(0),cost=D(0),net=D(0))
+            self.records.append(own)
+            self.active[coin] = dict(own=own,owners=owners+[own],mixed=bool(owners))
+        elif fact and fact['type'] == 'fill':
+            session = self.active[fact['coin']]
+            q, gross, fee, pnl = (number(fact[k]) for k in ('qty','gross','fee','pnl'))
+            if fact['buy']:
+                own = session['own']
+                if own['started'] is None:
+                    own['started'] = t
+                own['qty'] += q
+                own['cost'] += gross
+                self.credit(own,pnl,t)
+            else:
+                owners = [c for c in session['owners'] if c['qty'] > 0]
+                total = sum((c['qty'] for c in owners),D(0))
+                if q > total or not total:
+                    raise DataUnavailable('C sale attribution exceeds inventory')
+                left_q, left_gross, left_fee, left_pnl = q,gross,fee,pnl
+                for i,c in enumerate(owners):
+                    last = i == len(owners)-1
+                    part = left_q if last else c['qty']*q/total
+                    proceeds = left_gross if last else gross*part/q
+                    sale_fee = left_fee if last else fee*part/q
+                    basis = c['cost'] if part == c['qty'] else c['cost']*part/c['qty']
+                    value = left_pnl if last else proceeds-basis-sale_fee
+                    c['qty'] -= part
+                    c['cost'] -= basis
+                    self.credit(c,value,t)
+                    left_q -= part; left_gross -= proceeds; left_fee -= sale_fee; left_pnl -= value
+                    if not c['qty'] and c['ended']:
+                        c['closed'] = t
+        elif kind in ('CLOSE','NO_FILL'):
+            campaign = body['campaign']
+            ident = campaign.get('id')
+            if kind == 'CLOSE' and ident in self.seen_closes:
+                return
+            if kind == 'CLOSE':
+                self.seen_closes.add(ident)
+            session = self.active.get(coin)
+            if session is None:
+                return
+            own, owners = session['own'],session['owners']
+            remaining = number(campaign.get('qty','0'))
+            if not session['mixed']:
+                # The canonical CLOSE includes all fees and is also readable for
+                # old event histories whose sale details were not retained.
+                own['net'] = number(campaign.get('net',own['net']))
+                own['qty'] = remaining
+                own['cost'] = number(campaign.get('cost',own['cost'])) if remaining else D(0)
+            elif sum((c['qty'] for c in owners),D(0)) != remaining:
+                raise DataUnavailable('C carried quantity mismatch')
+            for c in owners:
+                c['ended'] = True
+                if c['started'] is not None and not c['qty'] and c['closed'] is None:
+                    c['closed'] = t
+            self.carried[coin] = [c for c in owners if c['qty'] > 0]
+        elif kind == 'FLAT':
+            self.active.pop(coin,None)
+
+    def counts(self):
+        cohort = [c for c in self.records if c['started'] is not None and
+                  self.start <= c['started'] < self.end and self.eligible(c)]
+        closed = [c for c in cohort if c['closed'] is not None]
+        return dict(total=len(cohort),closed=len(closed),wins=sum(c['net']>0 for c in closed),
+                    losses=sum(c['net']<0 for c in closed),ties=sum(c['net']==0 for c in closed),
+                    active=sum(c['closed'] is None and not c['ended'] for c in cohort),
+                    carried=sum(c['closed'] is None and c['ended'] for c in cohort))
+
+
 def summary_fields(directory, *, day=None, balance=True, now=None):
     now = time.time() if now is None else now
     try:
         state,status,rows,_ = Source(directory).read()
         date = dt.date.fromisoformat(day) if day else dt.datetime.fromtimestamp(now,KST).date()
         start = int(dt.datetime.combine(date,dt.time(),KST).timestamp()*1000)
-        end = start+86400000
+        end = min(start+86400000,int(now*1000)+1)
         coins = (status.get('rule') or {}).get('coins')
         entry_floor = None
         baseline = Path(directory)/'notifications/baseline.json'
@@ -145,34 +265,12 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
                                   any(not isinstance(c,str) or not c for c in coins)):
             raise ValueError('invalid notification coin scope')
         allowed = set(coins) if coins is not None else None
-        pnl, campaigns, wins, closed = D(0),0,0,0
-        seen = set()
-        replay = Replay()
+        stats = CampaignStatistics(start,end,allowed,entry_floor)
         for row in rows:
-            fact = replay.apply(row)
-            # Replay every coin first so interleaved order/fill context remains intact.
-            if not fact or (allowed is not None and fact.get('coin') not in allowed):
-                continue
-            if entry_floor is not None and fact['type'] in ('fill','close'):
-                # Classify the whole campaign by its original entry intent, including
-                # partial fills/fees. Missing historical deviations cannot qualify.
-                try:
-                    if number(fact.get('entry_dev_ticks')) < entry_floor:
-                        continue
-                except (InvalidOperation,ValueError,TypeError):
-                    continue
-            if fact['type'] == 'fill':
-                if start <= fact['t_ms'] < end:
-                    pnl += number(fact['pnl'])
-                    if fact['first']:
-                        campaigns += 1
-            elif fact['type'] == 'close':
-                c = fact['campaign']
-                if not number(c.get('qty', '0')) and fact['started_ms'] is not None and start <= fact['started_ms'] < end and fact['t_ms'] < end and c['id'] not in seen:
-                    seen.add(c['id']); closed += 1
-                    wins += number(c['net']) > 0
+            stats.apply(row)
+        counts = stats.counts()
+        pnl, wins, closed = stats.pnl,counts['wins'],counts['closed']
         cash = number(state['cash_krw'])
-        positions=list(state['campaigns'].values()) if state['version']==3 else [state['campaign']] if state['campaign'] else []
         from .accounting import marked_equity
         equity = marked_equity(state)
         reserved = sum((max(D(0),number(o['qty'])-number(o['filled']))*number(o['price'])
@@ -181,8 +279,11 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
         age = now-status['t_ms']/1000
         stale = f' · {int(max(0,age)//60)}분 전' if age > 120 else ''
         fields = [('잔고',krw(equity)+stale),('가용',krw(available)+stale)] if balance else []
+        campaign_text = f"{counts['total']:,}회 · 완료 {closed} / 진행 {counts['active']} / 잔량 대기 {counts['carried']}"
+        win_text = (f"{wins/closed*100:.1f}% · {wins}승 {counts['losses']}패"+
+                    (f" {counts['ties']}보합" if counts['ties'] else '')+f" / 완료 {closed}회") if closed else '계산 전 · 완료 0회'
         fields += [('누적 손익',krw(pnl,True,decimals=1)),('엔진 수익률',f'{pnl/equity*100:+.2f}%' if equity>0 else '계산 불가'),
-                   ('캠페인 횟수',f'{campaigns:,}회'),('승률',f'{wins/closed*100:.1f}% · {wins}승/{closed}회' if closed else '계산 전 · 0회 종료')]
+                   ('캠페인 횟수',campaign_text),('승률',win_text)]
         return fields
     except (DataUnavailable,OSError,ValueError,TypeError,KeyError,InvalidOperation,ZeroDivisionError):
         labels = (['잔고','가용'] if balance else [])+['누적 손익','엔진 수익률','캠페인 횟수','승률']
@@ -219,12 +320,20 @@ def fact_payload(fact):
     kind = fact['type']
     if kind == 'close':
         c = fact['campaign']; reason = c['exit_reason']
-        if not number(c['sold']): return None  # Pure dust carry has no sale to notify.
+        sold = number(fact.get('notice_sold',c['sold']))
+        if sold <= 0: return None  # Pure carry or a sale already notified.
         label = '손절' if reason in ('premise','stop','exchange_stop','daily_loss') else '부분청산' if number(c['qty']) else '전량청산'
-        fields = [['청산 원인',REASONS.get(reason,'청산 조건 충족')],['매도 수량',qty(c['sold'])+'개'],
-                  ['캠페인 순손익',krw(c['net'],True,decimals=1)],['남은 수량',qty(c['qty'])+'개']]
-        if fact.get('sell_gross') is not None and number(c['sold'])>0:
-            fields.append(['평균 매도가',krw(number(fact['sell_gross'])/number(c['sold']))])
+        roles = fact.get('sell_roles',[])
+        fields = [['매도 체결' if roles==['take'] else '청산 원인',
+                   '지정가 익절' if roles==['take'] else REASONS.get(reason,'청산 조건 충족')],
+                  ['매도 수량',qty(sold)+'개'],
+                  ['캠페인 실현손익' if number(c['qty']) else '캠페인 순손익',krw(c['net'],True,decimals=1)],
+                  ['남은 수량',qty(c['qty'])+'개']]
+        if number(c['qty']):
+            fields.append(['잔량 처리','최소 주문액 미만 · 다음 거래로 이월 · 승패 미확정'])
+        gross = fact.get('notice_gross',fact.get('sell_gross'))
+        if gross is not None:
+            fields.append(['평균 매도가',krw(number(gross)/sold)])
         return payload(label,c['coin']+' 현물',fields,t_ms=fact['t_ms'])
     if kind == 'scan':
         return payload('종목변경','감시 종목 갱신',lines=['현재: '+', '.join(fact['new'])],t_ms=fact['t_ms'])

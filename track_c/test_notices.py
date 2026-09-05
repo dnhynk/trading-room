@@ -9,7 +9,7 @@ from unittest.mock import patch
 import urllib.error
 
 from bot import notify
-from .notices import DataUnavailable, KST, Replay, Source, fill_payload, summary_fields
+from .notices import CampaignStatistics, DataUnavailable, KST, REPLAY_VERSION, Replay, Source, fill_payload, summary_fields
 from .notify_relay import Relay
 
 
@@ -39,8 +39,8 @@ class Fixture(unittest.TestCase):
         self.db.execute('INSERT INTO events(t_ms,kind,body) VALUES (?,?,?)',(int((self.now if t is None else t)*1000),kind,json.dumps(body)))
         self.db.commit()
 
-    def intent(self, *, cid='private-entry', coin='BTC', t=None, plan=None):
-        self.event('CAMPAIGN_INTENT',dict(coin=coin,plan=plan or {}),t)
+    def intent(self, *, cid='private-entry', coin='BTC', t=None, plan=None, residual=None):
+        self.event('CAMPAIGN_INTENT',dict(coin=coin,plan=plan or {},residual=residual),t)
         self.event('ORDER_INTENT',dict(coin=coin,order=dict(cid=cid,side='BUY',role='entry')),t)
 
     def fill(self, q='1', gross='100', pnl='0', *, cid='private-entry', role='entry', fee='0', t=None):
@@ -61,7 +61,7 @@ class AccountingTests(Fixture):
         self.intent()
         self.fill(q='2', gross='1980')
         self.event('CLOSE', dict(campaign=dict(id='residual', coin='BTC', first_fill=self.now, net='10', sold='1', qty='2', exit_reason='dust')))
-        self.assertEqual(self.fields()['승률'], '계산 전 · 0회 종료')
+        self.assertEqual(self.fields()['승률'], '계산 전 · 완료 0회')
 
     def test_c_never_reads_ab_and_uses_krw(self):
         with patch.object(notify,'_latest_state',side_effect=AssertionError('A/B read')),patch.object(notify,'_engine_day',side_effect=AssertionError('A/B read')),patch('track_c.notices.time.time',return_value=self.now):
@@ -80,8 +80,8 @@ class AccountingTests(Fixture):
         self.closed(net='10')  # Crash-replayed CLOSE cannot inflate wins.
         self.event('FLAT',{})
         self.assertEqual(self.fields()['누적 손익'],'+10.0원')
-        self.assertEqual(self.fields()['캠페인 횟수'],'1회')
-        self.assertEqual(self.fields()['승률'],'100.0% · 1승/1회')
+        self.assertEqual(self.fields()['캠페인 횟수'],'1회 · 완료 1 / 진행 0 / 잔량 대기 0')
+        self.assertEqual(self.fields()['승률'],'100.0% · 1승 0패 / 완료 1회')
         self.state['cash_krw']='1000'; self.status['account_krw_available']='1000'; self.save()
         self.assertEqual(self.fields()['엔진 수익률'],'+1.00%')
         self.event('EXTERNAL_CAPITAL',dict(balance='2000',external_delta='1000'))
@@ -96,14 +96,14 @@ class AccountingTests(Fixture):
         self.fill(cid='sell',role='exit',pnl='11')
         self.closed(first=start,net='10')
         self.assertEqual(self.fields()['누적 손익'],'+11.0원')
-        self.assertEqual(self.fields()['캠페인 횟수'],'0회')
-        self.assertEqual(self.fields()['승률'],'계산 전 · 0회 종료')
+        self.assertEqual(self.fields()['캠페인 횟수'],'0회 · 완료 0 / 진행 0 / 잔량 대기 0')
+        self.assertEqual(self.fields()['승률'],'계산 전 · 완료 0회')
 
     def test_open_campaign_and_unfilled_intent_do_not_count_as_closed(self):
         self.intent(); self.event('NO_FILL',dict(campaign={})); self.event('FLAT',{})
         self.intent(); self.fill()
-        self.assertEqual(self.fields()['캠페인 횟수'],'1회')
-        self.assertEqual(self.fields()['승률'],'계산 전 · 0회 종료')
+        self.assertEqual(self.fields()['캠페인 횟수'],'1회 · 완료 0 / 진행 1 / 잔량 대기 0')
+        self.assertEqual(self.fields()['승률'],'계산 전 · 완료 0회')
 
     def test_inventory_mark_and_pending_buy_cash_reservation(self):
         self.state['campaign']=dict(qty='2',mark='110')
@@ -141,7 +141,7 @@ class AccountingTests(Fixture):
         folder=self.path/'notifications'; folder.mkdir()
         (folder/'baseline.json').write_text(json.dumps(dict(day='2026-09-05',start_ms=int(self.now*1000))))
         self.assertEqual(self.fields()['누적 손익'],'+0.0원')
-        self.assertEqual(self.fields()['캠페인 횟수'],'0회')
+        self.assertEqual(self.fields()['캠페인 횟수'],'0회 · 완료 0 / 진행 0 / 잔량 대기 0')
 
     def test_btc_scope_excludes_interleaved_alt_fills_closes_and_survives_midnight(self):
         self.state['cash_krw']='1000'; self.status['account_krw_available']='1000'
@@ -160,8 +160,8 @@ class AccountingTests(Fixture):
         fields=self.fields()
         self.assertEqual(fields['누적 손익'],'+10.0원')
         self.assertEqual(fields['엔진 수익률'],'+1.00%')
-        self.assertEqual(fields['캠페인 횟수'],'1회')
-        self.assertEqual(fields['승률'],'100.0% · 1승/1회')
+        self.assertEqual(fields['캠페인 횟수'],'1회 · 완료 1 / 진행 0 / 잔량 대기 0')
+        self.assertEqual(fields['승률'],'100.0% · 1승 0패 / 완료 1회')
         self.assertEqual(fields['잔고'],'1,000원')
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],count)
 
@@ -173,8 +173,8 @@ class AccountingTests(Fixture):
         self.closed(coin='ETH',net='-10')
         fields=self.fields()
         self.assertEqual(fields['누적 손익'],'+0.0원')
-        self.assertEqual(fields['캠페인 횟수'],'0회')
-        self.assertEqual(fields['승률'],'계산 전 · 0회 종료')
+        self.assertEqual(fields['캠페인 횟수'],'0회 · 완료 0 / 진행 0 / 잔량 대기 0')
+        self.assertEqual(fields['승률'],'계산 전 · 완료 0회')
         self.assertEqual(dict(heartbeat(self.state,self.status,self.now)['fields'])['매매 종목'],'BTC')
 
     def test_invalid_scope_never_silently_includes_all_coins(self):
@@ -196,8 +196,8 @@ class AccountingTests(Fixture):
         before=self.db.execute('SELECT seq,t_ms,kind,body FROM events ORDER BY seq').fetchall()
         fields=self.fields()
         self.assertEqual(fields['누적 손익'],'+5.0원')
-        self.assertEqual(fields['캠페인 횟수'],'2회')
-        self.assertEqual(fields['승률'],'50.0% · 1승/2회')
+        self.assertEqual(fields['캠페인 횟수'],'2회 · 완료 2 / 진행 0 / 잔량 대기 0')
+        self.assertEqual(fields['승률'],'50.0% · 1승 1패 / 완료 2회')
         self.assertEqual(fields['잔고'],'500,000원')
         self.assertEqual(fields['가용'],'500,000원')
         self.assertEqual(self.db.execute('SELECT seq,t_ms,kind,body FROM events ORDER BY seq').fetchall(),before)
@@ -210,8 +210,8 @@ class AccountingTests(Fixture):
             self.closed(ident=str(i),net='1'); self.event('FLAT',{})
         fields=self.fields()
         self.assertEqual(fields['누적 손익'],'+1.0원')
-        self.assertEqual(fields['캠페인 횟수'],'1회')
-        self.assertEqual(fields['승률'],'100.0% · 1승/1회')
+        self.assertEqual(fields['캠페인 횟수'],'1회 · 완료 1 / 진행 0 / 잔량 대기 0')
+        self.assertEqual(fields['승률'],'100.0% · 1승 0패 / 완료 1회')
 
     def test_detail_precedes_c_dashboard_and_private_ids_not_rendered(self):
         self.intent(); self.fill()
@@ -221,6 +221,118 @@ class AccountingTests(Fixture):
         encoded=json.dumps(blocks,ensure_ascii=False)
         self.assertLess(encoded.index('체결 순손익'),encoded.index('잔고'))
         self.assertNotIn('private-entry',encoded)
+
+
+class ResidualAttributionTests(Fixture):
+    def carry(self, *, dev=2, t=None):
+        self.intent(plan=dict(dev_ticks=dev),t=t)
+        self.fill(q='2',gross='200',fee='1',pnl='-1',t=t)
+        self.event('ORDER_INTENT',dict(order=dict(cid='sale1',side='SELL',role='take')),t)
+        self.fill(cid='sale1',role='take',q='1',gross='110',fee='1',pnl='9',t=t)
+        self.residual = dict(qty='1',cost='100',mark='110')
+        self.event('CLOSE',dict(campaign=dict(id='first',coin='BTC',first_fill=t or self.now,
+                                            qty='1',cost='100',net='8',sold='1',exit_reason='brake')),t)
+        self.event('FLAT',dict(coin='BTC'),t)
+
+    def merged_sale(self, *, dev=2, t=None, partial=False):
+        self.intent(cid='buy2',plan=dict(dev_ticks=dev),residual=self.residual,t=t)
+        self.fill(cid='buy2',q='1',gross='120',fee='2',pnl='-2',t=t)
+        self.event('ORDER_INTENT',dict(order=dict(cid='sale2',side='SELL',role='take')),t)
+        if partial:
+            self.fill(cid='sale2',role='take',q='1',gross='120',fee='1',pnl='9',t=t)
+            self.event('CLOSE',dict(campaign=dict(id='second',coin='BTC',first_fill=t or self.now,
+                                                qty='1',cost='110',net='7',sold='1',exit_reason='brake')),t)
+        else:
+            self.fill(cid='sale2',role='take',q='2',gross='240',fee='2',pnl='18',t=t)
+            self.closed(ident='second',sold='2',net='16',t=t)
+        self.event('FLAT',dict(coin='BTC'),t)
+
+    def stats(self, **kwargs):
+        stats=CampaignStatistics(int((self.now-3600)*1000),int((self.now+3600)*1000),**kwargs)
+        for row in Source(self.path).read()[2]:
+            stats.apply(row)
+        return stats
+
+    def test_carried_campaign_completes_after_actual_merged_sale_with_own_pnl(self):
+        self.carry()
+        self.assertEqual(self.stats().counts(),dict(total=1,closed=0,wins=0,losses=0,ties=0,active=0,carried=1))
+        # Rejected/unfilled intervening attempts do not count or lose attribution.
+        self.intent(cid='unfilled',residual=self.residual)
+        self.event('NO_FILL',dict(campaign=dict(coin='BTC',qty='1',cost='100',first_fill=None)))
+        self.event('FLAT',dict(coin='BTC'))
+        self.merged_sale()
+        before=self.db.execute('SELECT * FROM events').fetchall()
+        stats=self.stats()
+        self.assertEqual(stats.counts(),dict(total=2,closed=2,wins=1,losses=1,ties=0,active=0,carried=0))
+        # Original lot makes 27; new lot loses 3, although engine CLOSE.net is +16.
+        self.assertEqual([str(c['net']) for c in stats.records if c['started']],['27','-3'])
+        self.assertEqual(str(stats.pnl),'24')
+        self.assertEqual(self.db.execute('SELECT * FROM events').fetchall(),before)
+
+    def test_original_deviation_filter_survives_merge_in_both_directions(self):
+        self.carry(dev=1)
+        self.merged_sale(dev=2)
+        stats=self.stats(coins={'BTC'},entry_floor=2)
+        self.assertEqual(stats.counts()['total'],1)
+        self.assertEqual(stats.counts()['losses'],1)
+        self.assertEqual(str(stats.pnl),'-3')
+        # Same economic events with only the first intent eligible.
+        self.db.execute("UPDATE events SET body=json_set(body,'$.plan.dev_ticks',CASE seq WHEN 1 THEN 2 ELSE 1 END) WHERE kind='CAMPAIGN_INTENT'")
+        self.db.commit()
+        stats=self.stats(coins={'BTC'},entry_floor=2)
+        self.assertEqual(stats.counts()['wins'],1)
+        self.assertEqual(str(stats.pnl),'27')
+
+    def test_repeated_partial_carry_keeps_all_origins_until_fully_sold(self):
+        self.carry()
+        self.merged_sale(partial=True)
+        stats=self.stats()
+        self.assertEqual(stats.counts()['carried'],2)
+        self.assertEqual(stats.counts()['closed'],0)
+        self.assertEqual(sum(c['qty'] for c in stats.records),1)
+        self.residual=dict(qty='1',cost='110',mark='120')
+        self.intent(cid='buy3',residual=self.residual)
+        self.fill(cid='buy3',q='1',gross='100',pnl='0')
+        self.event('ORDER_INTENT',dict(order=dict(cid='sale3',side='SELL',role='exit')))
+        self.fill(cid='sale3',role='exit',q='2',gross='240',pnl='30')
+        self.closed(ident='third',sold='2',net='30')
+        self.event('FLAT',dict(coin='BTC'))
+        stats=self.stats()
+        self.assertEqual(stats.counts()['closed'],3)
+        self.assertEqual(stats.counts()['carried'],0)
+        self.assertEqual(sum(c['net'] for c in stats.records),stats.pnl)
+        self.assertEqual(stats.pnl,45)
+
+    def test_tomorrow_sale_does_not_rewrite_today_win_rate(self):
+        self.carry()
+        tomorrow=at('2026-09-06T00:00:01')
+        self.merged_sale(t=tomorrow)
+        fields=dict(summary_fields(self.path,now=self.now,day='2026-09-05'))
+        self.assertEqual(fields['승률'],'계산 전 · 완료 0회')
+        self.assertEqual(fields['누적 손익'],'+8.0원')
+        fields=dict(summary_fields(self.path,now=tomorrow,day='2026-09-06'))
+        self.assertEqual(fields['승률'],'0.0% · 0승 1패 / 완료 1회')
+        self.assertEqual(fields['누적 손익'],'+16.0원')
+
+    def test_breakeven_and_small_profit_classified_before_display_rounding(self):
+        for i,net in enumerate(('0','0.01','-0.01')):
+            self.intent(cid='buy'+str(i)); self.fill(cid='buy'+str(i))
+            self.closed(ident=str(i),net=net); self.event('FLAT',{})
+        self.assertEqual(self.fields()['승률'],'33.3% · 1승 1패 1보합 / 완료 3회')
+
+    def test_missing_residual_provenance_is_reported_not_invented(self):
+        self.intent(residual=dict(qty='1',cost='100'))
+        self.assertTrue(all('확인 불가' in value for value in self.fields().values()))
+
+    def test_heartbeat_shows_dust_and_unfilled_order_separately(self):
+        from .notify_relay import operating_fields
+        self.state.update(version=3,campaigns=dict(BTC=dict(coin='BTC',qty='0')),
+                          residuals=dict(BTC=dict(qty='0.00000238',cost='259.896',mark='109170000')))
+        position=dict(operating_fields(self.state,self.status))['포지션']
+        self.assertIn('매수 대기 · 미체결',position)
+        self.assertIn('BTC 0.00000238개 · 이월 잔량',position)
+        self.assertIn('평가액 259.8원',position)
+        self.assertIn('미실현 -0.1원',position)
 
 
 class RelayTests(Fixture):
@@ -275,6 +387,75 @@ class RelayTests(Fixture):
         report=json.loads((self.path/'notifications/status.json').read_text(encoding='utf-8'))
         self.assertEqual(report['trade_notifications'],'exits_only')
         self.assertEqual((report['suppressed'],report['pending']),(1,0))
+
+    def partial_sale(self):
+        self.intent(); self.fill(q='2',gross='200')
+        self.event('ORDER_INTENT',dict(order=dict(cid='sale',side='SELL',role='take')))
+        self.fill(cid='sale',role='take',q='1',gross='110',pnl='10')
+
+    def carry_close(self):
+        self.event('CLOSE',dict(campaign=dict(id='carried',coin='BTC',first_fill=self.now,
+                                            qty='1',cost='100',sold='1',net='10',exit_reason='brake')))
+        self.event('FLAT',{})
+
+    def test_partial_sale_and_carry_close_produce_one_accurate_card(self):
+        self.relay.poll()
+        self.partial_sale(); self.carry_close()
+        self.relay.poll(); self.now+=3; self.relay.poll()
+        self.assertEqual([c['kind'] for c in self.sent],['부팅','부분청산'])
+        fields=dict(self.sent[-1]['fields'])
+        self.assertEqual(fields['매도 체결'],'지정가 익절')
+        self.assertNotIn('청산 원인',fields)
+        self.assertEqual(fields['캠페인 실현손익'],'+10.0원')
+        self.assertIn('승패 미확정',fields['잔량 처리'])
+        self.assertEqual(self.relay.db.execute("SELECT COUNT(*) FROM queue WHERE state='suppressed'").fetchone()[0],1)
+
+    def test_pending_partial_survives_restart_and_combines_with_next_poll_close(self):
+        self.relay.poll(); self.partial_sale(); self.relay.poll()
+        self.restart()
+        self.carry_close(); self.relay.poll()
+        self.now+=3; self.relay.poll()
+        self.assertEqual([c['kind'] for c in self.sent],['부팅','부분청산'])
+        self.assertIn('잔량 처리',dict(self.sent[-1]['fields']))
+
+    def test_already_sent_partial_is_not_repeated_when_only_dust_is_carried(self):
+        self.relay.poll(); self.partial_sale(); self.relay.poll()
+        self.now+=3; self.relay.poll()
+        self.assertEqual(len(self.sent),2)
+        self.carry_close(); self.relay.poll()
+        self.assertEqual(len(self.sent),2)
+
+    def test_final_close_reports_only_sale_not_already_announced(self):
+        self.relay.poll(); self.partial_sale(); self.relay.poll()
+        self.now+=3; self.relay.poll()
+        self.fill(cid='sale',role='take',q='1',gross='120',pnl='20')
+        self.closed(ident='complete',sold='2',net='30'); self.event('FLAT',{})
+        self.relay.poll()
+        self.assertEqual([c['kind'] for c in self.sent],['부팅','부분청산','전량청산'])
+        fields=dict(self.sent[-1]['fields'])
+        self.assertEqual(fields['매도 수량'],'1개')
+        self.assertEqual(fields['평균 매도가'],'120원')
+        self.assertEqual(fields['캠페인 순손익'],'+30.0원')
+
+    def test_old_persisted_context_rebuilt_without_replaying_or_negative_remainder(self):
+        self.relay.poll()
+        self.intent(residual=dict(qty='1',cost='100'))
+        self.fill(q='1',gross='100')
+        self.relay.poll()
+        with self.relay.db:
+            self.relay.db.execute("DELETE FROM meta WHERE key='context_version'")
+            context=self.relay.get('context')
+            context['campaigns']['BTC']['qty']='1'  # Previous code forgot the merged quantity.
+            self.relay.put('context',context)
+        cursor=self.relay.get('cursor')
+        self.restart()
+        self.event('ORDER_INTENT',dict(order=dict(cid='sale',side='SELL',role='take')))
+        self.fill(cid='sale',role='take',q='1.5',gross='165',pnl='15')
+        self.relay.poll(); self.now+=3; self.relay.poll()
+        self.assertEqual(self.relay.get('context_version'),REPLAY_VERSION)
+        self.assertGreater(self.relay.get('cursor'),cursor)
+        self.assertEqual([c['kind'] for c in self.sent],['부팅','부분청산'])
+        self.assertEqual(dict(self.sent[-1]['fields'])['남은 수량'],'0.5개')
 
     def test_failed_delivery_survives_restart_and_does_not_advance_sent(self):
         def failed(**_):

@@ -7,17 +7,25 @@ import sqlite3
 import time
 
 from bot.notify import NotificationError, send
-from .notices import DataUnavailable, Replay, Source, TERMINAL, fact_payload, fill_payload, krw, number, payload, qty
+from .notices import DataUnavailable, REPLAY_VERSION, Replay, Source, TERMINAL, fact_payload, fill_payload, krw, number, payload, qty
 
 
 def operating_fields(state, status):
     campaigns=list(state['campaigns'].values()) if state['version']==3 else [state['campaign']] if state['campaign'] else []
     positions=[]
     for c in campaigns:
+        if number(c['qty']) <= 0:
+            positions.append(c['coin']+' 매수 대기 · 미체결')
+            continue
         text=c['coin']+' '+qty(c['qty'])+'개'
         if number(c['qty'])>0:
             text+=' · 평단 '+krw(number(c['cost'])/number(c['qty']))+' · 미실현 '+krw(number(c['qty'])*number(c['mark'])-number(c['cost']),True,decimals=1)
         positions.append(text)
+    from .accounting import residual_value
+    for coin,r in sorted(state.get('residuals',{}).items()):
+        if number(r['qty']) > 0:
+            positions.append(coin+' '+qty(r['qty'])+'개 · 이월 잔량 · 평가액 '+krw(residual_value(r),decimals=1)+
+                             ' · 미실현 '+krw(residual_value(r)-number(r['cost']),True,decimals=1))
     position='\n'.join(positions) or '없음'
     stops = [o for o in state['orders'].values() if o['role']=='protect' and o['status'] not in TERMINAL]
     stop = ', '.join((o.get('coin','')+' ')+qty(o['qty'])+'개 @ '+krw(o['trigger_price']) for o in stops) or '없음'
@@ -84,6 +92,27 @@ class Relay:
         self.db.execute('INSERT OR IGNORE INTO queue(key,created,ready,payload,fact) VALUES (?,?,?,?,?)',
                         (key,now,now if ready is None else ready,json.dumps(card,ensure_ascii=False),json.dumps(fact) if fact else None))
 
+    def combine_close(self, fact):
+        """Replace unsent fill cards; do not announce already-delivered sales again."""
+        cids = set(fact.get('order_cids',[]))
+        covered_qty, covered_gross = number(0),number(0)
+        rows = self.db.execute("SELECT id,fact,state,attempts FROM queue WHERE key LIKE 'fill:%' AND fact IS NOT NULL AND state!='suppressed'").fetchall()
+        for row in rows:
+            part = json.loads(row['fact'])
+            if part.get('cid') not in cids:
+                continue
+            if row['state']=='pending' and row['attempts']==0:
+                self.db.execute("UPDATE queue SET state='suppressed',last_error=NULL WHERE id=?",(row['id'],))
+            else:
+                # An attempted delivery may have reached Slack. Preserve its retry
+                # record, and do not create a second card covering that quantity.
+                covered_qty += number(part['qty'])
+                covered_gross += number(part['gross'])
+        fact = dict(fact,notice_sold=str(number(fact['campaign']['sold'])-covered_qty))
+        if fact.get('sell_gross') is not None:
+            fact['notice_gross'] = str(number(fact['sell_gross'])-covered_gross)
+        return fact
+
     def ingest(self, rows, context, now, state, status):
         replay = Replay(context)
         for row in rows:
@@ -106,6 +135,8 @@ class Relay:
                         else:
                             self.enqueue(key+':'+str(fact['seq']),fill_payload(fact),now,fact=fact,ready=now+2)
                 else:
+                    if fact['type']=='close':
+                        fact = self.combine_close(fact)
                     card = fact_payload(fact)
                     if card:
                         key = 'close:'+fact['campaign']['id'] if fact['type']=='close' else 'event:'+str(fact['seq'])
@@ -159,9 +190,20 @@ class Relay:
                         replay.apply(row)
                     self.put('cursor',maximum)
                     self.put('context',replay.context)
+                    self.put('context_version',REPLAY_VERSION)
                     self.put('last_hb',now)
                     self.enqueue('initial-connection',heartbeat(state,status,now,boot=True),now)
                 else:
+                    if self.get('context_version') != REPLAY_VERSION:
+                        # Rebuild only processed context. Preserve cursor/outbox so
+                        # upgrading during a merged campaign neither skips nor replays sales.
+                        _,_,history,_ = self.source.read()
+                        replay = Replay()
+                        for row in history:
+                            if row[0] <= cursor:
+                                replay.apply(row)
+                        self.put('context',replay.context)
+                        self.put('context_version',REPLAY_VERSION)
                     self.ingest(rows,self.get('context'),now,state,status)
                 age = now-status['t_ms']/1000
                 issue = 'C 상태 보고가 2분 이상 지연됨' if age>120 else '시세 연결 끊김' if not status.get('connected') else '저장 공간 상태 확인 필요' if not status.get('storage_ok',True) else None
