@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "name": "C3 v3 BTC-only activation-anchored prospective checkpoint",
-  "registered_at_utc": "2026-09-05T15:06:30.977000+00:00",
-  "start_ms": 1788620790977,
-  "end_ms": 1789484790977,
-  "start_kst": "2026-09-06T00:06:30.977000+09:00",
-  "end_kst_exclusive": "2026-09-16T00:06:30.977000+09:00",
+  "name": "C3 v3 activation-anchored prospective checkpoint",
+  "registered_at_utc": "2026-09-05T14:30:00.029000+00:00",
+  "start_ms": 1788618600029,
+  "end_ms": 1789482600029,
+  "start_kst": "2026-09-05T23:30:00.029000+09:00",
+  "end_kst_exclusive": "2026-09-15T23:30:00.029000+09:00",
   "days": 10,
   "rule": "c3-rule-v3",
   "source": {
@@ -54,7 +54,10 @@
     "flow_gate": true,
     "policy": "rule",
     "coins": [
-      "BTC"
+      "BTC",
+      "ETH",
+      "XRP",
+      "SOL"
     ],
     "leader_price": "microprice",
     "leader_weights": null,
@@ -88,7 +91,7 @@
   },
   "primary": "marked equity changes in 10 complete 24-hour periods anchored at activation; earlier PnL excluded",
   "automatic_size_change": false,
-  "development_before_ms": 1788620790977,
+  "development_before_ms": 1788618600029,
   "smoke_cutoff_ms": 1788617850043,
   "manual_review_required": [
     "complete venue/contract coverage and fresh residual marks",
@@ -97,16 +100,5 @@
     "1000ms latency and extra per-side costs 0.5, 1, 2bp",
     "no post-result threshold, symbol, stop, size or endpoint selection"
   ],
-  "interpretation": "Development smoke is not adoption evidence. Fixed 10-day checkpoint is not proof of sufficient sample size. REVIEW_ONLY never changes live size.",
-  "previous_registration": {
-    "name": "C3 v3 activation-anchored prospective checkpoint",
-    "start_ms": 1788618600029,
-    "end_ms": 1789482600029,
-    "coins": [
-      "BTC",
-      "ETH",
-      "XRP",
-      "SOL"
-    ]
-  }
+  "interpretation": "Development smoke is not adoption evidence. Fixed 10-day checkpoint is not proof of sufficient sample size. REVIEW_ONLY never changes live size."
 }

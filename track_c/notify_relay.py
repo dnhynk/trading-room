@@ -16,7 +16,7 @@ def operating_fields(state, status):
     for c in campaigns:
         text=c['coin']+' '+qty(c['qty'])+'개'
         if number(c['qty'])>0:
-            text+=' · 평단 '+krw(number(c['cost'])/number(c['qty']))+' · 미실현 '+krw(number(c['qty'])*number(c['mark'])-number(c['cost']),True)
+            text+=' · 평단 '+krw(number(c['cost'])/number(c['qty']))+' · 미실현 '+krw(number(c['qty'])*number(c['mark'])-number(c['cost']),True,decimals=1)
         positions.append(text)
     position='\n'.join(positions) or '없음'
     stops = [o for o in state['orders'].values() if o['role']=='protect' and o['status'] not in TERMINAL]
@@ -29,7 +29,8 @@ def operating_fields(state, status):
 def heartbeat(state, status, now, *, boot=False):
     counts = status.get('counts',{})
     fields = operating_fields(state,status)
-    fields += [['감시 종목', ', '.join(status.get('markets',{})) or '준비 중'],
+    trading_coins = (status.get('rule') or {}).get('coins')
+    fields += [['매매 종목' if trading_coins is not None else '감시 종목', ', '.join(trading_coins if trading_coins is not None else status.get('markets',{})) or '준비 중'],
                ['WS / 계정 오류',f"{int(counts.get('ws_errors',0))} / {int(counts.get('account_errors',0))}"]]
     return payload('부팅' if boot else '상태', '알림 연결 · 현재 운용 상태' if boot else '60분 운용 현황', fields,
                    ['C 원화 장부를 읽어 알림을 전송합니다.'] if boot else None, t_ms=now*1000)

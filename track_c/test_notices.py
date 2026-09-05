@@ -39,15 +39,15 @@ class Fixture(unittest.TestCase):
         self.db.execute('INSERT INTO events(t_ms,kind,body) VALUES (?,?,?)',(int((self.now if t is None else t)*1000),kind,json.dumps(body)))
         self.db.commit()
 
-    def intent(self, *, cid='private-entry', t=None):
-        self.event('CAMPAIGN_INTENT',dict(coin='BTC',plan={}),t)
-        self.event('ORDER_INTENT',dict(order=dict(cid=cid,side='BUY',role='entry')),t)
+    def intent(self, *, cid='private-entry', coin='BTC', t=None):
+        self.event('CAMPAIGN_INTENT',dict(coin=coin,plan={}),t)
+        self.event('ORDER_INTENT',dict(coin=coin,order=dict(cid=cid,side='BUY',role='entry')),t)
 
     def fill(self, q='1', gross='100', pnl='0', *, cid='private-entry', role='entry', fee='0', t=None):
         self.event('FILL',dict(cid=cid,role=role,qty=q,gross=gross,fee=fee,pnl=pnl,status='FILLED'),t)
 
-    def closed(self, *, ident='campaign-private-id', first=None, net='10', sold='1', t=None):
-        self.event('CLOSE',dict(campaign=dict(id=ident,coin='BTC',first_fill=self.now if first is None else first,net=net,sold=sold,qty='0',exit_reason='time')),t)
+    def closed(self, *, ident='campaign-private-id', coin='BTC', first=None, net='10', sold='1', t=None):
+        self.event('CLOSE',dict(campaign=dict(id=ident,coin=coin,first_fill=self.now if first is None else first,net=net,sold=sold,qty='0',exit_reason='time')),t)
 
     def fields(self, **kw):
         return dict(summary_fields(self.path,now=self.now,**kw))
@@ -79,7 +79,7 @@ class AccountingTests(Fixture):
         self.closed(net='10')
         self.closed(net='10')  # Crash-replayed CLOSE cannot inflate wins.
         self.event('FLAT',{})
-        self.assertEqual(self.fields()['누적 손익'],'+10원')
+        self.assertEqual(self.fields()['누적 손익'],'+10.0원')
         self.assertEqual(self.fields()['캠페인 횟수'],'1회')
         self.assertEqual(self.fields()['승률'],'100.0% · 1승/1회')
         self.state['cash_krw']='1000'; self.status['account_krw_available']='1000'; self.save()
@@ -87,7 +87,7 @@ class AccountingTests(Fixture):
         self.event('EXTERNAL_CAPITAL',dict(balance='2000',external_delta='1000'))
         self.state['cash_krw']='2000'; self.status['account_krw_available']='2000'; self.save()
         self.assertEqual(self.fields()['엔진 수익률'],'+0.50%')
-        self.assertEqual(self.fields()['누적 손익'],'+10원')
+        self.assertEqual(self.fields()['누적 손익'],'+10.0원')
 
     def test_kst_midnight_previous_day_campaign_is_not_today_win(self):
         start = at('2026-09-04T23:59:59')
@@ -95,7 +95,7 @@ class AccountingTests(Fixture):
         self.event('ORDER_INTENT',dict(order=dict(cid='sell',side='SELL',role='exit')))
         self.fill(cid='sell',role='exit',pnl='11')
         self.closed(first=start,net='10')
-        self.assertEqual(self.fields()['누적 손익'],'+11원')
+        self.assertEqual(self.fields()['누적 손익'],'+11.0원')
         self.assertEqual(self.fields()['캠페인 횟수'],'0회')
         self.assertEqual(self.fields()['승률'],'계산 전 · 0회 종료')
 
@@ -140,8 +140,46 @@ class AccountingTests(Fixture):
         self.intent(t=self.now-60); self.fill(t=self.now-60,pnl='5')
         folder=self.path/'notifications'; folder.mkdir()
         (folder/'baseline.json').write_text(json.dumps(dict(day='2026-09-05',start_ms=int(self.now*1000))))
-        self.assertEqual(self.fields()['누적 손익'],'+0원')
+        self.assertEqual(self.fields()['누적 손익'],'+0.0원')
         self.assertEqual(self.fields()['캠페인 횟수'],'0회')
+
+    def test_btc_scope_excludes_interleaved_alt_fills_closes_and_survives_midnight(self):
+        self.state['cash_krw']='1000'; self.status['account_krw_available']='1000'
+        self.status['rule']=dict(coins=['BTC','ETH'])
+        self.save()
+        folder=self.path/'notifications'; folder.mkdir()
+        # Yesterday's cutoff no longer applies, but its explicit BTC-only scope does.
+        (folder/'baseline.json').write_text(json.dumps(dict(day='2026-09-04',start_ms=int((self.now-86400)*1000),coins=['BTC'])))
+        self.intent(cid='btc',coin='BTC'); self.intent(cid='eth',coin='ETH')
+        self.fill(cid='eth',fee='1',pnl='-1'); self.fill(cid='btc',fee='1',pnl='-1')
+        for coin,cid,pnl in [('ETH','eth-sell','-99'),('BTC','btc-sell','11')]:
+            self.event('ORDER_INTENT',dict(coin=coin,order=dict(cid=cid,side='SELL',role='exit')))
+            self.fill(cid=cid,role='exit',pnl=pnl)
+            self.closed(coin=coin,ident=coin,net='10' if coin=='BTC' else '-100')
+        count=self.db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
+        fields=self.fields()
+        self.assertEqual(fields['누적 손익'],'+10.0원')
+        self.assertEqual(fields['엔진 수익률'],'+1.00%')
+        self.assertEqual(fields['캠페인 횟수'],'1회')
+        self.assertEqual(fields['승률'],'100.0% · 1승/1회')
+        self.assertEqual(fields['잔고'],'1,000원')
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM events').fetchone()[0],count)
+
+    def test_c3_status_scopes_stats_without_a_baseline_and_heartbeat_lists_trading_only(self):
+        from .notify_relay import heartbeat
+        self.status.update(rule=dict(coins=['BTC']),markets={'BTC':{},'ETH':{},'SOL':{}})
+        self.save()
+        self.intent(cid='eth',coin='ETH'); self.fill(cid='eth',pnl='-10')
+        self.closed(coin='ETH',net='-10')
+        fields=self.fields()
+        self.assertEqual(fields['누적 손익'],'+0.0원')
+        self.assertEqual(fields['캠페인 횟수'],'0회')
+        self.assertEqual(fields['승률'],'계산 전 · 0회 종료')
+        self.assertEqual(dict(heartbeat(self.state,self.status,self.now)['fields'])['매매 종목'],'BTC')
+
+    def test_invalid_scope_never_silently_includes_all_coins(self):
+        self.status['rule']=dict(coins='BTC'); self.save()
+        self.assertTrue(all('확인 불가' in value for value in self.fields().values()))
 
     def test_detail_precedes_c_dashboard_and_private_ids_not_rendered(self):
         self.intent(); self.fill()
@@ -193,7 +231,7 @@ class RelayTests(Fixture):
         self.relay.poll(); self.assertEqual(len(self.sent),2)
         self.now+=2; self.relay.poll(); self.relay.poll()
         self.assertEqual([p['kind'] for p in self.sent],['부팅','전량청산'])
-        self.assertEqual(dict(self.sent[1]['fields'])['캠페인 순손익'],'+4원')
+        self.assertEqual(dict(self.sent[1]['fields'])['캠페인 순손익'],'+4.0원')
 
     def test_upgrade_suppresses_queued_entry_without_blocking_exit(self):
         self.relay.poll()

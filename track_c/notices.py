@@ -23,10 +23,10 @@ def number(value):
     return value
 
 
-def krw(value, signed=False):
-    rounded = number(value).quantize(D('1'), rounding=ROUND_HALF_UP)
+def krw(value, signed=False, *, decimals=0):
+    rounded = number(value).quantize(D(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
     if not rounded: rounded = D(0)
-    return format(rounded, '+,.0f' if signed else ',.0f')+'원'
+    return format(rounded, ('+' if signed else '')+f',.{decimals}f')+'원'
 
 
 def qty(value):
@@ -128,17 +128,25 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
         date = dt.date.fromisoformat(day) if day else dt.datetime.fromtimestamp(now,KST).date()
         start = int(dt.datetime.combine(date,dt.time(),KST).timestamp()*1000)
         end = start+86400000
+        coins = (status.get('rule') or {}).get('coins')
         baseline = Path(directory)/'notifications/baseline.json'
         if baseline.exists():
             b = json.loads(baseline.read_text())
+            # The display universe persists across midnight; the daily time cutoff does not.
+            coins = b.get('coins', coins)
             if b.get('day') == date.isoformat():
                 start = max(start,int(b['start_ms']))
+        if coins is not None and (not isinstance(coins,list) or not coins or
+                                  any(not isinstance(c,str) or not c for c in coins)):
+            raise ValueError('invalid notification coin scope')
+        allowed = set(coins) if coins is not None else None
         pnl, campaigns, wins, closed = D(0),0,0,0
         seen = set()
         replay = Replay()
         for row in rows:
             fact = replay.apply(row)
-            if not fact:
+            # Replay every coin first so interleaved order/fill context remains intact.
+            if not fact or (allowed is not None and fact.get('coin') not in allowed):
                 continue
             if fact['type'] == 'fill':
                 if start <= fact['t_ms'] < end:
@@ -160,7 +168,7 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
         age = now-status['t_ms']/1000
         stale = f' · {int(max(0,age)//60)}분 전' if age > 120 else ''
         fields = [('잔고',krw(equity)+stale),('가용',krw(available)+stale)] if balance else []
-        fields += [('누적 손익',krw(pnl,True)),('엔진 수익률',f'{pnl/equity*100:+.2f}%' if equity>0 else '계산 불가'),
+        fields += [('누적 손익',krw(pnl,True,decimals=1)),('엔진 수익률',f'{pnl/equity*100:+.2f}%' if equity>0 else '계산 불가'),
                    ('캠페인 횟수',f'{campaigns:,}회'),('승률',f'{wins/closed*100:.1f}% · {wins}승/{closed}회' if closed else '계산 전 · 0회 종료')]
         return fields
     except (DataUnavailable,OSError,ValueError,TypeError,KeyError,InvalidOperation,ZeroDivisionError):
@@ -190,7 +198,7 @@ def fill_payload(fact):
     return payload(kind,fact['coin']+' 현물',[
         ['체결','매수 · 지정가' if fact['buy'] else '매도 · 보호 주문' if fact['role']=='protect' else '매도 · 지정가 익절' if fact['role']=='take' else '매도 · 시장가'],
         ['수량 · 평균가',qty(q)+'개 @ '+krw(gross/q)],['수수료',krw(fact['fee'])],
-        ['체결 순손익',krw(fact['pnl'],True)],['남은 수량',qty(fact['remaining'])+'개']],t_ms=fact['t_ms'])
+        ['체결 순손익',krw(fact['pnl'],True,decimals=1)],['남은 수량',qty(fact['remaining'])+'개']],t_ms=fact['t_ms'])
 
 
 def fact_payload(fact):
@@ -200,7 +208,7 @@ def fact_payload(fact):
         if not number(c['sold']): return None  # Pure dust carry has no sale to notify.
         label = '손절' if reason in ('premise','stop','exchange_stop','daily_loss') else '부분청산' if number(c['qty']) else '전량청산'
         fields = [['청산 원인',REASONS.get(reason,'청산 조건 충족')],['매도 수량',qty(c['sold'])+'개'],
-                  ['캠페인 순손익',krw(c['net'],True)],['남은 수량',qty(c['qty'])+'개']]
+                  ['캠페인 순손익',krw(c['net'],True,decimals=1)],['남은 수량',qty(c['qty'])+'개']]
         if fact.get('sell_gross') is not None and number(c['sold'])>0:
             fields.append(['평균 매도가',krw(number(fact['sell_gross'])/number(c['sold']))])
         return payload(label,c['coin']+' 현물',fields,t_ms=fact['t_ms'])

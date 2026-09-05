@@ -399,7 +399,8 @@ class ConfigTests(unittest.TestCase):
     def test_c3_config_loads(self):
         cfg = load(Path(__file__).with_name('config-c3.json'))
         self.assertEqual(cfg['policy'], 'rule')
-        self.assertEqual(cfg['coins'], ['BTC', 'ETH', 'XRP', 'SOL'])
+        self.assertEqual(cfg['coins'], ['BTC'])
+        self.assertTrue({'ETH','XRP','SOL'} <= set(cfg['record_coins']))
 
     def test_invalid_v3_config_is_rejected(self):
         current=json.loads(Path(__file__).with_name('config-c3.json').read_text())
@@ -417,6 +418,44 @@ class ConfigTests(unittest.TestCase):
         updated=upgraded_config(live,desired)
         self.assertEqual({k:v for k,v in updated.items() if k not in V3_CONFIG_KEYS},
                          {k:v for k,v in live.items() if k not in V3_CONFIG_KEYS})
+
+    def test_btc_upgrade_changes_only_universe_and_preserves_recording(self):
+        from .c3_upgrade import upgraded_config,CONFIG_PROFILES
+        live=dict(rule_cfg(),coins=['BTC','ETH','XRP','SOL'],record_coins=['ADA','DOGE'],mode='live',funding_confirmed=True)
+        desired=dict(live,coins=['BTC'],record_coins=['ETH','XRP','SOL','ADA','DOGE'],
+                     mode='observe',funding_confirmed=False,notional_krw=999999,stop_ticks=15,momentum_veto_ticks=2)
+        updated=upgraded_config(live,desired,'btc-only')
+        keys=CONFIG_PROFILES['btc-only']
+        self.assertEqual({k:v for k,v in updated.items() if k not in keys},
+                         {k:v for k,v in live.items() if k not in keys})
+        self.assertEqual(updated['coins'],['BTC'])
+        self.assertEqual(updated['record_coins'],desired['record_coins'])
+        for records in (['ETH','XRP','SOL'],['ETH','XRP','SOL','ADA','DOGE','BTC'],
+                        ['ETH','XRP','SOL','ADA','DOGE','ETH'],['XRP','SOL','ADA','DOGE']):
+            with self.subTest(records=records),self.assertRaises(ValueError):
+                upgraded_config(live,dict(desired,record_coins=records),'btc-only')
+
+    def test_btc_activation_restarts_both_clocks_without_changing_evaluation_parameters(self):
+        from .c3_upgrade import activation_records
+        old=dict(
+            schema=2,name='previous',start_ms=1788618600029,end_ms=1789482600029,days=10,
+            rule='c3-rule-v3',config=dict(coins=['BTC','ETH'],stop_ticks=3,notional_krw=10000),
+            scenario=dict(latency_ms=250),source={},bootstrap=dict(seed=20260905),automatic_size_change=False)
+        saved=json.dumps(old,sort_keys=True)
+        # A later KST midnight: daily display day rolls; the 10x24h duration stays fixed.
+        start=(old['start_ms']//86400000+2)*86400000-9*3600000
+        cfg=dict(old['config'],coins=['BTC'])
+        protocol,baseline=activation_records(old,cfg,start,'release')
+        self.assertEqual(protocol['start_ms'],baseline['start_ms'])
+        self.assertEqual(protocol['end_ms']-start,old['days']*86400000)
+        self.assertEqual(baseline['coins'],['BTC'])
+        self.assertIn('T00:00:00',protocol['start_kst'])
+        self.assertEqual(baseline['day'],protocol['start_kst'][:10])
+        for key in ('scenario','source','bootstrap','automatic_size_change'):
+            self.assertEqual(protocol[key],old[key])
+        self.assertEqual({k:v for k,v in protocol['config'].items() if k!='coins'},
+                         {k:v for k,v in old['config'].items() if k!='coins'})
+        self.assertEqual(json.dumps(old,sort_keys=True),saved)
 
 
 if __name__ == '__main__':
