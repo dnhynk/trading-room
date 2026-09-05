@@ -40,6 +40,9 @@ async def follow(runner):
                         row=msg.get('data') or {}; cid=row.get('user_order_id')
                         if cid in runner.oms.state['orders'] or row.get('target_currency') in runner.oms.campaigns:
                             runner.counts['private_order_events']+=1; runner.wakeup.set()
+                        if cid not in runner.oms.state['orders']:
+                            runner.account_at=runner.last_account=0
+                            runner.wakeup.set()
                 backoff=1
         except Exception:
             runner.counts['private_ws_errors']+=1

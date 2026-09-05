@@ -91,7 +91,7 @@ class RuleTests(unittest.TestCase):
         r = rule.assess(self.cfg, **dict(self.kw, dev=0.0, bid=999.0, ask=1000.0))
         self.assertEqual(r['plan']['take_profit'], '1000')
         r = rule.assess(self.cfg, **dict(self.kw, dev=0.0, bid=1000.0, ask=1005.0, tick=5.0))
-        self.assertEqual((r['plan']['take_profit'], r['plan']['stop']), ('1005', '985'))
+        self.assertEqual((r['plan']['take_profit'], r['plan']['stop']), ('1005', '997'))
 
     def test_hold_and_cancel(self):
         c = self.cfg

@@ -42,6 +42,9 @@ class RuleRunner(QuantRunner):
     def on_leader(self, row):
         if row[0] == 'b' and row[3] in self.fairs:
             self.fairs[row[3]].leader_quote(row[2], row[1], row[5], row[7], row[6], row[8])
+        elif row[0] == 's' and row[4] == 'disconnected':
+            for fair in self.fairs.values():
+                fair.disconnect(row[2])
 
     async def scan(self):
         contracts, _ = await asyncio.to_thread(self.client.universe)
@@ -117,7 +120,7 @@ class RuleRunner(QuantRunner):
         A book received after `now` was sampled (the feed runs concurrently) is current, not stale."""
         m = self.markets.get(coin)
         micro = m.micro if m else None
-        if not micro or not micro.bids:
+        if not self.connected or not micro or not micro.bids:
             return None
         age = max(0, now - micro.book_ms)
         if age > self.cfg['liveness_ms']:
@@ -138,7 +141,7 @@ class RuleRunner(QuantRunner):
         cash = self.cash() if self.cfg['funding_confirmed'] else self.oms.equity  # observe mode: hypothetical sizing
         result = rule.assess(self.cfg, coin=coin, bid=snapshot['bid'], ask=snapshot['ask'], tick=snapshot['tick'],
                              dev=fair['dev_ticks'] if fair else None, contract=m.contract, units=m.units,
-                             cash=cash, risk_remaining=self.oms.remaining_risk())
+                             cash=cash, risk_remaining=self.oms.remaining_risk(coin))
         if any(float(v) for v in m.fees.values()):
             result = dict(result, accepted=False, reason='unreconciled_fee_currency')
         result['t'] = snapshot['t']
@@ -149,11 +152,10 @@ class RuleRunner(QuantRunner):
         coin = c['coin']
         fair = self.last_fair.get(coin)
         dev = fair['dev_ticks'] if fair else None
-        decision = dict(hold=True, reason=None)
-        if c['first_fill'] is not None:
-            tick = book['tick'] if book else float(price_unit(self.markets[coin].units, D(c['plan']['entry']))) if coin in self.markets else float(c['plan']['entry']) - float(c['plan']['stop'])
-            decision = rule.hold(self.cfg, dev=dev, bid=book['bid'] if book else None, entry=float(c['plan']['entry']), tick=tick,
-                                 age_s=time.time() - c['first_fill'])
+        # Reconcile in drive may discover the first fill after this is calculated.
+        decision = rule.hold(self.cfg, dev=dev, bid=book['bid'] if book else None, entry=float(c['plan']['entry']),
+                             tick=float(c['plan'].get('tick', 1)), stop=c['stop'],
+                             age_s=time.time() - c['first_fill'] if c['first_fill'] is not None else None)
         decision.update(cancel_entry=rule.cancel_entry(self.cfg, dev=dev), dev_ticks=dev)
         return decision
 
@@ -188,7 +190,8 @@ class RuleRunner(QuantRunner):
             await self.submit_candidate(coin)
 
     async def submit_candidate(self, coin):
-        await self.refresh_account()
+        if not 0 <= time.time() - self.account_at <= 5:
+            await self.refresh_account()
         now = int(time.time() * 1000)
         self.last_fair[coin] = self.fair_for(coin, now)
         snap = self.snapshot(coin, now)
@@ -244,6 +247,7 @@ class RuleRunner(QuantRunner):
                     for coin in self.fairs:
                         self.last_fair[coin] = self.fair_for(coin, int(time.time() * 1000)) if coin in self.markets else None
                     private_events = self.counts['private_order_events']
+                    self.oms.mark_residuals({c: b['bid'] for c in self.oms.state['residuals'] if (b := self.live_book(c, now))})
                     force = private_events != self.last_private_events
                     self.last_private_events = private_events
                     for coin in list(self.oms.campaigns):

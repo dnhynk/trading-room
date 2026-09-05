@@ -10,6 +10,7 @@ import uuid
 
 from .coinone import CoinoneError, decimal
 from .microstructure import liquidate
+from .accounting import marked_equity, residual_mark
 
 TERMINAL = {"FILLED", "CANCELED", "NOT_TRIGGERED_CANCELED", "CANCELED_NO_ORDER", "CANCELED_LIMIT_PRICE_EXCEED", "CANCELED_UNDER_PRODUCT_UNIT", "REJECTED"}
 LIVE = {"LIVE", "PARTIALLY_FILLED", "PARTIALLY_CANCELED", "NOT_TRIGGERED", "NOT_TRIGGERED_PARTIALLY_CANCELED", "TRIGGERED"}
@@ -45,8 +46,7 @@ class OMS:
 
     @property
     def equity(self):
-        marked = D(self.campaign["qty"])*D(self.campaign["mark"]) if self.campaign else D(0)
-        return max(D(0), D(self.state["cash_krw"])+marked)
+        return max(D(0), marked_equity(self.state))
 
     def sync_cash(self, total_krw):
         """At flat, bind to actual cash; cash changes are never invented trade PnL."""
@@ -117,7 +117,8 @@ class OMS:
         self.state["campaign"] = dict(id=uuid.uuid4().hex, coin=coin, qty=residual["qty"] if residual else "0", cost=residual["cost"] if residual else "0",
                                       net="0", bought="0", sold="0", residual=residual,
                                       first_fill=None, created=self.clock(), exit_reason=None, minimum=str(minimum),
-                                      stop=plan["stop"], stop_limit=plan["stop_limit"], mark=plan["entry"], plan=plan, signal=feature,
+                                      stop=plan["stop"], stop_limit=plan["stop_limit"], mark=str(residual_mark(residual)) if residual else plan["entry"],
+                                      mark_at=residual.get('mark_at', 0) if residual else self.clock(), plan=plan, signal=feature,
                                       entry_deadline=self.clock()+(float(plan['entry_ttl_s']) if quantitative else self.config["signal"]["v_hl"]/2))
         self.save("CAMPAIGN_INTENT", coin=coin, plan=plan, residual=residual)
         self.submit("entry", "BUY", "LIMIT", plan["qty"], price=plan["entry"])
@@ -234,6 +235,20 @@ class OMS:
             self.campaign["exit_reason"] = reason
             self.save("EXIT_REQUEST", reason=reason)
 
+    def carry_residual(self, *, no_fill=False):
+        """Transfer owned inventory and basis; this is not liquidation or a win."""
+        c = self.campaign
+        if self.active():
+            raise RuntimeError('residual transfer before order settlement')
+        residual = dict(qty=c['qty'], cost=c['cost'], mark=c['mark'], mark_at=c.get('mark_at', 0), t=self.clock())
+        if D(c['qty']):
+            self.state['residuals'][c['coin']] = residual
+        c['exit_reason'] = c['exit_reason'] or 'dust'
+        self.save('NO_FILL' if no_fill else 'CLOSE', campaign=c, residual=residual if D(c['qty']) else None,
+                  inventory_flat=not bool(D(c['qty'])))
+        self.state.update(campaign=None, orders={}, cooldown=self.clock())
+        self.save('FLAT', inventory_flat=not bool(D(residual['qty'])))
+
     def drive(self, *, bid=None, fresh=False, feature=None, opposite=False, stopping=False, quantitative_decision=None, force_reconcile=False):
         self.roll_day()
         self.reconcile(force=force_reconcile)
@@ -242,6 +257,7 @@ class OMS:
             return
         if fresh and bid is not None and D(str(bid)) > 0 and D(c["mark"]) != D(str(bid)):
             c["mark"] = str(bid)
+            c['mark_at'] = self.clock()
             self.save("MARK", bid=str(bid), equity=str(self.equity))
         if stopping:
             self.request_exit("operator_stop")
@@ -256,7 +272,7 @@ class OMS:
         if c["first_fill"] is not None and self.clock()-c["first_fill"] >= hold_limit:
             self.request_exit("time")
         if fresh and bid is not None and D(str(bid)) <= D(c["stop"]):
-            self.request_exit("premise")
+            self.request_exit("stop" if c['plan'].get('policy') == 'rule' else "premise")
         if opposite and fresh and not quantitative:
             self.request_exit("opposite_stall")
         if quantitative and quantitative_decision and not quantitative_decision.get('hold',True) and c['first_fill'] is not None:
@@ -269,9 +285,10 @@ class OMS:
         if self.active("entry"):
             # Keep tiny partials until TTL rather than intentionally manufacturing
             # untradeable dust. Never enlarge the originally reserved order.
-            enough = bid is not None and D(c["qty"])*D(str(bid)) >= D(c["minimum"])*D("1.05")
+            sale_price = min(D(str(bid)), D(c['stop_limit'])) if resting and bid is not None else D(str(bid)) if bid is not None else None
+            enough = sale_price is not None and D(c["qty"])*sale_price >= D(c["minimum"])*D("1.05")
             stale_signal = (quantitative_decision or {}).get('cancel_entry',False) if quantitative else feature and (feature.get("v", 0) < -1 or feature.get("bs10", 1) <= .5)
-            if c["exit_reason"] or not fresh or (enough and not quantitative) or self.clock() >= c["entry_deadline"] or stale_signal:
+            if c["exit_reason"] or not fresh or (enough and (not quantitative or resting)) or self.clock() >= c["entry_deadline"] or stale_signal:
                 for order in self.active("entry"):
                     self.cancel(order)
             if self.active("entry"):
@@ -283,7 +300,8 @@ class OMS:
                 self.cancel(order)
             if not self.active():
                 if qty:
-                    self.state["residuals"][c["coin"]] = dict(qty=c["qty"], cost=c["cost"], t=self.clock())
+                    self.carry_residual(no_fill=True)
+                    return
                 self.save("CLOSE" if c["first_fill"] is not None else "NO_FILL", campaign=c)
                 self.state.update(campaign=None, orders={}, cooldown=self.clock()+(0 if quantitative else self.config["signal"]["cooldown"]))
                 self.save("FLAT")
@@ -300,11 +318,7 @@ class OMS:
                 self.cancel(order)
             if self.active():
                 return
-            self.state["residuals"][c["coin"]] = dict(qty=c["qty"], cost=c["cost"], t=self.clock())
-            c["exit_reason"] = c["exit_reason"] or "dust"
-            self.save("CLOSE", campaign=c, residual=self.state["residuals"][c["coin"]])
-            self.state.update(campaign=None, orders={}, cooldown=self.clock())
-            self.save("FLAT")
+            self.carry_residual()
             return
         if c["exit_reason"]:
             for order in self.active("protect")+self.active("take"):
@@ -312,6 +326,10 @@ class OMS:
             if self.active("protect") or self.active("take") or self.active("entry") or self.active("exit"):
                 return
             qty = D(c["qty"])  # a racing protective fill may have removed it
+            if resting and bid is not None and qty*D(str(bid)) < D(c['minimum']):
+                # The cancellation itself may turn a sellable holding into dust.
+                self.carry_residual()
+                return
             if qty:
                 rejected = [o for o in self.state["orders"].values() if o["role"] == "exit" and o["status"] == "REJECTED"]
                 if rejected and self.clock()-max(o["created"] for o in rejected) < 5:

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "active_focus": "C",
-  "updated_at": "2026-09-05T19:11:44+09:00",
+  "updated_at": "2026-09-05T23:10:09+09:00",
   "tracks": {
     "A": {"status": "paused", "restart_requires_user_instruction": true},
     "B": {"status": "paused", "restart_requires_user_instruction": true},
@@ -11,16 +11,20 @@
       "hosting": "aws-ap-northeast-2",
       "instance_id": "i-0db0329527b7b3533",
       "capital_mode": "account_equity",
-      "observed_equity_krw": "594563.957",
+      "observed_equity_krw": "594480.86393000",
       "order_sizing": "fixed_minimum_grid_10000_krw_until_preregistered_adoption",
-      "policy": "c3-rule-v1",
+      "policy": "c3-rule-v2",
       "state_schema": 3,
-      "evaluation_state": "preregistered_multiday_replay_pending",
+      "evaluation_state": "profitability_unproven_fixed_prospective_window_pending",
+      "evaluation_protocol": "track_c/evaluation-c3.json",
+      "quant_audit": "track_c/AUDIT-C3-20260905.md",
+      "active_release": "20260905-230639-c9d8d2478773",
+      "notification_trade_events": "exits_only",
       "simultaneous_campaigns": true,
       "trading_coins": ["BTC", "ETH", "XRP", "SOL"],
       "leaders": ["upbit", "bithumb"],
       "funding_allocation": "entire_account_balance_compounding",
-      "installed_mode": "observe_then_live",
+      "installed_mode": "live",
       "host_state": "running",
       "c2_retired_by": "track_c/AUDIT-20260905.md"
     }

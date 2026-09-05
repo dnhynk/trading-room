@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 from bot.signal import SIG
 from .coinone import decimal, symbol
@@ -51,7 +52,7 @@ def load(path):
         if cfg.get('leader_price','microprice') not in ('microprice','mid'):
             raise ValueError('invalid leader price kind')
         weights=cfg.get('leader_weights')
-        if weights is not None and (not isinstance(weights,dict) or not weights or any(not isinstance(v,(int,float)) or v<0 for v in weights.values()) or sum(weights.values())<=0):
+        if weights is not None and (not isinstance(weights,dict) or not weights or set(weights)-{'U','B'} or any(not isinstance(v,(int,float)) or not math.isfinite(v) or v<0 for v in weights.values()) or sum(weights.values())<=0):
             raise ValueError('invalid leader weights')
     cfg["signal"] = {**SIG, **cfg["signal"]}
     return cfg

@@ -5,6 +5,7 @@ import datetime as dt
 import time
 
 from .oms import OMS, TERMINAL
+from .accounting import marked_equity, residual_value, residual_mark, unrealized_loss
 
 
 class BookState(MutableMapping):
@@ -100,7 +101,7 @@ class Portfolio:
     def campaign(self): return next(iter(self.campaigns.values()),None)  # legacy status compatibility only
     @property
     def equity(self):
-        return max(D(0),D(self.state['cash_krw'])+sum((D(c['qty'])*D(c['mark']) for c in self.campaigns.values()),D(0)))
+        return max(D(0), marked_equity(self.state))
     def book(self,coin):
         if coin not in self.books: self.books[coin]=Book(self,coin)
         return self.books[coin]
@@ -108,13 +109,27 @@ class Portfolio:
         return [o for o in self.state['orders'].values() if o['status'] not in TERMINAL and (role is None or o['role']==role)]
     def reserved_cash(self):
         return sum((max(D(0),D(o['qty'])-D(o['filled']))*D(o['price']) for o in self.active('entry')),D(0))
-    def committed_risk(self):
-        return sum((D(c['plan']['qty'])*(D(c['plan']['entry'])-D(c['stop_limit'])) for c in self.campaigns.values()),D(0))
+    def committed_risk(self, merging_coin=None):
+        risk = D(0)
+        for c in self.campaigns.values():
+            pending = sum((max(D(0), D(o['qty'])-D(o['filled'])) for o in self.active('entry') if o['coin']==c['coin']), D(0))
+            risk += pending * max(D(0), D(c['plan']['entry'])-D(c['stop_limit']))
+            risk += D(c['qty']) * max(D(0), D(c['mark'])-D(c['stop_limit']))
+        # A stranded sub-minimum position cannot execute its own stop.
+        return risk + sum((residual_value(r) for coin,r in self.state['residuals'].items() if coin != merging_coin), D(0))
     def daily_remaining(self):
-        unrealized=sum((min(D(0),D(c['qty'])*D(c['mark'])-D(c['cost'])) for c in self.campaigns.values()),D(0))
+        unrealized=unrealized_loss(self.state)
         return max(D(0),self.equity*D(self.config['daily_loss_fraction'])+D(self.state['day_realized'])+unrealized)
-    def remaining_risk(self):
-        return max(D(0),min(self.daily_remaining(),self.equity*D(self.config['risk_fraction']))-self.committed_risk())
+    def remaining_risk(self, merging_coin=None):
+        return max(D(0),min(self.daily_remaining(),self.equity*D(self.config['risk_fraction']))-self.committed_risk(merging_coin))
+    def mark_residuals(self, marks):
+        changed = False
+        for coin, row in self.state['residuals'].items():
+            if coin in marks and D(str(marks[coin])) > 0:
+                mark = str(marks[coin])
+                if row.get('mark') != mark or self.clock()-row.get('mark_at',0) >= 30:
+                    row.update(mark=mark, mark_at=self.clock()); changed = True
+        if changed: self.store.save(self.state,'RESIDUAL_MARK',equity=str(self.equity))
     def roll_day(self):
         today=dt.datetime.fromtimestamp(self.clock(),dt.timezone.utc).date().isoformat()
         if self.state['day']!=today:
@@ -138,8 +153,12 @@ class Portfolio:
         if coin in self.campaigns: return False
         required=D(plan['qty'])*D(plan['entry'])
         risk=D(plan['qty'])*(D(plan['entry'])-D(plan['stop_limit']))
-        if required>max(D(0),D(self.state['cash_krw'])*D(self.config['cash_fraction'])-self.reserved_cash()) or risk>self.remaining_risk(): return False
-        if plan.get('research') and D(self.state['research_loss_day'])+self.committed_risk()+risk>self.equity*D(self.config['risk_fraction']): return False
+        merging = coin if plan.get('take_mode') == 'resting' else None
+        residual = self.state['residuals'].get(merging)
+        if residual:
+            risk += D(residual['qty'])*max(D(0),residual_mark(residual)-D(plan['stop_limit']))
+        if required>max(D(0),D(self.state['cash_krw'])*D(self.config['cash_fraction'])-self.reserved_cash()) or risk>self.remaining_risk(merging): return False
+        if plan.get('research') and D(self.state['research_loss_day'])+self.committed_risk(merging)+risk>self.equity*D(self.config['risk_fraction']): return False
         return self.book(coin).enter(coin,plan,feature,minimum)
     def request_exit(self,reason):
         for coin in list(self.campaigns): self.book(coin).request_exit(reason)

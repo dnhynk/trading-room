@@ -10,6 +10,7 @@ import asyncio
 from collections import Counter
 import gzip
 import json
+import math
 from pathlib import Path
 import shutil
 import time
@@ -49,13 +50,13 @@ def parse(venue, recv, raw):
         if ts > 10**14:
             ts //= 1000  # Bithumb book timestamps arrive in microseconds
         bp, bq, ap, aq = (float(u[k]) for k in ('bid_price', 'bid_size', 'ask_price', 'ask_size'))
-        if not (0 < bp < ap) or bq < 0 or aq < 0:
+        if not all(math.isfinite(v) for v in (bp, bq, ap, aq)) or not (0 < bp < ap) or bq < 0 or aq < 0:
             return None
         return ['b', recv, CODE[venue], coin, ts, bp, bq, ap, aq, str(m.get('stream_type', ''))[:1]]
     if kind == 'trade':
         ts = int(m.get('trade_timestamp') or m['timestamp'])
         p, q = float(m['trade_price']), float(m['trade_volume'])
-        if p <= 0 or q <= 0:
+        if not math.isfinite(p+q) or p <= 0 or q <= 0:
             return None
         return ['t', recv, CODE[venue], coin, ts, p, q, 'buy' if m.get('ask_bid') == 'BID' else 'sell', str(m.get('sequential_id', ''))]
     return None
@@ -141,6 +142,10 @@ class Recorder:
                 self.counts[name + '_errors'] += 1
             finally:
                 st['connected'] = False
+                row = ['s', now(), CODE[name], None, 'disconnected']
+                self.write(row)
+                if self.sink:
+                    self.sink(row)
             if not self.stopping:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
@@ -183,7 +188,7 @@ def rows(path):
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, list) and len(row) >= 9:
+            if isinstance(row, list) and (len(row) >= 9 or (len(row) == 5 and row[0] == 's')):
                 yield row
 
 

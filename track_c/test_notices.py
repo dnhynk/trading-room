@@ -54,6 +54,15 @@ class Fixture(unittest.TestCase):
 
 
 class AccountingTests(Fixture):
+    def test_unsold_residual_is_capital_but_not_a_completed_win(self):
+        self.state.update(version=3, campaigns={}, residuals=dict(BTC=dict(qty='2', cost='1980', mark='989')))
+        self.save()
+        self.assertEqual(self.fields()['잔고'], '501,978원')
+        self.intent()
+        self.fill(q='2', gross='1980')
+        self.event('CLOSE', dict(campaign=dict(id='residual', coin='BTC', first_fill=self.now, net='10', sold='1', qty='2', exit_reason='dust')))
+        self.assertEqual(self.fields()['승률'], '계산 전 · 0회 종료')
+
     def test_c_never_reads_ab_and_uses_krw(self):
         with patch.object(notify,'_latest_state',side_effect=AssertionError('A/B read')),patch.object(notify,'_engine_day',side_effect=AssertionError('A/B read')),patch('track_c.notices.time.time',return_value=self.now):
             fields = dict(notify.summary_fields(track='C',data_dir=self.path))
@@ -175,16 +184,27 @@ class RelayTests(Fixture):
         self.closed(); self.relay.poll()
         self.assertEqual(len(self.sent),2)
 
-    def test_partial_fills_merge_across_restart_then_deliver_before_close(self):
+    def test_buy_fills_remain_silent_across_restart_and_close_retains_accounting(self):
         self.relay.poll(); self.intent(); self.fill(q='0.4',gross='40')
         self.relay.poll(); self.restart(); self.now+=1
         self.fill(q='0.6',gross='66'); self.relay.poll()
         self.event('ORDER_INTENT',dict(order=dict(cid='sell',side='SELL',role='exit')))
         self.fill(cid='sell',role='exit',gross='110',pnl='4'); self.closed(net='4')
-        self.relay.poll(); self.assertEqual(len(self.sent),1)
+        self.relay.poll(); self.assertEqual(len(self.sent),2)
         self.now+=2; self.relay.poll(); self.relay.poll()
-        self.assertEqual([p['kind'] for p in self.sent],['부팅','진입','전량청산'])
-        self.assertEqual(dict(self.sent[1]['fields'])['수량 · 평균가'],'1개 @ 106원')
+        self.assertEqual([p['kind'] for p in self.sent],['부팅','전량청산'])
+        self.assertEqual(dict(self.sent[1]['fields'])['캠페인 순손익'],'+4원')
+
+    def test_upgrade_suppresses_queued_entry_without_blocking_exit(self):
+        self.relay.poll()
+        with self.relay.db:
+            self.relay.enqueue('old-entry',dict(track='C',kind='진입',head='old'),self.now)
+            self.relay.enqueue('exit',dict(track='C',kind='전량청산',head='exit'),self.now)
+        self.restart(); self.relay.poll()
+        self.assertEqual([p['kind'] for p in self.sent], ['부팅','전량청산'])
+        report=json.loads((self.path/'notifications/status.json').read_text(encoding='utf-8'))
+        self.assertEqual(report['trade_notifications'],'exits_only')
+        self.assertEqual((report['suppressed'],report['pending']),(1,0))
 
     def test_failed_delivery_survives_restart_and_does_not_advance_sent(self):
         def failed(**_):

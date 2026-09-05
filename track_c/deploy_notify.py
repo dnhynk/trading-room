@@ -14,7 +14,7 @@ UNIT = 'trading-room-c-notify.service'
 
 
 def bundle():
-    names = ('bot/notify.py','bot/test_notify.py','track_c/notices.py','track_c/notify_relay.py','track_c/test_notices.py')
+    names = ('bot/notify.py','bot/test_notify.py','track_c/accounting.py','track_c/notices.py','track_c/notify_relay.py','track_c/test_notices.py')
     manifest = {name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in names}
     digest = hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()[:12]
     data = io.BytesIO()

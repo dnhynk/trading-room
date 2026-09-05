@@ -62,6 +62,11 @@ class Relay:
             # A crash after Slack accepted a request but before our commit is ambiguous.
             # Retry durably; incoming webhooks cannot promise exactly-once delivery.
             self.db.execute("UPDATE queue SET state='pending',last_error='delivery uncertain after restart' WHERE state='sending'")
+            # User preference: trade notices on exits only, including already queued
+            # entries from the previous release. Keep the outbox audit trail.
+            for row in self.db.execute("SELECT id,payload FROM queue WHERE state='pending'").fetchall():
+                if json.loads(row['payload']).get('kind') in ('진입','추가'):
+                    self.db.execute("UPDATE queue SET state='suppressed',last_error=NULL WHERE id=?", (row['id'],))
 
     def close(self):
         self.db.close()
@@ -85,7 +90,7 @@ class Relay:
             if fact:
                 if fact['type'] == 'fill':
                     # The CLOSE card includes the final sell; avoid two full-exit notices.
-                    if not fact['buy'] and number(fact['remaining']) == 0:
+                    if fact['buy'] or number(fact['remaining']) == 0:
                         pass
                     else:
                         key = 'fill:'+fact['cid']
@@ -173,8 +178,7 @@ class Relay:
         self.write_status()
 
     def deliver(self, now):
-        # FIFO keeps entry before close even while waiting to merge partial fills.
-        row = self.db.execute("SELECT * FROM queue WHERE state!='sent' ORDER BY id LIMIT 1").fetchone()
+        row = self.db.execute("SELECT * FROM queue WHERE state IN ('pending','sending') ORDER BY id LIMIT 1").fetchone()
         if not row or max(row['ready'],row['next_at']) > now:
             return
         with self.db:
@@ -202,7 +206,9 @@ class Relay:
     def write_status(self):
         report = dict(t_ms=int(self.clock()*1000),cursor=self.get('cursor'),last_poll=self.get('last_poll'),
                       last_sent=self.get('last_sent'),last_failure=self.get('last_failure'),source_error=self.get('source_error'),
-                      health_issue=self.get('health_issue'),pending=self.db.execute("SELECT COUNT(*) FROM queue WHERE state!='sent'").fetchone()[0])
+                      health_issue=self.get('health_issue'),trade_notifications='exits_only',
+                      pending=self.db.execute("SELECT COUNT(*) FROM queue WHERE state IN ('pending','sending')").fetchone()[0],
+                      suppressed=self.db.execute("SELECT COUNT(*) FROM queue WHERE state='suppressed'").fetchone()[0])
         temp = self.folder/'status.json.tmp'
         temp.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
         temp.replace(self.folder/'status.json')

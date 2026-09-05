@@ -72,11 +72,11 @@ class Exchange:
             o['activated']=True
             if o['side']=='BUY':
                 if float(o['price'])>=book['asks'][0][0]: o.update(status='REJECTED',remain_qty='0')
-                else: o['ahead']=sum(q for p,q in book['bids'] if p>=float(o['price']))
+                else: o['ahead']=sum(q for p,q in book['bids'] if p==float(o['price']))
             elif o['type']=='LIMIT':
                 # Post-only sale joins the visible queue at or below its price.
                 if float(o['price'])<=book['bids'][0][0]: o.update(status='REJECTED',remain_qty='0')
-                else: o['ahead']=sum(q for p,q in book['asks'] if p<=float(o['price']))
+                else: o['ahead']=sum(q for p,q in book['asks'] if p==float(o['price']))
             elif o['type']=='MARKET':
                 self.sell(o,book,o.get('limit_price',0)); o.update(status='FILLED' if D(o['executed_qty'])==D(o['qty']) else 'CANCELED',remain_qty='0')
             else: o['status']='NOT_TRIGGERED'
@@ -85,12 +85,14 @@ class Exchange:
         for o in self.orders.values():
             if o['coin']!=coin or o['status'] in TERMINAL or not o['activated']: continue
             if o['side']=='BUY':
-                if self.optimistic and event['kind']=='book': o['ahead']=min(o['ahead'],sum(q for p,q in event['bids'] if p>=float(o['price'])))
+                if self.optimistic and event['kind']=='book': o['ahead']=min(o['ahead'],sum(q for p,q in event['bids'] if p==float(o['price'])))
                 if event['kind']=='trade' and not event['buy'] and event['price']<=float(o['price']):
+                    if event['price']<float(o['price']): o['ahead']=0  # trade-through consumed the historical price level
                     consumed=min(o['ahead'],event['qty']); o['ahead']-=consumed
                     self.fill(o,event['qty']-consumed,float(o['price']))
             elif o['type']=='LIMIT':
                 if event['kind']=='trade' and event['buy'] and event['price']>=float(o['price']):
+                    if event['price']>float(o['price']): o['ahead']=0
                     consumed=min(o['ahead'],event['qty']); o['ahead']-=consumed
                     self.fill(o,event['qty']-consumed,float(o['price']))
             elif o['type']=='STOP_LIMIT' and event['kind']=='book':

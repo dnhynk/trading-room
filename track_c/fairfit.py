@@ -1,12 +1,11 @@
-"""Offline price-discovery diagnostics for the C3 fair value (no live effect).
+"""Offline reduced-form price diagnostics (not an identified VECM; no live effect).
 
 Per coin, on a 1-second grid of log prices (Coinone mid, leader micro-prices):
   z_i(t) = p_c(t) - p_i(t) - m_i(t), m_i = past-only rolling median premium (300 s)
   Error-correction regressions (Engle-Granger 1987): dp(t+1) = a + alpha * z(t) + e
-    alpha_c < 0 : Coinone adjusts toward leader i (half-life = ln2 / -alpha_c seconds)
-    alpha_i ~ 0 : leader does not adjust (Coinone contributes ~no price discovery)
-  Gonzalo-Granger (1995) common-factor weights of the pair: w = alpha_perp / sum.
-  Hasbrouck (1995) information-share bounds from the two Cholesky orderings.
+    A negative alpha_c can also reflect transitory quote noise/asynchronous prices.
+  Rolling demeaning is not a cointegration test; lagged returns are omitted.
+  Therefore GG/Hasbrouck shares and inferred production weights are not reported.
   Joint regression dp_c(t+1) = a + sum_i beta_i z_i(t): beta_i / sum beta gives the
   leader weights that best predict Coinone's next move (candidate `leader_weights`).
 
@@ -63,26 +62,6 @@ def pair_analysis(pc, pi, window=300, min_samples=60):
     bc, rc, r2c = ols(dc[m], [z[:-1][m]])
     bi, ri, r2i = ols(di[m], [z[:-1][m]])
     alpha_c, alpha_i = float(bc[1]), float(bi[1])
-    # Gonzalo-Granger weights: alpha_perp = (alpha_i, -alpha_c) normalized to sum 1.
-    denom = alpha_i - alpha_c
-    gg = dict(coinone=alpha_i / denom, leader=-alpha_c / denom) if abs(denom) > 1e-12 else None
-    # Hasbrouck information shares of the pair from residual covariance, both orderings.
-    omega = np.cov(np.vstack([rc, ri]))
-    shares = None
-    if gg:
-        psi = np.array([gg['coinone'], gg['leader']])
-        total = float(psi @ omega @ psi)
-        if total > 0:
-            def share(order):
-                perm = np.array(order)
-                F = np.linalg.cholesky(omega[np.ix_(perm, perm)])
-                contrib = (psi[perm] @ F) ** 2 / total
-                out = [0.0, 0.0]
-                for k, idx in enumerate(perm):
-                    out[idx] = float(contrib[k])
-                return out
-            a, b = share([0, 1]), share([1, 0])
-            shares = dict(coinone=[min(a[0], b[0]), max(a[0], b[0])], leader=[min(a[1], b[1]), max(a[1], b[1])])
     horizons = {}
     for h in (5, 10, 30):
         fut = np.array(pc[h:]) - np.array(pc[:-h])
@@ -91,9 +70,12 @@ def pair_analysis(pc, pi, window=300, min_samples=60):
         if mm.sum() > 200:
             b, _, r2 = ols(fut[mm], [zz[mm]])
             horizons[h] = dict(beta=float(b[1]), r2=float(r2), n=int(mm.sum()))
-    half_life = math.log(2) / -alpha_c if -1 < alpha_c < 0 else None
+    phi = 1 + alpha_c - alpha_i
+    half_life = math.log(.5) / math.log(phi) if 0 < phi < 1 else None
     return dict(n=int(m.sum()), alpha_coinone=alpha_c, alpha_leader=alpha_i, r2_coinone=float(r2c), r2_leader=float(r2i), half_life_s=half_life,
-                gonzalo_granger=gg, information_share_bounds=shares, z_sd_bp=float(np.nanstd(z) * 1e4), horizons=horizons)
+                half_life_assumption='fixed-premium scalar AR(1) approximation only', spread_phi=phi,
+                gonzalo_granger=None, information_share_bounds=None, identified_vecm=False,
+                z_sd_bp=float(np.nanstd(z) * 1e4), horizons=horizons)
 
 
 def joint_weights(pc, leaders, window=300, min_samples=60):
@@ -120,7 +102,8 @@ def joint_weights(pc, leaders, window=300, min_samples=60):
     raw = {n: float(-beta[i + 1]) for i, n in enumerate(names)}
     positive = {n: max(0.0, v) for n, v in raw.items()}
     total = sum(positive.values())
-    return dict(betas=raw, weights={n: v / total for n, v in positive.items()} if total > 0 else None, r2=float(r2), n=int(m.sum()))
+    return dict(betas=raw, weights=None, diagnostic_normalized_coefficients={n: v / total for n, v in positive.items()} if total > 0 else None,
+                r2=float(r2), n=int(m.sum()), adoptable=False)
 
 
 def analyse(coinone, leaders, coins, *, window=300, min_samples=60):

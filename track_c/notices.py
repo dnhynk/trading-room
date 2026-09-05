@@ -147,12 +147,13 @@ def summary_fields(directory, *, day=None, balance=True, now=None):
                         campaigns += 1
             elif fact['type'] == 'close':
                 c = fact['campaign']
-                if fact['started_ms'] is not None and start <= fact['started_ms'] < end and fact['t_ms'] < end and c['id'] not in seen:
+                if not number(c.get('qty', '0')) and fact['started_ms'] is not None and start <= fact['started_ms'] < end and fact['t_ms'] < end and c['id'] not in seen:
                     seen.add(c['id']); closed += 1
                     wins += number(c['net']) > 0
         cash = number(state['cash_krw'])
         positions=list(state['campaigns'].values()) if state['version']==3 else [state['campaign']] if state['campaign'] else []
-        equity = cash + sum((number(c['qty'])*number(c['mark']) for c in positions),D(0))
+        from .accounting import marked_equity
+        equity = marked_equity(state)
         reserved = sum((max(D(0),number(o['qty'])-number(o['filled']))*number(o['price'])
                         for o in state['orders'].values() if o['side']=='BUY' and o['status'] not in TERMINAL),D(0))
         available = max(D(0),min(number(status['account_krw_available']),cash-reserved))
@@ -196,7 +197,8 @@ def fact_payload(fact):
     kind = fact['type']
     if kind == 'close':
         c = fact['campaign']; reason = c['exit_reason']
-        label = '손절' if reason in ('premise','exchange_stop','daily_loss') else '전량청산'
+        if not number(c['sold']): return None  # Pure dust carry has no sale to notify.
+        label = '손절' if reason in ('premise','stop','exchange_stop','daily_loss') else '부분청산' if number(c['qty']) else '전량청산'
         fields = [['청산 원인',REASONS.get(reason,'청산 조건 충족')],['매도 수량',qty(c['sold'])+'개'],
                   ['캠페인 순손익',krw(c['net'],True)],['남은 수량',qty(c['qty'])+'개']]
         if fact.get('sell_gross') is not None and number(c['sold'])>0:
