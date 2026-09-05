@@ -141,7 +141,8 @@ class OMS:
             order["exchange_id"] = result.get("order_id")
             order["status"] = "SUBMITTED"
             order['submit_rtt_ms']=(time.perf_counter()-started)*1000
-            self.save("ORDER_SUBMITTED", cid=cid, rtt_ms=order['submit_rtt_ms'])
+            self.save("ORDER_SUBMITTED", cid=cid, rtt_ms=order['submit_rtt_ms'],
+                      exit_request_to_ack_ms=(self.clock()-c['exit_requested_at'])*1000 if role=='exit' and c.get('exit_requested_at') is not None else None)
         except CoinoneError as exc:
             order["status"] = "REJECTED" if exc.code in REJECTED else "UNKNOWN"
             self.save("ORDER_REJECTED" if order["status"] == "REJECTED" else "ORDER_UNCERTAIN", cid=cid, error=str(exc))
@@ -200,8 +201,13 @@ class OMS:
         if c.get('plan',{}).get('research') and pnl<0:
             self.state['research_loss_day']=str(D(self.state['research_loss_day'])-pnl)
         self.state["cash_krw"] = str(cash)
-        order.update(filled=str(q), gross=str(gross), fee=str(fee), status=status, exchange_id=row.get("order_id"))
-        self.save("FILL" if dq else "ORDER_STATUS", cid=order["cid"], role=order["role"], qty=str(dq), gross=str(dg), fee=str(df), pnl=str(pnl), status=status)
+        updates=dict(filled=str(q), gross=str(gross), fee=str(fee), status=status, exchange_id=row.get("order_id"))
+        changed=any(order.get(k)!=v for k,v in updates.items())
+        order.update(updates)
+        if dq or changed:
+            self.save("FILL" if dq else "ORDER_STATUS", cid=order["cid"], role=order["role"], qty=str(dq), gross=str(dg), fee=str(df), pnl=str(pnl), status=status,
+                      observed_ms=int(self.clock()*1000),
+                      exit_request_to_fill_seen_ms=(self.clock()-c['exit_requested_at'])*1000 if dq and order['side']=='SELL' and c.get('exit_requested_at') is not None else None)
 
     poll_interval = 0.0  # seconds between REST re-reads of a resting order; 0 = every drive
 
@@ -222,6 +228,7 @@ class OMS:
                     self.halt("ORDER_RECONCILIATION")
 
     def cancel(self, order):
+        started=time.perf_counter()
         try:
             self.client.cancel(order["coin"], order["cid"])
             row = self.client.detail(order["coin"], order["cid"])
@@ -229,10 +236,13 @@ class OMS:
         except CoinoneError as exc:
             self.store.event("CANCEL_PENDING", cid=order["cid"], error=str(exc))
         # A cancel response alone never releases the quantity reservation.
+        self.store.event('EXECUTION_TIMING',cid=order['cid'],phase='cancel_and_reconcile',
+                         elapsed_ms=(time.perf_counter()-started)*1000,terminal=order['status'] in TERMINAL)
 
     def request_exit(self, reason):
         if self.campaign and (not self.campaign["exit_reason"] or (self.campaign['exit_reason']=='one_tick_profit' and reason!='one_tick_profit')):
             self.campaign["exit_reason"] = reason
+            self.campaign['exit_requested_at'] = self.clock()
             self.save("EXIT_REQUEST", reason=reason)
 
     def carry_residual(self, *, no_fill=False):
@@ -280,7 +290,7 @@ class OMS:
         if quantitative and quantitative_decision and quantitative_decision.get('take_profit') and c['first_fill'] is not None:
             # Risk/continuation exits already set above take precedence.
             self.request_exit('one_tick_profit')
-        if not fresh and c["first_fill"] is not None:
+        if not fresh and c["first_fill"] is not None and not (c.get('recovery_protection') and self.active('protect')):
             self.request_exit("market_data_unavailable")
         if self.active("entry"):
             # Keep tiny partials until TTL rather than intentionally manufacturing
@@ -352,6 +362,18 @@ class OMS:
                     fields['limit_price']=str(target)
                 self.submit("exit", "SELL", "MARKET", str(qty),**fields)
         elif resting:
+            if self.active('protect'):
+                # A failure-recovery stop keeps ownership until healthy reference
+                # data is ready; then cancel/reconcile before reserving a take.
+                if not (fresh and (quantitative_decision or {}).get('recovery_ready')):
+                    return
+                for order in self.active('protect'):
+                    self.cancel(order)
+                if not self.active('protect'):
+                    c['recovery_protection']=False
+                    self.save('RECOVERY_PROTECTION_RETIRED')
+                # Re-enter drive after a possible racing stop fill, with fresh qty.
+                return
             # Resting post-only sale at the target; the exchange holds no stop meanwhile
             # (no OCO), so stop/defend/time exits are software decisions above.
             if not self.active("take") and not self.active("exit"):

@@ -2,6 +2,8 @@
 
 ## 현재 운영 상태 — 다른 부팅 지시보다 먼저 확인
 
+현재 C3 v4/BTC2틱/기준2만원/변동성 고정 손절·보유 가치 청산이다. release `20260906-024813-803e30a1e473`, 재개 `2026-09-06T02:59:02.270+09:00`. 이전 v3 기록을 현재 설정으로 오인하지 않는다. `bot/TRACKS.json`과 서버 상태가 진실이다.
+
 C의 현재 실행은 C3 `track_c.c3_runner`(선행거래소 공정가 규칙형 메이커, 포트폴리오 state v3)다. 먼저 `python -m track_c.deploy_c3 status`로 AWS 신원과 실제 mode·PAUSE·공정가(`fair`)·선행거래소 연결·캠페인·잔량 이월(`residuals`)을 확인하고, 이어 `deploy_notify status`로 독립 C Slack을 확인한다. 계약은 `bot/CONCEPT-C.md`, 운영은 `track_c/README.md`, 감사 근거는 `track_c/AUDIT-20260905.md`. C2 학습형 정책과 `deploy_quant`·모델 worker는 폐기됐고 재기동하지 않는다. 최소 크기 실거래는 실행 표본 수집이며 수익 증거가 아니다. 과거 C1 단일 캠페인·8종목·고정시간 또는 A/B Monitor를 C 운영에 적용하지 않는다.
 
 `bot/TRACKS.json`을 먼저 읽는다. **2026-09-05 사용자 지시로 A/B는 모두 일시정지, 현재 작업은 C(국내 현물 스캘핑·AWS 실거래)다.** A/B 상태가 `paused`이면 아래 preflight → Monitor → 감시견 시작 순서를 실행하지 않는다. `STOP`·`PAUSE`를 지우거나 과거 live params를 근거로 재기동하지 않는다. 실행 중단과 복구 기록은 `bot/SUSPENDED-20260905.md`, C 계약은 `bot/CONCEPT-C.md`다.

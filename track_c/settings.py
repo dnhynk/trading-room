@@ -33,6 +33,13 @@ def load(path):
         if not .2<=cfg.get('decision_seconds',0)<=10 or not 600<=cfg.get('model_max_age_seconds',0)<=86400:
             raise ValueError('invalid quantitative cadence/model age')
     if cfg.get('policy')=='rule':
+        from .exit_model import DEFAULTS, validate_exit_settings
+        cfg = {**DEFAULTS, **cfg}
+        validate_exit_settings(cfg)
+        if not 1 <= float(cfg.get('http_timeout_s',3)) <= 10:
+            raise ValueError('invalid HTTP deadline')
+        if type(cfg.get('public_storage_max_bytes')) is not int or cfg['public_storage_max_bytes'] < 1024**3:
+            raise ValueError('invalid recording capacity')
         coins=cfg.get('coins')
         if not isinstance(coins,list) or not coins or len(set(coins))!=len(coins):
             raise ValueError('rule policy requires an explicit coin list')

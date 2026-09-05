@@ -23,16 +23,26 @@ from .settings import load
 from .sizing import price_unit
 from .store import encoded
 from .universe import ASSET_POLICY_VERSION
+from .http_pool import HTTPSPool
+from .service_health import notify as service_notify
+from .c3_observations import Observations
+from .c3_identity import EXECUTION_VERSION
 
 
 class RuleRunner(QuantRunner):
     def __init__(self, cfg):
         self.fairs = {c: FairValue(window_s=cfg['ratio_window_s'], min_samples=cfg['ratio_min_samples'], leader_max_age_ms=cfg['leader_max_age_ms'],
                                    weights=cfg.get('leader_weights'), price=cfg.get('leader_price', 'microprice'),
-                                   momentum_window_s=cfg['momentum_window_s'], momentum_recent_s=cfg['momentum_recent_s']) for c in cfg['coins']}
+                                   momentum_window_s=cfg['momentum_window_s'], momentum_recent_s=cfg['momentum_recent_s'], exit_config=cfg) for c in cfg['coins']}
         self.last_fair = {}
+        self.last_value_eval = {}
         self.last_private_events = 0
         super().__init__(cfg)
+        self.http_pool = HTTPSPool()
+        self.client._transport.send = self.http_pool
+        self.client._timeout = float(cfg.get('http_timeout_s',3))
+        self.last_watchdog = 0
+        self.observations = Observations(self.directory)
         self.recorder = Recorder(self.directory, sink=self.on_leader)
         # Resting orders are re-read at most once per second unless the private stream reports a change.
         self.oms.poll_interval = float(cfg.get('reconcile_poll_s', 1.0))
@@ -46,32 +56,72 @@ class RuleRunner(QuantRunner):
         elif row[0] == 's' and row[4] == 'disconnected':
             for fair in self.fairs.values():
                 fair.disconnect(row[2])
+        if (row[0]=='b' and row[3] in self.fairs) or row[0]=='s':
+            self.wakeup.set()
+
+    async def candle_poll(self):
+        # C3 uses receive-time books/trades; legacy REST candles never affect its rule.
+        return
+
+    def progress(self):
+        # Called only after a bounded operation has returned, never by a detached
+        # timer that could hide a blocked order/reconciliation call.
+        if time.monotonic()-self.last_watchdog>=1:
+            service_notify('WATCHDOG=1')
+            self.last_watchdog=time.monotonic()
+
+    def sample_fairs(self):
+        for coin, model in self.fairs.items():
+            fair=self.fair_for(coin,int(time.time()*1000)) if coin in self.markets else None
+            if fair is None:
+                model.reset_momentum()  # never bridge a known missing reference/book
+            self.last_fair[coin]=fair
+
+    async def fair_sampling(self):
+        # Same event loop as market callbacks, independent of serialized REST
+        # awaits. FairValue keeps one causal sample per second; no backfilling.
+        # This task deliberately does not feed the execution watchdog.
+        while not self.stopping:
+            self.sample_fairs()
+            await asyncio.sleep(.2)
+
+    def observe_public(self,coin,data,recv,prior):
+        if self.storage_ok:
+            try:
+                self.observations.public(coin,data,recv,prior,self.last_fair.get(coin))
+            except (OSError,ValueError):
+                self.counts['observation_write_errors']+=1
+                self.storage_ok=False
 
     async def scan(self):
         contracts, _ = await asyncio.to_thread(self.client.universe)
+        self.progress()
         by = {r['target_currency']: r for r in contracts}
         added, captured = {}, []
         # Trading coins plus record-only coins (subscribed for tapes and leader coverage, never traded).
         for coin in list(self.cfg['coins']) + [c for c in self.cfg.get('record_coins', []) if c not in self.cfg['coins']]:
             row = by.get(coin)
-            if not row or row.get('trade_status') != 1 or row.get('maintenance_status') != 0 or not {'limit', 'market'} <= set(row.get('order_types', [])):
+            required={'limit','market','stop_limit'} if coin in self.cfg['coins'] else {'limit','market'}
+            if not row or row.get('trade_status') != 1 or row.get('maintenance_status') != 0 or not required <= set(row.get('order_types', [])):
                 self.coverage_reasons[coin] = 'contract_unavailable'
                 if coin in self.oms.campaigns and coin in self.markets:
                     added[coin] = self.markets[coin]
                 continue
             try:
                 fees = await asyncio.to_thread(self.client.fees, coin)
+                self.progress()
                 units = await asyncio.to_thread(self.client.price_units, coin)
+                self.progress()
                 if coin in self.markets:
                     market = self.markets[coin]
                     market.fees, market.units, market.contract = fees, units, row
                 else:
-                    candles = await asyncio.to_thread(self.client.candles, coin)
-                    market = Market(coin, self.cfg, row, units, fees, candles)
+                    market = Market(coin, self.cfg, row, units, fees, [])
                 added[coin] = market
                 self.coverage_reasons.pop(coin, None)
                 captured.append(dict(coin=coin, available_ms=int(time.time() * 1000), contract=row, units=units, fees=fees))
             except (CoinoneError, ValueError, KeyError, TypeError):
+                self.progress()
                 self.coverage_reasons[coin] = 'metadata_unavailable'
                 self.counts['scan_market_error'] += 1
                 if coin in self.markets:
@@ -133,7 +183,7 @@ class RuleRunner(QuantRunner):
         book = self.live_book(coin, now)
         if not book:
             return None
-        return self.fairs[coin].evaluate(now, (book['bid'] + book['ask']) / 2, book['tick'])
+        return self.fairs[coin].evaluate(now, (book['bid'] + book['ask']) / 2, book['tick'], bid=book['bid'], ask=book['ask'])
 
     def evaluate(self, snapshot):
         coin = snapshot['coin']
@@ -143,7 +193,7 @@ class RuleRunner(QuantRunner):
         result = rule.assess(self.cfg, coin=coin, bid=snapshot['bid'], ask=snapshot['ask'], tick=snapshot['tick'],
                              dev=fair['dev_ticks'] if fair else None, contract=m.contract, units=m.units,
                              cash=cash, risk_remaining=self.oms.remaining_risk(coin), flow32=snapshot['features'].get('flow_32'),
-                             m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'))
+                             m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'), risk=(fair or {}).get('risk'))
         if any(float(v) for v in m.fees.values()):
             result = dict(result, accepted=False, reason='unreconciled_fee_currency')
         result['t'] = snapshot['t']
@@ -159,10 +209,22 @@ class RuleRunner(QuantRunner):
         motion = dict(m30=(fair or {}).get('m30'), m10=(fair or {}).get('m10'),
                       flow32=snap['features'].get('flow_32') if snap else None)
         # Reconcile in drive may discover the first fill after this is calculated.
-        decision = rule.hold(self.cfg, dev=dev, bid=book['bid'] if book else None, entry=float(c['plan']['entry']),
-                             tick=float(c['plan'].get('tick', 1)), stop=c['stop'],
-                             age_s=time.time() - c['first_fill'] if c['first_fill'] is not None else None, **motion)
-        decision.update(cancel_entry=rule.cancel_entry(self.cfg, dev=dev, **motion), dev_ticks=dev, **motion)
+        age = now/1000 - c['first_fill'] if c['first_fill'] is not None else None
+        args = dict(dev=dev, bid=book['bid'] if book else None, entry=float(c['plan']['entry']),
+                    tick=float(c['plan'].get('tick', 1)), stop=c['stop'], age_s=age, **motion)
+        decision = rule.hold(self.cfg, **args)
+        # Protective exits do not wait for historical counterfactual work. Evaluate
+        # value at most once per second; never reuse a conclusion for a later book.
+        if decision['hold'] and age is not None and book and self.cfg.get('value_exit'):
+            key = (c['id'], now//1000)
+            if self.last_value_eval.get(coin) != key:
+                continuation = self.fairs[coin].continuation(now, bid=book['bid'], ask=book['ask'], tick=book['tick'],
+                    stop=c['stop'], stop_limit=c['stop_limit'], take=c['plan']['take_profit'], age_s=age)
+                self.last_value_eval[coin] = key
+                decision = rule.hold(self.cfg, continuation=continuation, **args)
+        decision.update(cancel_entry=rule.cancel_entry(self.cfg, dev=dev, risk=(fair or {}).get('risk'), **motion), dev_ticks=dev, **motion)
+        decision['recovery_ready'] = bool(book and fair and rule.momentum_available(motion['m30'],motion['m10']))
+        decision['observed_ms'] = now
         return decision
 
     async def decisions(self):
@@ -233,6 +295,9 @@ class RuleRunner(QuantRunner):
                       fair={c: (dict(f, book_age_ms=(self.live_book(c, now) or {}).get('age_ms')) if f else None) for c, f in self.last_fair.items()},
                       leaders=dict(venues=self.recorder.state, counts=dict(self.recorder.counts), storage_ok=self.recorder.storage_ok),
                       residuals=self.oms.state['residuals'], model=None, model_issue=None)
+        report['http_transport'] = self.http_pool.report()
+        report['execution_version'] = EXECUTION_VERSION
+        report['observations'] = dict(self.observations.counts)
         tmp = path.with_suffix('.tmp')
         tmp.write_text(encoded(report) + '\n')
         tmp.replace(path)
@@ -247,16 +312,21 @@ class RuleRunner(QuantRunner):
         if not self.markets:
             raise RuntimeError('no observable markets')
         self.store.event('START', config=self.cfg, policy='rule', rule=rule.VERSION, code=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
-        tasks = [asyncio.create_task(t) for t in (self.feed(), self.candle_poll(), private_follow(self), self.recorder.run())]
+        sampler=asyncio.create_task(self.fair_sampling())
+        tasks = [asyncio.create_task(t) for t in (self.feed(), self.candle_poll(), private_follow(self), self.recorder.run())]+[sampler]
+        service_notify('READY=1')
         start = time.monotonic()
         try:
             while True:
+                self.wakeup.clear()  # retain any new market wakeups during REST awaits
                 now = int(time.time() * 1000)
                 if (seconds is not None and time.monotonic() - start >= seconds) or (self.directory / 'STOP').exists():
                     self.stopping = True
                 try:
-                    for coin in self.fairs:
-                        self.last_fair[coin] = self.fair_for(coin, int(time.time() * 1000)) if coin in self.markets else None
+                    if sampler.done() and not self.stopping:
+                        sampler.result()
+                        raise RuntimeError('C3 fair sampler stopped unexpectedly')
+                    self.sample_fairs()
                     private_events = self.counts['private_order_events']
                     self.oms.mark_residuals({c: b['bid'] for c in self.oms.state['residuals'] if (b := self.live_book(c, now))})
                     force = private_events != self.last_private_events
@@ -284,7 +354,16 @@ class RuleRunner(QuantRunner):
                         self.oms.request_exit('account_error')
                 if time.time() - self.last_report >= 30:
                     self.report()
-                self.wakeup.clear()
+                if self.storage_ok:
+                    try:
+                        for coin in self.fairs:
+                            self.observations.frame(coin,int(time.time()*1000),self.markets[coin].micro if coin in self.markets else None,
+                                self.last_fair.get(coin),self.oms.campaigns.get(coin),self.selection.get(coin),
+                                (self.directory/'PAUSE').exists())
+                    except (OSError,ValueError):
+                        self.counts['observation_write_errors']+=1
+                        self.storage_ok=False
+                self.progress()
                 try:
                     await asyncio.wait_for(self.wakeup.wait(), .2)
                 except asyncio.TimeoutError:
@@ -299,6 +378,8 @@ class RuleRunner(QuantRunner):
             if self.raw:
                 self.raw.close()
             self.store.close()
+            self.http_pool.close()
+            self.observations.close()
 
 
 def main():

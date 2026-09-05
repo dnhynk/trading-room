@@ -102,6 +102,7 @@ class Recorder:
         backoff = 1
         while not self.stopping:
             st = self.state[name]
+            refresh_task = None
             try:
                 available = await asyncio.to_thread(listed, name)
                 coins = sorted(self.universe() & available)
@@ -113,7 +114,21 @@ class Recorder:
                     codes = ['KRW-' + c for c in coins]
                     await ws.send(json.dumps([dict(ticket='trading-room-c-leaders'), dict(type='orderbook', codes=codes), dict(type='trade', codes=codes), dict(format='DEFAULT')]))
                     last = time.monotonic()
-                    while not self.stopping and time.monotonic() - started < self.refresh_s:
+                    while not self.stopping:
+                        if refresh_task is None and time.monotonic()-started >= self.refresh_s:
+                            refresh_task = asyncio.create_task(asyncio.to_thread(listed,name))
+                        if refresh_task is not None and refresh_task.done():
+                            try:
+                                available = refresh_task.result()
+                                desired = sorted(self.universe() & available)
+                            except (OSError,ValueError):
+                                self.counts[name+'_refresh_errors'] += 1
+                                desired = coins
+                            refresh_task = None
+                            started = time.monotonic()
+                            if desired != coins:
+                                self.counts[name+'_subscription_changes'] += 1
+                                break  # only a real subscription change reconnects
                         try:
                             raw = await asyncio.wait_for(ws.recv(), 5)
                         except asyncio.TimeoutError:
@@ -141,6 +156,9 @@ class Recorder:
                 st['errors'] += 1
                 self.counts[name + '_errors'] += 1
             finally:
+                if refresh_task is not None:
+                    refresh_task.cancel()
+                    await asyncio.gather(refresh_task,return_exceptions=True)
                 st['connected'] = False
                 row = ['s', now(), CODE[name], None, 'disconnected']
                 self.write(row)

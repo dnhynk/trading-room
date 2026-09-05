@@ -33,20 +33,21 @@ def liquidate(bids, quantity):
 
 
 class Micro:
-    def __init__(self, coin, *, stale_ms=1500):
+    def __init__(self, coin, *, stale_ms=1500, legacy_features=True):
         self.coin,self.stale_ms=coin,stale_ms
+        self.legacy_features=legacy_features
         self.bids,self.asks=[],[]
         self.book_ms=self.book_exchange=self.last_ms=self.trade_ms=0
         self.book_id=-1; self.trade_exchange=-1
         self.prices,self.trades,self.flows,self.book_times=deque(),deque(),deque(),deque()
         self.trade_ids,self.seen=deque(),set()
         self.quality=Counter(); self.started=None
-        self.b_features=BFeatures({}); self.b_signals=[]
+        self.b_features=BFeatures({}) if legacy_features else None; self.b_signals=[]
         self.trade_candle=None
 
     def reset(self):
         coin,limit=self.coin,self.stale_ms
-        self.__init__(coin,stale_ms=limit)
+        self.__init__(coin,stale_ms=limit,legacy_features=self.legacy_features)
 
     def feed(self, channel, data, recv):
         """Returns an accepted event for queue labeling, otherwise None."""
@@ -89,9 +90,10 @@ class Micro:
                 message=dict(arg=dict(channel='books15'),ts=recv,data=[dict(ts=recv,bids=self.bids,asks=self.asks)])
             else:
                 message=dict(arg=dict(channel='trade'),ts=recv,data=[dict(side='buy' if buy else 'sell',size=quantity,price=price)])
-            self.b_signals=[s for s in self.b_signals if recv-(s['t']+1)*1000<=self.stale_ms]
-            self.b_signals+=self.b_features.feed(message)
-            if channel=='TRADE':
+            if self.b_features is not None:
+                self.b_signals=[s for s in self.b_signals if recv-(s['t']+1)*1000<=self.stale_ms]
+                self.b_signals+=self.b_features.feed(message)
+            if channel=='TRADE' and self.b_features is not None:
                 # Closed trade-built minute candles make the inherited B inputs
                 # observable without a REST candle fetched after the decision.
                 slot=recv//60000*60000
@@ -118,7 +120,7 @@ class Micro:
         volume_b=sum(q for _,q in self.bids[:5]); volume_a=sum(q for _,q in self.asks[:5])
         recent=[t for t in self.book_times if t>=now-32000]
         covered=sum(min(self.stale_ms,max(0,b-a)) for a,b in zip(recent,recent[1:]+[now])) if recent else 0
-        bf=self.b_features.f
+        bf=self.b_features.f if self.b_features is not None else {}
         f=dict(b_velocity=float(bf.get('v') or 0),b_buy_fraction=float(bf.get('bs10') or 0),b_sell_decay=float(bool(bf.get('sell_decay'))),
                spread_bp=(ask-bid)/mid*10000,tick_bp=tick/mid*10000,spread_ticks=(ask-bid)/tick,
                imbalance=(bq-aq)/(bq+aq),imbalance5=(volume_b-volume_a)/(volume_b+volume_a),
@@ -143,6 +145,6 @@ class Micro:
         signals=[s for s in self.b_signals if 0<=now-(s['t']+1)*1000<=self.stale_ms and not s.get('shadow') and s['sig']=='DIP_SLOWING']
         return dict(schema=SCHEMA,coin=self.coin,t=now,book_t=self.book_ms,bid=bid,ask=ask,tick=tick,
                     bids=list(self.bids),asks=list(self.asks),features=f,history_s=(now-self.started)/1000,
-                    baseline_context='trade_built_closed_candles',baseline_ready=bool(self.b_features.atr),
+                    baseline_context='trade_built_closed_candles' if self.b_features is not None else 'not_used_by_rule',baseline_ready=bool(self.b_features and self.b_features.atr),
                     baselines=dict(pre_gate=bool(signals),c1_110=any(s.get('src')=='v' and s.get('bs10',0)>.5 for s in signals),
                                    b_111=any(s.get('src')=='v' and s.get('bs10',0)>.5 and s.get('sell_decay') for s in signals)))

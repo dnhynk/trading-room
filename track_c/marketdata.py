@@ -10,15 +10,16 @@ from .microstructure import Micro
 class Market:
     def __init__(self, coin, config, contract, units, fees, candles):
         self.coin, self.config, self.contract, self.units, self.fees = coin, config, contract, units, fees
-        self.features = Features(config["signal"])
+        self.features = None if config.get('policy')=='rule' else Features(config["signal"])
         self.book, self.received, self.exchange_ms = None, 0, 0
         self.trades, self.ids, self.seen = deque(), deque(), set()
         self.last_id, self.last_trade_ms = -1, 0
         self.counts = dict(books=0, trades=0, rejected=0)
-        self.micro = Micro(coin, stale_ms=config['quote_max_age_ms'])
+        self.micro = Micro(coin, stale_ms=config['quote_max_age_ms'], legacy_features=self.features is not None)
         self.seed(candles)
 
     def seed(self, candles, now_ms=None):
+        if self.features is None: return
         import time
         now_ms = now_ms or int(time.time()*1000)
         rows = sorted((dict(ts=int(r["timestamp"]), o=float(r["open"]), h=float(r["high"]), l=float(r["low"]), c=float(r["close"]), v=float(r["target_volume"]))
@@ -43,6 +44,17 @@ class Market:
         return sum((q for _,q in self.trades), D(0)), len(self.trades)
 
     def feed(self, channel, data, recv):
+        if self.features is None:
+            event = self.micro.feed(channel,data,recv)
+            if event is None:
+                self.counts['rejected'] += 1
+            elif event['kind']=='book':
+                self.book = dict(bids=self.micro.bids,asks=self.micro.asks)
+                self.received,self.exchange_ms=recv,event['exchange_t']
+                self.counts['books'] += 1
+            else:
+                self.counts['trades'] += 1
+            return []
         try:
             if data.get("quote_currency") != "KRW" or data.get("target_currency") != self.coin:
                 raise CoinoneError("market identity mismatch")

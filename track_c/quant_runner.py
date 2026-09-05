@@ -106,7 +106,17 @@ class QuantRunner(Runner):
                         if kind=='SUBSCRIBED': pending.discard((coin,channel))
                         self.connected=bool(subscribed) and not pending
                         if kind!='DATA' or coin not in self.markets: continue
-                        self.record(recv,msg); self.markets[coin].feed(channel,data,recv); self.counts['messages']+=1
+                        self.record(recv,msg)
+                        hook=getattr(self,'observe_public',None)
+                        micro=self.markets[coin].micro
+                        prior=dict(t_ms=micro.book_ms,exchange_ms=micro.book_exchange,bids=list(micro.bids),asks=list(micro.asks),
+                                   tick=float(price_unit(self.markets[coin].units,D(str(micro.bids[0][0])))) if micro.bids else None) if hook and channel=='TRADE' and coin in self.cfg.get('coins',[]) else None
+                        accepted=micro.quality['accepted']
+                        self.markets[coin].feed(channel,data,recv); self.counts['messages']+=1
+                        if prior is not None and micro.quality['accepted']>accepted:
+                            hook(coin,data,recv,prior)
+                        if self.cfg.get('policy')=='rule' and coin in self.cfg['coins']:
+                            self.wakeup.set()
                     backoff=1
             except Exception:
                 self.counts['ws_errors']+=1

@@ -1,49 +1,94 @@
 {
   "version": 1,
   "active_focus": "C",
-  "updated_at": "2026-09-06T00:59:53+09:00",
+  "updated_at": "2026-09-06T02:59:02.270+09:00",
   "tracks": {
-    "A": {"status": "paused", "restart_requires_user_instruction": true},
-    "B": {"status": "paused", "restart_requires_user_instruction": true},
+    "A": {
+      "status": "paused",
+      "restart_requires_user_instruction": true
+    },
+    "B": {
+      "status": "paused",
+      "restart_requires_user_instruction": true
+    },
     "C": {
       "status": "live",
       "venue": "coinone",
       "hosting": "aws-ap-northeast-2",
       "instance_id": "i-0db0329527b7b3533",
       "capital_mode": "account_equity",
-      "observed_equity_krw": "594474.0084",
-      "order_sizing": "fixed_minimum_grid_10000_krw_until_preregistered_adoption",
-      "policy": "c3-rule-v3",
+      "observed_equity_krw": "594471.2479",
+      "order_sizing": "20000_krw_base_quantity_volatility_target_with_105pct_minimum_exit_floor_cash_and_portfolio_risk_caps",
+      "policy": "c3-rule-v4",
       "state_schema": 3,
       "evaluation_state": "profitability_unproven_fixed_prospective_window_pending",
       "evaluation_protocol": "track_c/evaluation-c3.json",
-      "quant_audit": "track_c/AUDIT-C3-20260905.md",
-      "active_release": "20260906-005506-272bfcbfc659",
-      "activation_ms": 1788623847869,
+      "quant_audit": "track_c/REPAIR-C3-20260906.md",
+      "active_release": "20260906-024813-803e30a1e473",
+      "activation_ms": 1788631142270,
       "entry_ticks": 2.0,
       "notification_baseline_ms": 1788620790977,
-      "notification_coins": ["BTC"],
+      "notification_coins": [
+        "BTC"
+      ],
       "notification_entry_dev_min_ticks": 2.0,
       "notification_trade_events": "exits_only",
       "simultaneous_campaigns": false,
-      "trading_coins": ["BTC"],
-      "record_coins": ["ETH", "XRP", "SOL", "ADA", "DOGE", "ENA", "FIL", "KAIA", "ONDO", "ONE", "PENGU", "RIVER", "SKYAI", "SUI", "TRUMP", "TRX", "WLD", "XLM", "ZORA"],
-      "leaders": ["upbit", "bithumb"],
+      "trading_coins": [
+        "BTC"
+      ],
+      "record_coins": [
+        "ETH",
+        "XRP",
+        "SOL",
+        "ADA",
+        "DOGE",
+        "ENA",
+        "FIL",
+        "KAIA",
+        "ONDO",
+        "ONE",
+        "PENGU",
+        "RIVER",
+        "SKYAI",
+        "SUI",
+        "TRUMP",
+        "TRX",
+        "WLD",
+        "XLM",
+        "ZORA"
+      ],
+      "leaders": [
+        "upbit",
+        "bithumb"
+      ],
       "funding_allocation": "entire_account_balance_compounding",
       "installed_mode": "live",
       "host_state": "running",
-      "c2_retired_by": "track_c/AUDIT-20260905.md"
+      "c2_retired_by": "track_c/AUDIT-20260905.md",
+      "notional_krw": 20000,
+      "stop_mode": "volatility_frozen_at_entry",
+      "value_exit": true,
+      "execution_version": "c3-execution-v1",
+      "root_volume_gib": 32,
+      "public_storage_max_bytes": 17179869184
     }
   },
   "suspension": {
     "archive": "logs/suspensions/track-ab-20260905-162614",
-    "controls": ["STOP", "PAUSE"],
+    "controls": [
+      "STOP",
+      "PAUSE"
+    ],
     "engine_positions_at_verification": 0,
     "engine_orders_at_verification": 0,
     "pool_claims_at_verification": 0,
     "last_close": {
-      "symbol": "DASHUSDT", "side": "long", "quantity": "0.43",
-      "price": "69.31", "order_id": "1480033807485259779"
+      "symbol": "DASHUSDT",
+      "side": "long",
+      "quantity": "0.43",
+      "price": "69.31",
+      "order_id": "1480033807485259779"
     }
   }
 }

@@ -206,6 +206,11 @@ class Runner:
             self.raw.flush()
         size = sum(p.stat().st_size for p in (self.directory/"public").glob("*.gz"))
         self.storage_ok = size < self.cfg.get('public_storage_max_bytes',512*1024**2) and shutil.disk_usage(self.directory).free > 1024**3
+        storage = None
+        if self.cfg.get('policy')=='rule':
+            from .storage import capacity
+            storage = capacity(self.directory,self.cfg['public_storage_max_bytes'])
+            self.storage_ok = storage['ok']
         result = dict(t_ms=now, mode=self.cfg["mode"], connected=self.connected,
                       funding_confirmed=self.cfg["funding_confirmed"], capital_krw=str(self.oms.equity),
                       capital_mode=self.cfg["capital_mode"], account_krw_available=str(self.account_available),
@@ -213,7 +218,8 @@ class Runner:
                       external_capital_flows=self.oms.state["external_flows"], initial_equity=self.oms.state["initial_equity"],
                       position=self.oms.campaign, halt=self.oms.state["halt"], realized=self.oms.state["realized"],
                       today_realized=self.oms.state["day_realized"], counts=dict(self.counts), storage_ok=self.storage_ok,
-                      markets={c:dict(fresh=m.fresh(now), counts=m.counts, features=m.features.f, fees=m.fees) for c,m in self.markets.items()})
+                      markets={c:dict(fresh=m.fresh(now), counts=m.counts, features=m.features.f if m.features is not None else {}, fees=m.fees) for c,m in self.markets.items()})
+        if storage is not None: result['storage']=storage
         tmp = self.directory/"status.tmp"
         tmp.write_text(encoded(result)+"\n", encoding="utf-8")
         tmp.replace(self.directory/"status.json")
