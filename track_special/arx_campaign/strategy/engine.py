@@ -25,11 +25,17 @@ class Bar:
     close: Decimal
     benchmark_close: Decimal
     completed: bool = True
+    confirmed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "opened_at", utc(self.opened_at))
         object.__setattr__(self, "closed_at", utc(self.closed_at))
-        if self.closed_at <= self.opened_at or min(self.open, self.high, self.low, self.close) <= ZERO:
+        if self.confirmed_at is not None:
+            object.__setattr__(self, "confirmed_at", utc(self.confirmed_at))
+        if (self.closed_at <= self.opened_at or self.confirmed_at is not None and self.confirmed_at < self.closed_at
+                or min(self.open, self.high, self.low, self.close, self.benchmark_close) <= ZERO
+                or self.low > min(self.open, self.close) or self.high < max(self.open, self.close)
+                or self.low > self.high):
             raise ValueError("bar times and prices must be positive and ordered")
 
 
@@ -63,6 +69,7 @@ class StrategyDecision:
     reason_codes: tuple[str, ...]
     stage: int | None = None
     reduce_fraction: Decimal | None = None
+    reduce_quantity: Decimal | None = None
     protective_stop: Decimal | None = None
 
 
@@ -76,10 +83,12 @@ class CampaignStrategy:
     highest_close: Decimal = ZERO
     protective_stop: Decimal | None = None
     _last_build_confirmation: datetime | None = field(default=None, init=False)
+    _next_stage: int = field(default=2, init=False)
+    _harvested_quantity: Decimal = field(default=ZERO, init=False)
 
     def _completed(self, bars: Sequence[Bar], now: datetime) -> list[Bar]:
         now = utc(now)
-        return [b for b in bars if b.completed and b.closed_at <= now]
+        return [b for b in bars if b.completed and (b.confirmed_at or b.closed_at) <= now]
 
     def _transition(self, state: CampaignState, now: datetime) -> None:
         self.state = state
@@ -90,6 +99,24 @@ class CampaignStrategy:
             return None
         sample = bars[-self.config.box_lookback:]
         return min(b.low for b in sample), max(b.high for b in sample)
+
+    def _breakout_confirmation(self, bars: Sequence[Bar]) -> bool:
+        """A closed signal must break a box formed strictly before it."""
+        if len(bars) <= self.config.box_lookback:
+            return False
+        box = self._box(bars[-self.config.box_lookback - 1:-1])
+        return box is not None and bars[-1].close > box[1]
+
+    def _build_confirmation(self, bars: Sequence[Bar]) -> bool:
+        """Require either a fresh breakout-hold or a pullback that resumes upward."""
+        if len(bars) < 3:
+            return False
+        signal, prior, before = bars[-1], bars[-2], bars[-3]
+        box = self._box(bars[-self.config.box_lookback - 1:-1]) if len(bars) > self.config.box_lookback else None
+        breakout_hold = box is not None and prior.close > box[1] and signal.close > box[1] and signal.close >= prior.close
+        pullback_resumption = (prior.close < before.close and signal.close > prior.high
+                               and signal.close > before.close)
+        return breakout_hold or pullback_resumption
 
     def _confirmed_pivot_low(self, bars: Sequence[Bar]) -> bool:
         # The right side is already closed; no future candle is consulted.
@@ -122,6 +149,9 @@ class CampaignStrategy:
         self, bars: Sequence[Bar], now: datetime, position_quantity: Decimal,
         current_stop: Decimal | None = None, existing_profitable_after_costs: bool = False,
         next_stage: int | None = None, stopped_out: bool = False,
+        executable_exit_price: Decimal | None = None, entry_costs_paid: Decimal = ZERO,
+        future_exit_costs: Decimal = ZERO, position_cost_basis: Decimal | None = None,
+        filled_reduction_quantity: Decimal = ZERO,
     ) -> StrategyDecision:
         now = utc(now)
         closed = self._completed(bars, now)
@@ -138,19 +168,24 @@ class CampaignStrategy:
         if position_quantity <= ZERO:
             self.reference_quantity = ZERO
             self.harvest_index = 0
+            self._harvested_quantity = ZERO
+            self._next_stage = 2
             self.protective_stop = None
             if self.state not in {CampaignState.WATCH, CampaignState.COOLDOWN}:
                 self._transition(CampaignState.FLAT, now)
                 return StrategyDecision(self.state, None, ("POSITION_FLAT",))
-            box = self._box(closed)
+            # The signal bar is deliberately excluded from the stabilization box.
+            box = self._box(closed[-self.config.box_lookback - 1:-1]) if len(closed) > self.config.box_lookback else None
             if not box or not self._confirmed_pivot_low(closed) or not self._contracted(closed) or not self._relative_strength(closed):
                 return StrategyDecision(CampaignState.WATCH, None, tuple(reasons + ["PROBE_CONDITIONS_INCOMPLETE"]))
-            if closed[-1].close <= box[1]:
+            if not self._breakout_confirmation(closed):
                 return StrategyDecision(CampaignState.WATCH, None, tuple(reasons + ["BOX_NOT_BROKEN"]))
             self._transition(CampaignState.PROBE, now)
             return StrategyDecision(self.state, OrderPurpose.PROBE_ENTRY, tuple(reasons + ["BOX_CONFIRMED", "PIVOT_CONFIRMED", "VOLATILITY_CONTRACTED", "RELATIVE_STRENGTH_OK", "BREAKOUT_CONFIRMED"]), 1)
         if self.reference_quantity <= ZERO:
             self.reference_quantity = position_quantity
+        if filled_reduction_quantity > ZERO:
+            self._harvested_quantity = min(self.reference_quantity, self._harvested_quantity + filled_reduction_quantity)
         self.highest_close = max(self.highest_close, closed[-1].close if closed else ZERO)
         if self.state is CampaignState.PROBE and now - self.state_since >= self.config.probe_max_holding:
             self._transition(CampaignState.HARVEST, now)
@@ -163,12 +198,28 @@ class CampaignStrategy:
             if self.protective_stop is not None and current_stop < self.protective_stop:
                 return StrategyDecision(self.state, None, ("STOP_LOWERING_REJECTED",), protective_stop=self.protective_stop)
             self.protective_stop = max(self.protective_stop or current_stop, current_stop)
-        if self.state in {CampaignState.PROBE, CampaignState.BUILD} and existing_profitable_after_costs and next_stage and next_stage > 1:
+        # The caller must supply an executable exit price and all known/expected costs;
+        # a boolean alone is intentionally not a sufficient winner-only attestation.
+        executable_profit = (executable_exit_price is not None and position_cost_basis is not None
+                             and position_quantity * (executable_exit_price - position_cost_basis)
+                             - entry_costs_paid - future_exit_costs > ZERO)
+        if self.state is CampaignState.HARVEST and self.harvest_index < len(self.config.harvest_fractions):
+            fraction = self.config.harvest_fractions[self.harvest_index]
+            target = self.reference_quantity * fraction
+            available = max(ZERO, position_quantity - self._harvested_quantity)
+            quantity = min(target, available)
+            if quantity > ZERO:
+                self.harvest_index += 1
+                self._harvested_quantity += quantity
+                return StrategyDecision(self.state, OrderPurpose.TAKE_PROFIT, ("FROZEN_REFERENCE_HARVEST",),
+                                        reduce_fraction=fraction, reduce_quantity=quantity, protective_stop=self.protective_stop)
+        if self.state in {CampaignState.PROBE, CampaignState.BUILD} and executable_profit and next_stage and 1 < next_stage <= 4 and next_stage == self._next_stage:
             marker = closed[-1].closed_at if closed else None
-            if marker and marker != self._last_build_confirmation and self._relative_strength(closed) and self._confirmed_pivot_low(closed):
+            if marker and marker != self._last_build_confirmation and self._relative_strength(closed) and self._build_confirmation(closed):
                 self._last_build_confirmation = marker
+                self._next_stage += 1
                 self._transition(CampaignState.BUILD, now)
-                return StrategyDecision(self.state, OrderPurpose.PYRAMID_ENTRY, ("WINNER_ONLY", "NEW_CONFIRMATION", "PIVOT_CONFIRMED", "RELATIVE_STRENGTH_OK"), next_stage, protective_stop=self.protective_stop)
+                return StrategyDecision(self.state, OrderPurpose.PYRAMID_ENTRY, ("WINNER_ONLY_EXECUTABLE_PNL_REQUIRED", "NEW_BREAKOUT_OR_RESUMPTION", "RELATIVE_STRENGTH_OK"), next_stage, protective_stop=self.protective_stop)
         if self.state is CampaignState.BUILD:
             self._transition(CampaignState.RIDE, now)
         return StrategyDecision(self.state if self.state is not CampaignState.WATCH else CampaignState.RIDE, None, ("RIDE_TREND",), protective_stop=self.protective_stop)
