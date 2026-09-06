@@ -133,6 +133,9 @@ class Market:
             else:
                 return []
             emitted = self.features.feed(message)
+            signal_t = self.features.f.get("t") if self.features.f else None
+            for signal in emitted:
+                signal.setdefault("t", signal_t)
             self.signals.extend(emitted)
             self.revision += 1
             return emitted

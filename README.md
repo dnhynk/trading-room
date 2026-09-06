@@ -20,6 +20,8 @@ python -m pip install -e .
 python -m unittest discover -s tests -t .
 python -m track_a_2.live --check
 python -m track_a_2.status
+python -m track_a_2.observe --coin BTC --coin ETH --seconds 3600
+python -m track_a_2.replay --help
 ```
 
 차트 도구는 `python -m pip install -e ".[charts]"`로 선택 설치한다. 재생·검증 도구의 입력은 다음 명령으로 확인한다.

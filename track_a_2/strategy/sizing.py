@@ -15,29 +15,32 @@ def size(config, contract, fees, book, *, equity, cash, portfolio_notional):
     step = decimal(contract["qty_unit"], positive=True)
     equity, cash, portfolio_notional = decimal(equity), decimal(cash), decimal(portfolio_notional)
     portfolio_room = max(D(0), equity * decimal(config["portfolio_notional_fraction"]) - portfolio_notional)
-    top_depth = sum(qty for _, qty in asks[:5]) * decimal(config["depth_fraction"])
+    entry_depth = sum(qty for _, qty in asks[:5]) * decimal(config["depth_fraction"])
+    exit_depth = sum(qty for _, qty in bids[:5]) * decimal(config["depth_fraction"])
     caps = {
-        "target": equity * decimal(config["unit_fraction"]) / (bid * (D(1) + maker)),
-        "cash": cash * decimal(config["cash_fraction"]) / (bid * (D(1) + maker)),
-        "portfolio": portfolio_room / bid,
-        "depth": top_depth,
+        "target": equity * decimal(config["unit_fraction"]) / (ask * (D(1) + maker)),
+        "cash": cash * decimal(config["cash_fraction"]) / (ask * (D(1) + maker)),
+        "portfolio": portfolio_room / ask,
+        "entry_depth": entry_depth,
+        "exit_depth": exit_depth,
         "exchange_qty": decimal(contract["max_qty"]),
-        "exchange_amount": decimal(contract["max_order_amount"]) / (bid * (D(1) + maker)),
+        "exchange_amount": decimal(contract["max_order_amount"]) / (ask * (D(1) + maker)),
     }
     qty = floor_step(min(caps.values()), step)
     minimum = decimal(contract["min_order_amount"])
     required = minimum * decimal(config["minimum_exit_multiple"])
-    notional = qty * bid
+    entry_notional = qty * ask
+    exit_notional = qty * bid
     max_notional = equity * decimal(config["book_notional_fraction"])
     position_ceiling = min(
         max_notional,
-        notional * decimal(config["strategy"]["max_units"]),
+        entry_notional * decimal(config["strategy"]["max_units"]),
     )
     fee_budget = position_ceiling * (maker + taker)
     price_risk_budget = equity * decimal(config["book_risk_fraction"]) - fee_budget
-    protectable_room = notional - required
+    protectable_room = exit_notional - required
     cap = min(price_risk_budget, protectable_room)
-    if qty < decimal(contract["min_qty"]) or notional <= required or cap <= 0:
+    if qty < decimal(contract["min_qty"]) or exit_notional <= required or cap <= 0:
         return dict(reason="minimum_order_exceeds_unit", caps={key: str(value) for key, value in caps.items()})
     return dict(
         reason=None,
@@ -45,6 +48,7 @@ def size(config, contract, fees, book, *, equity, cash, portfolio_notional):
         bid=str(bid),
         ask=str(ask),
         cap_krw=str(cap),
+        campaign_loss_budget_krw=str(equity * decimal(config["book_risk_fraction"])),
         max_notional=str(max_notional),
         fee_budget_krw=str(fee_budget),
         price_risk_budget_krw=str(price_risk_budget),

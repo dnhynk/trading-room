@@ -1,10 +1,14 @@
 import copy
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
-from track_a_2.execution.preflight import block_reasons, require_live
+from tests.a2.fakes import approved_config
+from track_a_2.execution.preflight import (
+    block_reasons, recovery_reasons, require_live,
+)
 from track_a_2.settings import CONFIG, load, resolved_state_directory
 
 
@@ -73,6 +77,16 @@ class TrackA2SettingsTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 load(self.write({**self.base, **change}))
 
+    def test_approval_identifier_must_match_its_manifest_path(self):
+        config = {
+            **self.base,
+            "live_approval_id": "a2-eval-first",
+            "evaluation_manifest": "evaluations/a2-eval-second.json",
+            "evaluation_sha256": "a" * 64,
+        }
+        with self.assertRaisesRegex(ValueError, "identity differ"):
+            load(self.write(config))
+
 
 class TrackA2PreflightTests(unittest.TestCase):
     def setUp(self):
@@ -91,8 +105,9 @@ class TrackA2PreflightTests(unittest.TestCase):
             "expected_egress_ip": "203.0.113.7",
             "universe": ["BTC", "ETH"],
         }
+        self.config = approved_config(self.root, self.config)
         self.path = self.root / "track_a_2" / "config.json"
-        self.path.parent.mkdir()
+        self.path.parent.mkdir(exist_ok=True)
         self.path.write_text(json.dumps(self.config), encoding="utf-8")
         (self.root / "config" / "tracks.json").write_text(json.dumps(dict(
             tracks={"A-2": {"status": "active", "execution_enabled": True}}
@@ -120,6 +135,52 @@ class TrackA2PreflightTests(unittest.TestCase):
         reasons = block_reasons(config, root=self.root, egress="203.0.113.7")
         self.assertIn("track_registry_not_active", reasons)
         self.assertIn("track_registry_execution_disabled", reasons)
+
+    def test_evaluation_is_invalidated_when_evaluated_source_changes(self):
+        config = load(self.path, root=self.root)
+        source = self.root / "track_a_2" / "evaluated_source.py"
+        source.write_text("# changed after evaluation\n", encoding="utf-8")
+        self.assertIn(
+            "evaluation_manifest_identity",
+            block_reasons(config, root=self.root, egress="203.0.113.7"),
+        )
+
+    def test_recovery_only_ignores_entry_approval_but_requires_owned_exposure(self):
+        state = resolved_state_directory(self.config, self.root)
+        database = state / "a2-ledger.sqlite"
+        ledger = dict(
+            version=1,
+            books={"BTC": {"lots": [["0.001", "100000000", "ta2-buy-owned"]]}},
+            orders={},
+        )
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("CREATE TABLE state (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
+            connection.execute("INSERT INTO state VALUES (1,?)", (json.dumps(ledger),))
+            connection.commit()
+        finally:
+            connection.close()
+        paused = dict(
+            self.config, status="paused", mode="observe", execution_enabled=False,
+            live_approval_id=None, evaluation_manifest=None, evaluation_sha256=None,
+            universe=[],
+        )
+        self.assertEqual(
+            recovery_reasons(paused, root=self.root, egress="203.0.113.7"), []
+        )
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(
+                "UPDATE state SET body=? WHERE id=1",
+                (json.dumps(dict(version=1, books={}, orders={})),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.assertIn(
+            "recovery_exposure_missing",
+            recovery_reasons(paused, root=self.root, egress="203.0.113.7"),
+        )
 
 
 if __name__ == "__main__":

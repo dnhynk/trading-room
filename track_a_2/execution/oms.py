@@ -55,6 +55,12 @@ def new_book():
         mark_at=0,
         rejection_until=0,
         campaign_open=False,
+        campaign_realized="0",
+        campaign_budget=None,
+        campaign_full_budget=None,
+        campaign_entry_cid=None,
+        campaign_started_at=None,
+        campaign_stop_counted=False,
     )
 
 
@@ -65,6 +71,7 @@ class OMS:
             version=1,
             day=None,
             day_start="0",
+            day_external_flows="0",
             day_realized="0",
             day_stops=0,
             realized="0",
@@ -89,11 +96,24 @@ class OMS:
         for order in self.active():
             if order["coin"] not in self.state["books"]:
                 raise RuntimeError("orphan Track A-2 order")
+        for order in self.state["orders"].values():
+            if order.get("status") in TERMINAL and order.get("terminal_at") is None:
+                # Older ledgers did not timestamp terminal settlement. Give
+                # them one conservative correction window after this upgrade.
+                order["terminal_at"] = self.clock()
         defaults = new_book()
         self.state.setdefault("day_stops", 0)
+        self.state.setdefault("day_external_flows", "0")
         for book in self.state["books"].values():
             for key, value in defaults.items():
-                book.setdefault(key, value)
+                book.setdefault(key, [] if key == "lots" else value)
+        missing_risk = [
+            coin for coin, book in self.state["books"].items()
+            if book.get("lots") and book.get("campaign_budget") is None
+        ]
+        if missing_risk and not self.state["halt"]:
+            self.state["halt"] = "CAMPAIGN_RISK_STATE_MISSING"
+            self.save("HALT", reason=self.state["halt"], coins=sorted(missing_risk))
         self.roll_day()
 
     def save(self, kind, **fields):
@@ -191,16 +211,34 @@ class OMS:
                 total += qty * D(str(mark)) - self.cost(coin)
         return total
 
-    def roll_day(self):
+    def roll_day(self, marks=None):
         today = dt.datetime.fromtimestamp(self.clock(), dt.timezone.utc).date().isoformat()
         if self.state["day"] != today:
-            self.state.update(day=today, day_start=str(self.equity()), day_realized="0", day_stops=0)
+            self.state.update(
+                day=today,
+                day_start=str(self.equity(marks)),
+                day_external_flows="0",
+                day_realized="0",
+                day_stops=0,
+            )
             self.save("DAY", day=today)
 
+    def day_pnl(self, marks=None):
+        return (
+            self.equity(marks)
+            - D(self.state["day_start"])
+            - D(self.state.get("day_external_flows", "0"))
+        )
+
     def daily_blocked(self, marks=None):
-        equity = self.equity(marks)
-        loss = D(self.state["day_realized"]) + min(D(0), self.unrealized(marks))
-        return loss <= -(equity * decimal(self.config["daily_loss_fraction"]))
+        self.roll_day(marks)
+        capital = max(
+            D(0),
+            D(self.state["day_start"]) + D(self.state.get("day_external_flows", "0")),
+        )
+        return not capital or self.day_pnl(marks) <= -(
+            capital * decimal(self.config["daily_loss_fraction"])
+        )
 
     def halt(self, reason, **fields):
         if self.state["halt"] != reason:
@@ -241,20 +279,124 @@ class OMS:
 
     def _add_lot(self, coin, qty, price, oid):
         book = self.book(coin)
-        old_qty = self.quantity(coin)
+        book_qty = self.quantity(coin)
         old_average = D(book["avg"]) if book.get("avg") is not None else D(0)
+        if not book["campaign_open"]:
+            params = book.get("strategy_params") or {}
+            full_budget = D(str(params.get("campaign_loss_budget_krw") or 0))
+            if full_budget <= 0:
+                full_budget = self.equity() * decimal(self.config["book_risk_fraction"])
+            unit = D(str(params.get("unit_qty") or qty))
+            scale = min(D(1), qty / max(unit, qty))
+            book.update(
+                campaign_realized="0",
+                campaign_budget=str(full_budget * scale),
+                campaign_full_budget=str(full_budget),
+                campaign_entry_cid=oid,
+                campaign_started_at=self.clock(),
+                campaign_stop_counted=False,
+            )
+        elif book.get("campaign_entry_cid") == oid:
+            # The first resting order can fill more than once while its
+            # remainder is being canceled. Risk scales only with the amount
+            # that actually arrived, never with an unfilled intention.
+            full_budget = D(book.get("campaign_full_budget") or book["campaign_budget"])
+            params = book.get("strategy_params") or {}
+            unit = D(str(params.get("unit_qty") or qty))
+            increment = full_budget * min(D(1), qty / max(unit, qty))
+            book["campaign_budget"] = str(min(full_budget, D(book["campaign_budget"]) + increment))
         book["campaign_open"] = True
         for lot in book["lots"]:
             if lot[2] == oid:
-                old_qty, old_price = D(lot[0]), D(lot[1])
-                lot[0] = str(old_qty + qty)
-                lot[1] = str((old_qty * old_price + qty * price) / (old_qty + qty))
+                lot_qty, old_price = D(lot[0]), D(lot[1])
+                lot[0] = str(lot_qty + qty)
+                lot[1] = str((lot_qty * old_price + qty * price) / (lot_qty + qty))
                 break
         else:
             book["lots"].append([str(qty), str(price), oid])
-        book["avg"] = str((old_qty * old_average + qty * price) / (old_qty + qty))
+        book["avg"] = str((book_qty * old_average + qty * price) / (book_qty + qty))
         book["last"], book["last_buy_px"] = "buy", str(price)
         self._refresh_book(coin)
+
+    def _adjust_buy_gross(self, order, qty, gross_delta):
+        """Allocate a late cumulative buy-value correction without losing cash.
+
+        The part belonging to inventory still held increases its cost basis; a
+        part whose order lot has already been sold corrects realized P&L.
+        """
+        if not gross_delta:
+            return D(0)
+        if not qty:
+            raise CoinoneError("buy value correction has no filled quantity")
+        coin = order["coin"]
+        book = self.book(coin)
+        remaining_order = D(0)
+        unit_delta = gross_delta / qty
+        for lot in book["lots"]:
+            if lot[2] == order["cid"]:
+                remaining_order = D(lot[0])
+                lot[1] = str(D(lot[1]) + unit_delta)
+                break
+        inventory_delta = unit_delta * remaining_order
+        book_qty = self.quantity(coin)
+        if inventory_delta and book_qty:
+            book["avg"] = str((self.cost(coin) + inventory_delta) / book_qty)
+        return -(gross_delta - inventory_delta)
+
+    def _record_pnl(self, coin, pnl):
+        self.state["realized"] = str(D(self.state["realized"]) + pnl)
+        self.state["day_realized"] = str(D(self.state["day_realized"]) + pnl)
+        book = self.book(coin)
+        if book["campaign_open"]:
+            book["campaign_realized"] = str(D(book["campaign_realized"]) + pnl)
+
+    @staticmethod
+    def _risk_exit(order, reason):
+        if order["role"] in ("protect", "exit"):
+            return True
+        return order["role"] == "trim" and order.get("purpose") == "risk" and str(
+            reason or ""
+        ).startswith(
+            ("strategy_risk", "strategy_stop", "protection_", "protect_")
+        )
+
+    def campaign_stop_floor(self, coin, exit_fee_rate=0):
+        book = self.book(coin)
+        qty = self.quantity(coin)
+        budget = book.get("campaign_budget")
+        if not qty or budget is None or book.get("avg") is None:
+            return None
+        fee = decimal(exit_fee_rate)
+        if fee >= 1:
+            raise ValueError("invalid exit fee rate")
+        numerator = (
+            qty * D(book["avg"])
+            - D(budget)
+            - D(book.get("campaign_realized", "0"))
+        )
+        return max(D(0), numerator / (qty * (D(1) - fee)))
+
+    def projected_campaign_stop(self, coin, qty, price, buy_fee_rate, exit_fee_rate):
+        qty, price = decimal(qty, positive=True), decimal(price, positive=True)
+        buy_fee_rate, exit_fee_rate = decimal(buy_fee_rate), decimal(exit_fee_rate)
+        book = self.book(coin)
+        held = self.quantity(coin)
+        if held:
+            budget = D(book["campaign_budget"])
+            realized = D(book.get("campaign_realized", "0"))
+        else:
+            params = book.get("strategy_params") or {}
+            full_budget = D(str(params.get("campaign_loss_budget_krw") or 0))
+            if full_budget <= 0:
+                full_budget = self.equity() * decimal(self.config["book_risk_fraction"])
+            unit = D(str(params.get("unit_qty") or qty))
+            budget = full_budget * min(D(1), qty / max(unit, qty))
+            realized = D(0)
+        projected_qty = held + qty
+        projected_avg = (self.cost(coin) + qty * price) / projected_qty
+        projected_realized = realized - qty * price * buy_fee_rate
+        numerator = projected_qty * projected_avg - budget - projected_realized
+        return max(D(0), numerator / (projected_qty * (D(1) - exit_fee_rate)))
 
     def _remove_lots(self, coin, qty, lot_index=None):
         book = self.book(coin)
@@ -345,22 +487,22 @@ class OMS:
         if qty > D(order["qty"]) or qty < D(order["filled"]) or gross < D(order["gross"]) or fee < D(order["fee"]):
             raise CoinoneError("nonmonotonic cumulative execution")
         allowance = gross * (D(order["fee_rate"]) + D("0.000001")) + D(1)
-        if reported_rate > D(order["fee_rate"]) + D("0.000001") or fee > allowance:
-            self.halt("FEE_MISMATCH", coin=order["coin"], cid=order["cid"])
-            raise CoinoneError("unexpected KRW fee")
+        fee_mismatch = (
+            reported_rate > D(order["fee_rate"]) + D("0.000001")
+            or fee > allowance
+        )
         dq, dg, df = qty - D(order["filled"]), gross - D(order["gross"]), fee - D(order["fee"])
         fill = None
-        if dq:
-            price = dg / dq
+        if dq or dg or df:
+            price = dg / dq if dq else None
             cash = D(self.state["cash_krw"]) + (dg if order["side"] == "SELL" else -dg) - df
-            if cash < 0:
-                self.halt("CASH_ACCOUNTING", coin=order["coin"], cid=order["cid"])
-                raise CoinoneError("execution exceeds Track A-2 cash")
-            if order["side"] == "BUY":
+            exit_reason = self.book(order["coin"]).get("exit_reason")
+            if order["side"] == "BUY" and dq:
                 self._add_lot(order["coin"], dq, price, order["cid"])
                 pnl = -df
-            else:
-                exit_reason = self.book(order["coin"]).get("exit_reason")
+            elif order["side"] == "BUY":
+                pnl = self._adjust_buy_gross(order, qty, dg) - df
+            elif dq:
                 basis = self._remove_lots(order["coin"], dq, order.get("lot"))
                 pnl = dg - basis - df
                 book = self.book(order["coin"])
@@ -370,13 +512,24 @@ class OMS:
                     book["exit_reason"] = "exchange_stop"
                 elif order["role"] == "exit":
                     book["exit_reason"] = order.get("reason") or exit_reason or "engine_exit"
+                elif order.get("purpose") == "risk" and not self.quantity(order["coin"]):
+                    book["exit_reason"] = order.get("reason") or "strategy_risk_trim"
+            else:
+                pnl = dg - df
             self.state["cash_krw"] = str(cash)
-            self.state["realized"] = str(D(self.state["realized"]) + pnl)
-            self.state["day_realized"] = str(D(self.state["day_realized"]) + pnl)
-            if order["role"] == "protect" and not order.get("stop_counted"):
-                order["stop_counted"] = True
+            self._record_pnl(order["coin"], pnl)
+            book = self.book(order["coin"])
+            reason = order.get("reason") or exit_reason or book.get("exit_reason")
+            if dq and self._risk_exit(order, reason) and not book["campaign_stop_counted"]:
+                book["campaign_stop_counted"] = True
                 self.state["day_stops"] += 1
-            fill = dict(coin=order["coin"], role=order["role"], side=order["side"], qty=str(dq), price=str(price), fee=str(df), pnl=str(pnl), cid=order["cid"])
+            fill = dict(
+                coin=order["coin"], role=order["role"], side=order["side"],
+                qty=str(dq), price=str(price) if price is not None else None,
+                gross_delta=str(dg), fee=str(df), pnl=str(pnl), cid=order["cid"],
+                accounting="fill" if dq else "correction",
+                reason=reason,
+            )
         updates = dict(
             filled=str(qty),
             gross=str(gross),
@@ -384,10 +537,20 @@ class OMS:
             status=status,
             exchange_id=row.get("order_id") or order.get("exchange_id"),
         )
+        if status in TERMINAL and order.get("status") not in TERMINAL:
+            updates["terminal_at"] = self.clock()
         changed = any(order.get(key) != value for key, value in updates.items())
         order.update(updates)
         if fill or changed:
             self.save("FILL" if fill else "ORDER_STATUS", **(fill or dict(coin=order["coin"], cid=order["cid"], status=status)))
+        if fee_mismatch:
+            self.halt(
+                "FEE_MISMATCH", coin=order["coin"], cid=order["cid"],
+                expected_rate=order["fee_rate"], reported_rate=str(reported_rate),
+                reported_fee=str(fee),
+            )
+        elif fill and D(self.state["cash_krw"]) < 0:
+            self.halt("CASH_ACCOUNTING", coin=order["coin"], cid=order["cid"])
         return fill
 
     def finish_flat(self, coin):
@@ -396,20 +559,42 @@ class OMS:
             return False
         reason = book.get("exit_reason")
         if reason and reason not in ("strategy_trim", "take_profit"):
-            book["cooldown_until"] = self.clock() + decimal(self.config["strategy"]["stop_cooldown_s"])
+            book["cooldown_until"] = self.clock() + float(self.config["strategy"]["stop_cooldown_s"])
+        campaign = dict(
+            realized=book.get("campaign_realized"),
+            budget=book.get("campaign_budget"),
+            started_at=book.get("campaign_started_at"),
+        )
         book.update(
             campaign_open=False,
+            campaign_realized="0",
+            campaign_budget=None,
+            campaign_full_budget=None,
+            campaign_entry_cid=None,
+            campaign_started_at=None,
+            campaign_stop_counted=False,
             strategy_params=None,
             desired_stop=None,
             stop_limit=None,
             exit_reason=None,
         )
-        self.save("FLAT", coin=coin, reason=reason, cooldown_until=book["cooldown_until"])
+        self.save(
+            "FLAT", coin=coin, reason=reason,
+            cooldown_until=book["cooldown_until"], campaign=campaign,
+        )
         return True
 
     def reconcile(self, *, force=False):
         fills = []
-        for order in list(self.active()):
+        candidates = list(self.active())
+        active_ids = {order["cid"] for order in candidates}
+        candidates.extend(
+            order for order in self.state["orders"].values()
+            if order["cid"] not in active_ids
+            and order.get("terminal_at") is not None
+            and 0 <= self.clock() - order["terminal_at"] <= self.config["settlement_reconcile_s"]
+        )
+        for order in candidates:
             if not force and 0 <= self.clock() - order.get("checked", -1e9) < self.config["reconcile_poll_s"]:
                 continue
             try:
@@ -421,6 +606,16 @@ class OMS:
                 self.store.event("RECONCILE_PENDING", coin=order["coin"], cid=order["cid"], error=str(exc))
                 if self.clock() - order["created"] > self.config["reconcile_halt_s"]:
                     self.halt("ORDER_RECONCILIATION", coin=order["coin"], cid=order["cid"])
+        expired = [
+            cid for cid, order in self.state["orders"].items()
+            if order["status"] in TERMINAL
+            and order.get("terminal_at") is not None
+            and self.clock() - order["terminal_at"] > self.config["settlement_reconcile_s"]
+        ]
+        if expired:
+            for cid in expired:
+                del self.state["orders"][cid]
+            self.save("ORDER_ARCHIVE", count=len(expired), cids=sorted(expired))
         return fills
 
     def cancel(self, order):
@@ -430,6 +625,18 @@ class OMS:
         if not order.get("cancel_requested"):
             order["cancel_requested"] = self.clock()
             self.save("CANCEL_INTENT", coin=order["coin"], cid=order["cid"], role=order["role"])
+        attempts = int(order.get("cancel_attempts", 0))
+        due = (
+            order.get("cancel_last_attempt") is None
+            or self.clock() - order["cancel_last_attempt"] >= self.config["cancel_retry_s"]
+        )
+        if due and attempts < self.config["cancel_max_attempts"]:
+            order["cancel_attempts"] = attempts + 1
+            order["cancel_last_attempt"] = self.clock()
+            self.save(
+                "CANCEL_ATTEMPT", coin=order["coin"], cid=order["cid"],
+                role=order["role"], attempt=order["cancel_attempts"],
+            )
             try:
                 self.client.cancel(order["coin"], order["cid"])
             except CoinoneError as exc:
@@ -440,6 +647,11 @@ class OMS:
                 fills.append(fill)
         except CoinoneError as exc:
             self.store.event("CANCEL_RECONCILE_PENDING", coin=order["coin"], cid=order["cid"], error=str(exc))
+        if (
+            order["status"] not in TERMINAL
+            and int(order.get("cancel_attempts", 0)) >= self.config["cancel_max_attempts"]
+        ):
+            self.halt("CANCEL_RECONCILIATION", coin=order["coin"], cid=order["cid"])
         return fills
 
     def _mismatch(self, key, reason, **fields):
@@ -448,6 +660,7 @@ class OMS:
             self.halt(reason, **fields)
 
     def sync_account(self, balances, exchange_orders, qty_steps):
+        self.roll_day()
         rows = {}
         for row in balances:
             coin = row.get("currency")
@@ -485,14 +698,22 @@ class OMS:
             if exposed:
                 self.halt("CAPITAL_UNINITIALIZED_WITH_EXPOSURE")
             else:
-                self.state.update(capital_initialized=True, cash_krw=str(actual_cash), initial_equity=str(actual_cash), day_start=str(actual_cash))
+                self.state.update(
+                    capital_initialized=True, cash_krw=str(actual_cash),
+                    initial_equity=str(actual_cash), day_start=str(actual_cash),
+                    day_external_flows="0",
+                )
                 self.save("CAPITAL_INITIALIZED", balance=str(actual_cash))
         elif not exposed:
             delta = actual_cash - D(self.state["cash_krw"])
             self.state["cash_krw"] = str(actual_cash)
             self.state["external_flows"] = str(D(self.state["external_flows"]) + delta)
+            self.state["day_external_flows"] = str(
+                D(self.state.get("day_external_flows", "0")) + delta
+            )
             self.state["mismatches"].pop("cash", None)
-            self.save("EXTERNAL_CAPITAL" if delta else "CAPITAL_SYNC", balance=str(actual_cash), external_delta=str(delta))
+            if delta:
+                self.save("EXTERNAL_CAPITAL", balance=str(actual_cash), external_delta=str(delta))
         elif abs(actual_cash - D(self.state["cash_krw"])) > D(1):
             self._mismatch("cash", "CASH_MISMATCH", actual=str(actual_cash), expected=self.state["cash_krw"])
         else:
@@ -500,7 +721,10 @@ class OMS:
         self.state["balances"] = rows
         self.state["account_at"] = self.clock()
 
-    def can_buy(self, coin, qty, price, fee_rate, minimum, marks):
+    def can_buy(
+        self, coin, qty, price, fee_rate, minimum, marks,
+        *, exit_fee_rate=0, current_bid=None,
+    ):
         qty, price, fee_rate, minimum = map(decimal, (qty, price, fee_rate, minimum))
         book = self.book(coin)
         if (
@@ -534,6 +758,12 @@ class OMS:
         projected = self.portfolio_notional(marks) + qty * price
         if projected > self.equity(marks) * decimal(self.config["portfolio_notional_fraction"]):
             return False
+        if current_bid is not None:
+            projected_stop = self.projected_campaign_stop(
+                coin, qty, price, fee_rate, exit_fee_rate,
+            )
+            if projected_stop >= decimal(current_bid, positive=True):
+                return False
         return True
 
     def available_asset(self, coin):

@@ -6,7 +6,12 @@ import json
 import signal
 import urllib.request
 
-from track_a_2.execution.preflight import block_reasons, require_live
+from track_a_2.execution.preflight import (
+    block_reasons,
+    recovery_reasons,
+    require_live,
+    require_recovery,
+)
 from track_a_2.runtime import Runtime
 from track_a_2.settings import CONFIG, ROOT, load
 from track_c.execution.coinone import CoinoneError, NoRedirect
@@ -30,6 +35,10 @@ def parser():
     result.add_argument("--config", default=str(CONFIG))
     result.add_argument("--seconds", type=float)
     result.add_argument(
+        "--recovery-only", action="store_true",
+        help="manage only exposure already owned by the A-2 ledger; never open new risk",
+    )
+    result.add_argument(
         "--check", action="store_true",
         help="validate configuration and local activation locks without credentials or network",
     )
@@ -43,14 +52,26 @@ def main():
     try:
         config = load(args.config, root=ROOT)
         if args.check:
-            reasons = block_reasons(config, root=ROOT)
-            print(json.dumps(dict(track="A-2", configuration="valid", live_ready=not reasons, blocks=reasons)))
+            reasons = (
+                recovery_reasons(config, root=ROOT)
+                if args.recovery_only else block_reasons(config, root=ROOT)
+            )
+            print(json.dumps(dict(
+                track="A-2", configuration="valid",
+                mode="recovery-only" if args.recovery_only else "live",
+                live_ready=not reasons, blocks=reasons,
+            )))
             return
-        # This first gate intentionally runs before credential or runtime-state access.
-        require_live(config, root=ROOT)
+        # Both gates run before credentials. The normal live gate also runs
+        # before ledger access; recovery explicitly proves existing ledger risk.
+        gate = require_recovery if args.recovery_only else require_live
+        gate(config, root=ROOT)
         address = egress_ip()
-        require_live(config, root=ROOT, egress=address)
-        runner = Runtime(config, config_path=args.config, root=ROOT)
+        gate(config, root=ROOT, egress=address)
+        runner = Runtime(
+            config, config_path=args.config, root=ROOT,
+            recovery_only=args.recovery_only,
+        )
 
         def stop(*_):
             runner.stopping = True

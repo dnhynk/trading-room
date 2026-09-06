@@ -64,6 +64,13 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["wind_down"], ["OLD"])
         self.assertEqual(plan["watch"], ["AAA", "CCC", "OLD"])
 
+    def test_eligible_holding_cannot_disappear_when_the_basket_is_full(self):
+        candidates = [dict(coin="AAA", score=3), dict(coin="BBB", score=2)]
+        plan = retain(["AAA"], {"BBB"}, candidates, 1)
+        self.assertEqual(plan["selected"], ["AAA"])
+        self.assertEqual(plan["wind_down"], ["BBB"])
+        self.assertEqual(plan["watch"], ["AAA", "BBB"])
+
 
 class SizingTests(unittest.TestCase):
     def config(self):
@@ -95,6 +102,18 @@ class SizingTests(unittest.TestCase):
             equity="100000", cash="100000", portfolio_notional="0",
         )
         self.assertEqual(result["reason"], "minimum_order_exceeds_unit")
+
+    def test_entry_size_is_also_bounded_by_conservative_exit_depth(self):
+        book = dict(
+            bids=[{"price": "100", "qty": "20"}],
+            asks=[{"price": "100.1", "qty": "10000"}],
+        )
+        result = size(
+            self.config(), CONTRACT, {"maker": "0", "taker": "0"}, book,
+            equity="1000000", cash="1000000", portfolio_notional="0",
+        )
+        self.assertEqual(result["reason"], "minimum_order_exceeds_unit")
+        self.assertEqual(result["caps"]["exit_depth"], "2.0")
 
 
 class FeedTests(unittest.TestCase):

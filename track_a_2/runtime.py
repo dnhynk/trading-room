@@ -16,6 +16,7 @@ import shutil
 import time
 
 from common.signal import Strategy
+from track_a_2 import EXECUTION_VERSION
 from track_a_2.execution.client import CoinoneA2, read_credentials
 from track_a_2.execution.oms import OMS
 from track_a_2.execution.preflight import block_reasons
@@ -23,7 +24,7 @@ from track_a_2.execution.private_stream import follow as private_follow
 from track_a_2.execution.store import Store, encoded
 from track_a_2.market.feed import Market
 from track_a_2.market.select import ranked, retain
-from track_a_2.market.units import floor_step, price_floor, stop_prices
+from track_a_2.market.units import floor_step, price_ceil, price_floor, stop_prices
 from track_a_2.settings import CONFIG, ROOT, load, resolved_env_path, resolved_state_directory
 from track_a_2.strategy.sizing import size
 from track_c.execution.coinone import CoinoneError, EntryExpired, decimal
@@ -31,11 +32,14 @@ from track_c.execution.http_pool import HTTPSPool
 from track_c.execution.rate_limit import Transport
 
 
-EXECUTION_VERSION = "a2-live-v1"
+FEATURE_FIELDS = frozenset(("t", "mid", "bid", "ask", "v", "brk", "bko"))
 
 
 class Runtime:
-    def __init__(self, config, *, config_path=CONFIG, root=ROOT, client=None, store=None, clock=time.time):
+    def __init__(
+        self, config, *, config_path=CONFIG, root=ROOT, client=None, store=None,
+        clock=time.time, recovery_only=False,
+    ):
         self.config = config
         self.config_path = Path(config_path)
         self.root = Path(root).resolve()
@@ -73,11 +77,19 @@ class Runtime:
         self.wakeup = asyncio.Event()
         self.loop = None
         self.egress = config.get("expected_egress_ip")
+        self.recovery_only = bool(recovery_only)
 
     def controls(self):
+        repository_stop = (self.root / "STOP").exists()
+        repository_pause = (self.root / "PAUSE").exists()
+        runtime_stop = (self.directory / "STOP").exists()
+        runtime_pause = (self.directory / "PAUSE").exists()
         return dict(
-            stop=(self.root / "STOP").exists() or (self.directory / "STOP").exists(),
-            pause=(self.root / "PAUSE").exists() or (self.directory / "PAUSE").exists(),
+            # An explicitly launched recovery owner may manage A-2 exposure
+            # while the repository-wide A/B suspension remains in place. Its
+            # own state-directory STOP still terminates it.
+            stop=runtime_stop or (repository_stop and not self.recovery_only),
+            pause=runtime_pause or repository_pause or self.recovery_only,
         )
 
     def activation_reasons(self):
@@ -160,6 +172,7 @@ class Runtime:
                             continue
                         received = time.time_ns() // 1_000_000
                         message = json.loads(raw)
+                        self.record(received, message)
                         data = message.get("data") or {}
                         coin = data.get("target_currency")
                         channel = message.get("channel")
@@ -175,7 +188,6 @@ class Runtime:
                         revision = market.revision
                         market.feed(channel, data, received)
                         if market.revision != revision:
-                            self.record(received, message)
                             self.counts["public_messages"] += 1
                             self.wakeup.set()
                     backoff = 1
@@ -191,20 +203,25 @@ class Runtime:
                 await asyncio.sleep(backoff)
                 backoff = min(15, backoff * 2)
 
-    async def _metadata(self, coin, contract, old):
-        fees = await asyncio.to_thread(self.client.fees, coin)
-        units = await asyncio.to_thread(self.client.price_units, coin)
+    async def _metadata_snapshot(self, coin, contract, seeded):
+        fees, units = await asyncio.gather(
+            asyncio.to_thread(self.client.fees, coin),
+            asyncio.to_thread(self.client.price_units, coin),
+        )
         if any(decimal(value) > decimal(self.config["max_fee_rate"]) for value in fees.values()):
             raise CoinoneError("fee exceeds Track A-2 ceiling")
-        if old is not None:
-            old.contract, old.units, old.fees = contract, units, fees
-            return old
-        one = await asyncio.to_thread(self.client.candles, coin, "1m", 500)
-        fifteen = await asyncio.to_thread(self.client.candles, coin, "15m", 500)
-        daily = await asyncio.to_thread(self.client.candles, coin, "1d", 400)
-        return Market(coin, self.config, contract, units, fees, one, fifteen, daily)
+        candles = None
+        if not seeded:
+            one, fifteen, daily = await asyncio.gather(
+                asyncio.to_thread(self.client.candles, coin, "1m", 500),
+                asyncio.to_thread(self.client.candles, coin, "15m", 500),
+                asyncio.to_thread(self.client.candles, coin, "1d", 400),
+            )
+            candles = dict(one=one, fifteen=fifteen, daily=daily)
+        return dict(contract=contract, units=units, fees=fees, candles=candles)
 
-    async def scan(self):
+    async def _discover(self):
+        """Fetch a scan snapshot without mutating event-loop-owned market state."""
         contracts, tickers = await asyncio.to_thread(self.client.universe)
         candidates, reasons = ranked(contracts, tickers, self.config)
         by_coin = {row["target_currency"]: row for row in contracts}
@@ -213,19 +230,61 @@ class Runtime:
             if self.oms.quantity(coin) or self.oms.active(coin)
         }
         wanted = set(held) | {row["coin"] for row in candidates}
-        available = {}
-        old_markets = self.markets
+        tasks = {}
         for coin in sorted(wanted):
             contract = by_coin.get(coin)
             if contract is None:
                 reasons[coin] = "market_missing"
                 continue
+            tasks[coin] = asyncio.create_task(
+                self._metadata_snapshot(coin, contract, coin in self.markets)
+            )
+        available = {}
+        if tasks:
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for coin, result in zip(tasks, results):
+                if isinstance(result, Exception):
+                    reasons[coin] = "metadata_or_fee"
+                    self.counts["scan_market_errors"] += 1
+                else:
+                    available[coin] = result
+        return dict(
+            candidates=candidates,
+            reasons=reasons,
+            available=available,
+            captured_ms=int(self.clock() * 1000),
+        )
+
+    def _apply_scan(self, snapshot):
+        """Atomically apply a completed network snapshot on the owner loop."""
+        candidates = snapshot["candidates"]
+        reasons = snapshot["reasons"]
+        metadata = snapshot["available"]
+        old_markets = self.markets
+        available = {}
+        for coin, row in metadata.items():
+            old = old_markets.get(coin)
             try:
-                available[coin] = await self._metadata(coin, contract, old_markets.get(coin))
+                if old is None:
+                    candles = row.get("candles") or {}
+                    available[coin] = Market(
+                        coin, self.config, row["contract"], row["units"], row["fees"],
+                        candles.get("one", ()), candles.get("fifteen", ()),
+                        candles.get("daily", ()), now_ms=snapshot["captured_ms"],
+                    )
+                else:
+                    old.contract, old.units, old.fees = (
+                        row["contract"], row["units"], row["fees"]
+                    )
+                    available[coin] = old
             except (CoinoneError, KeyError, TypeError, ValueError):
                 reasons[coin] = "metadata_or_fee"
                 self.counts["scan_market_errors"] += 1
         eligible = [row for row in candidates if row["coin"] in available]
+        held = {
+            coin for coin in self.oms.state["books"]
+            if self.oms.quantity(coin) or self.oms.active(coin)
+        }
         plan = retain(
             self.oms.state.get("selected", []), held, eligible, self.config["basket_size"]
         )
@@ -245,17 +304,19 @@ class Runtime:
         contract_state = dict(
             selection_contract=self.config["selection_contract"],
             markets={
-                coin: dict(contract=market.contract, units=market.units, fees=market.fees)
-                for coin, market in sorted(available.items())
+                coin: dict(
+                    contract=row["contract"], units=row["units"], fees=row["fees"],
+                )
+                for coin, row in sorted(metadata.items())
             },
         )
         digest = hashlib.sha256(encoded(contract_state).encode()).hexdigest()
         if digest != self.last_contract_digest:
-            snapshot = dict(captured_ms=int(self.clock() * 1000), **contract_state)
-            body = encoded(snapshot)
+            recorded = dict(captured_ms=snapshot["captured_ms"], **contract_state)
+            body = encoded(recorded)
             folder = self.directory / "contracts"
             folder.mkdir(parents=True, exist_ok=True)
-            path = folder / (str(snapshot["captured_ms"]) + ".json")
+            path = folder / (str(recorded["captured_ms"]) + ".json")
             path.write_text(body + "\n", encoding="utf-8")
             self.last_contract_digest = digest
         self.store.event(
@@ -266,10 +327,17 @@ class Runtime:
             reasons=reasons,
         )
 
+    async def scan(self):
+        self._apply_scan(await self._discover())
+
     def notify_fills(self, fills):
         for fill in fills:
             strategy = self.strategies.get(fill["coin"])
-            if strategy is not None and fill["role"] == "buy":
+            if (
+                strategy is not None
+                and fill["role"] == "buy"
+                and decimal(fill["qty"]) > 0
+            ):
                 strategy.on_fill("buy", float(fill["qty"]))
 
     def reconcile(self, *, force=False):
@@ -326,6 +394,7 @@ class Runtime:
                 "unit_qty": float(sized["qty"]),
                 "max_notional": float(sized["max_notional"]),
                 "cap_usdt": float(sized["cap_krw"]),
+                "campaign_loss_budget_krw": float(sized["campaign_loss_budget_krw"]),
                 "tick": float(market.tick()),
                 "qstep": float(market.contract["qty_unit"]),
                 "fee_rt_pct": float(sized["fee_rt_pct"]),
@@ -361,7 +430,10 @@ class Runtime:
         current_round_trip = float(
             (decimal(market.fees["maker"]) + decimal(market.fees["taker"])) * D(100)
         )
-        strategy.p["fee_rt_pct"] = max(float(params["fee_rt_pct"]), current_round_trip)
+        strategy.p["fee_rt_pct"] = max(float(params.get("fee_rt_pct", 0)), current_round_trip)
+        # A fee floor is a floor, even when a configured normal gate is lower.
+        for name in ("pop_min_pct", "unit_min_pct", "gate_floor_unit_pct"):
+            strategy.p[name] = max(float(params.get(name, 0)), current_round_trip)
         return strategy
 
     def working(self, coin):
@@ -378,13 +450,50 @@ class Runtime:
         market = self.markets[coin]
         signals = market.drain()
         feature = market.features.f
-        if feature is None:
+        if (
+            not isinstance(feature, dict)
+            or not FEATURE_FIELDS <= set(feature)
+            or any(feature.get(name) is None for name in FEATURE_FIELDS)
+        ):
+            self.counts["incomplete_features"] += 1
             return None
+        try:
+            feature_age = now_ms - (int(feature["t"]) + 1) * 1000
+            for name in ("mid", "bid", "ask"):
+                decimal(feature[name], positive=True)
+        except (CoinoneError, TypeError, ValueError):
+            self.counts["incomplete_features"] += 1
+            return None
+        if not 0 <= feature_age <= self.config["quote_max_age_ms"]:
+            self.counts["stale_features"] += 1
+            return None
+        fresh_signals = []
+        for signal in signals:
+            try:
+                # Features label the second being closed; the event exists at
+                # the following second boundary, not at that second's start.
+                age = now_ms - (int(signal["t"]) + 1) * 1000
+            except (KeyError, TypeError, ValueError):
+                age = self.config["quote_max_age_ms"] + 1
+            if 0 <= age <= self.config["quote_max_age_ms"]:
+                fresh_signals.append(signal)
+            else:
+                self.counts["expired_signals"] += 1
+        signals = fresh_signals
+        causes = [
+            {key: signal.get(key) for key in ("sig", "src", "t")}
+            for signal in signals
+        ]
+        for signal in signals:
+            try:
+                self.store.event("SIGNAL", coin=coin, signal=signal)
+            except (TypeError, ValueError):
+                self.counts["signal_record_errors"] += 1
         strategy = self._strategy(coin)
         if strategy is None:
             return None
         controls = self.controls()
-        paused = controls["pause"] or controls["stop"] or self.stopping
+        paused = controls["pause"] or controls["stop"] or self.stopping or self.recovery_only
         output = strategy.step(
             feature,
             signals,
@@ -392,7 +501,7 @@ class Runtime:
             self.working(coin),
         )
         for kind, fields in output["events"]:
-            self.store.event("STRATEGY_" + kind, coin=coin, **fields)
+            self.store.event("STRATEGY_" + kind, coin=coin, causes=causes, **fields)
         normalized = dict(buy=None, trim=None, trigger=None, limit=None, no_stop=output["no_stop"])
         if output["buy"]:
             price, qty = output["buy"]
@@ -402,24 +511,81 @@ class Runtime:
             )
         if output["trim"]:
             price, qty, scope, lot, *tags = output["trim"]
+            pull = strategy.pull or {}
+            gate = pull.get("gate")
+            purpose = "risk" if pull.get("exit") or (gate is not None and gate < 0) else "profit"
             normalized["trim"] = dict(
                 price=price_floor(market.units, price),
                 qty=floor_step(qty, market.contract["qty_unit"]),
                 requested_scope=scope,
                 lot=lot,
                 tag=tags[0] if tags else None,
+                purpose=purpose,
+                ref=pull.get("ref"),
+                gate_pct=gate,
             )
-        if output["stop"] is not None:
+        raw_stop = decimal(output["stop"]) if output["stop"] is not None else None
+        campaign_floor = self.oms.campaign_stop_floor(coin, market.fees["taker"])
+        if campaign_floor and (raw_stop is None or campaign_floor > raw_stop):
+            raw_stop = campaign_floor
+            self.counts["campaign_stop_floor"] += 1
+        if raw_stop is not None:
             trigger, limit = stop_prices(
                 market.units,
-                output["stop"],
+                raw_stop,
                 self.config["stop_limit_buffer_ticks"],
                 self.config["stop_limit_buffer_bp"],
             )
             normalized.update(trigger=trigger, limit=limit)
+            normalized["no_stop"] = False
         return normalized
 
-    def submission_guard(self, coin, role, side, qty, *, price=None, deadline=None):
+    def _sell_quote(self, market, qty, minimum_price=None):
+        """Conservative executable sell quote from the first five bid levels."""
+        remaining = decimal(qty, positive=True)
+        minimum_price = decimal(minimum_price) if minimum_price is not None else None
+        gross = D(0)
+        filled = D(0)
+        worst = None
+        for row in (market.book or {}).get("bids", [])[:5]:
+            price = decimal(row["price"], positive=True)
+            if minimum_price is not None and price < minimum_price:
+                continue
+            available = decimal(row["qty"]) * decimal(self.config["depth_fraction"])
+            take = min(remaining, available)
+            if take > 0:
+                gross += take * price
+                filled += take
+                remaining -= take
+                worst = price
+            if remaining <= 0:
+                break
+        step = decimal(market.contract["qty_unit"], positive=True)
+        if remaining > step / 2 or not filled:
+            return None
+        return dict(qty=filled, gross=gross, vwap=gross / filled, worst=worst)
+
+    def _profit_price(self, market, trim):
+        ref = trim.get("ref")
+        if ref is None:
+            ref = self.oms.book(market.coin).get("avg") or trim["price"]
+        ref = decimal(ref, positive=True)
+        gate = max(D(0), decimal(trim.get("gate_pct") or 0)) / D(100)
+        maker = decimal(market.fees["maker"])
+        taker = decimal(market.fees["taker"])
+        if taker >= 1:
+            raise CoinoneError("invalid taker fee")
+        gate_price = ref * (D(1) + gate)
+        fee_break_even = ref * (D(1) + maker) / (D(1) - taker)
+        return price_ceil(
+            market.units,
+            max(decimal(trim["price"], positive=True), gate_price, fee_break_even),
+        )
+
+    def submission_guard(
+        self, coin, role, side, qty, *, price=None, minimum_price=None,
+        minimum_gross=None, deadline=None,
+    ):
         loop = self.loop
         market = self.markets[coin]
         deadline = deadline or (time.monotonic() + self.config["quote_max_age_ms"] / 1000)
@@ -458,6 +624,14 @@ class Runtime:
                     current_bid = decimal(market.book["bids"][0]["price"], positive=True)
                     if current_bid <= decimal(self.oms.book(coin)["desired_stop"]):
                         return "stop_priority"
+                if role == "trim" and minimum_price is not None:
+                    quote = self._sell_quote(market, qty, minimum_price)
+                    if (
+                        quote is None
+                        or minimum_gross is not None
+                        and quote["gross"] < decimal(minimum_gross)
+                    ):
+                        return "profit_execution_changed"
             return None
 
         def check():
@@ -495,10 +669,51 @@ class Runtime:
             return False
         return True
 
+    def _confirmed_protection(self, order, *, qty, price, trigger):
+        return bool(
+            order
+            and order.get("status") == "NOT_TRIGGERED"
+            and not order.get("cancel_requested")
+            and self.oms.remaining(order) == decimal(qty)
+            and self._same(order, qty=qty, price=price, trigger=trigger)
+        )
+
+    def _buy_cap(self, coin, price, fee_rate):
+        """Reapply mutable cash, portfolio, exchange, and two-sided depth caps."""
+        market = self.markets[coin]
+        price, fee_rate = decimal(price, positive=True), decimal(fee_rate)
+        held = self.oms.quantity(coin)
+        params = self.oms.book(coin).get("strategy_params") or {}
+        bid_depth = sum(
+            (decimal(row["qty"]) for row in (market.book or {}).get("bids", [])[:5]),
+            D(0),
+        ) * decimal(self.config["depth_fraction"])
+        ask_depth = sum(
+            (decimal(row["qty"]) for row in (market.book or {}).get("asks", [])[:5]),
+            D(0),
+        ) * decimal(self.config["depth_fraction"])
+        equity = self.oms.equity(self.marks())
+        portfolio_room = max(
+            D(0),
+            equity * decimal(self.config["portfolio_notional_fraction"])
+            - self.oms.portfolio_notional(self.marks()),
+        ) / price
+        book_room = max(D(0), D(str(params.get("max_notional") or 0)) / price - held)
+        cash_room = self.oms.free_cash() / (price * (D(1) + fee_rate))
+        exit_room = max(D(0), bid_depth - held)
+        cap = min(
+            ask_depth, exit_room, portfolio_room, book_room, cash_room,
+            decimal(market.contract["max_qty"]),
+            decimal(market.contract["max_order_amount"]) / (price * (D(1) + fee_rate)),
+        )
+        return floor_step(cap, market.contract["qty_unit"])
+
     def _submit(self, coin, role, side, kind, qty, fee_rate, **fields):
         guard = self.submission_guard(
             coin, role, side, qty,
             price=fields.get("price"),
+            minimum_price=fields.get("required_price"),
+            minimum_gross=fields.get("minimum_gross"),
         )
         order = self.oms.submit(
             coin, role, side, kind, qty,
@@ -514,6 +729,7 @@ class Runtime:
         fills = []
         qty = self.oms.quantity(coin)
         minimum = decimal(market.contract["min_order_amount"], positive=True)
+        minimum_qty = decimal(market.contract["min_qty"], positive=True)
         maker, taker = decimal(market.fees["maker"]), decimal(market.fees["taker"])
         buy_orders = self.oms.active(coin, "buy")
         sell_orders = [order for order in self.oms.active(coin) if order["side"] == "SELL"]
@@ -560,13 +776,15 @@ class Runtime:
         if qty and book.get("exit_reason"):
             if buy_orders:
                 return self._cancel(buy_orders)
+            # Keep any exchange-side sell protection in place until a fresh
+            # executable market exit can replace it.
+            if bid is None:
+                return fills
             if sell_orders:
                 if any(order["role"] != "exit" for order in sell_orders):
                     return self._cancel(sell_orders)
                 return fills
-            if bid is None:
-                return fills
-            if qty * bid < minimum:
+            if qty < minimum_qty or qty * bid < minimum:
                 self.oms.halt("UNSELLABLE_RESIDUAL", coin=coin, quantity=str(qty))
                 return fills
             if self.oms.available_asset(coin) < qty:
@@ -582,6 +800,21 @@ class Runtime:
         trim = desired.get("trim") if desired else None
         if qty and trim and decimal(trim["qty"]) > 0:
             trim_qty = min(qty, decimal(trim["qty"]))
+            if bid is None or trim_qty < minimum_qty or trim_qty * bid < minimum:
+                self.counts["trim_below_minimum"] += 1
+                return fills
+            if trigger is not None and bid <= trigger:
+                book["exit_reason"] = "stop_during_trim"
+                self.oms.save("EXIT_REQUEST", coin=coin, reason=book["exit_reason"])
+                return fills
+            purpose = trim.get("purpose") or "profit"
+            required_price = None
+            if purpose == "profit":
+                required_price = self._profit_price(market, trim)
+                quote = self._sell_quote(market, trim_qty, required_price)
+                if quote is None or quote["gross"] < minimum:
+                    self.counts["profit_trim_not_executable"] += 1
+                    return fills
             if buy_orders:
                 return self._cancel(buy_orders)
             if protect:
@@ -591,12 +824,6 @@ class Runtime:
                 return fills
             if sell_orders:
                 return fills
-            if bid is None or trim_qty * bid < minimum:
-                return fills
-            if trigger is not None and bid <= trigger:
-                book["exit_reason"] = "stop_during_trim"
-                self.oms.save("EXIT_REQUEST", coin=coin, reason=book["exit_reason"])
-                return fills
             if self.oms.available_asset(coin) < trim_qty:
                 self.oms.state["account_at"] = 0
                 self.last_account = 0
@@ -604,10 +831,13 @@ class Runtime:
             fields = dict(
                 lot=trim.get("lot"),
                 requested_scope=trim.get("requested_scope"),
-                reason="strategy_trim",
+                reason="take_profit" if purpose == "profit" else "strategy_risk_trim",
+                purpose=purpose,
             )
-            if limit is not None:
-                fields["limit_price"] = limit
+            if required_price is not None:
+                fields["required_price"] = required_price
+                fields["limit_price"] = required_price
+                fields["minimum_gross"] = minimum
             self._submit(coin, "trim", "SELL", "MARKET", trim_qty, taker, **fields)
             return fills
         active_trim = next((order for order in sell_orders if order["role"] == "trim"), None)
@@ -617,11 +847,19 @@ class Runtime:
         qty = self.oms.quantity(coin)
         protect = next((order for order in self.oms.active(coin, "protect")), None)
         if qty:
-            if trigger is None or limit is None or qty * limit < minimum:
+            if trigger is None or limit is None or qty < minimum_qty or qty * limit < minimum:
                 book["exit_reason"] = "protection_below_minimum"
                 self.oms.save("EXIT_REQUEST", coin=coin, reason=book["exit_reason"])
                 return fills
-            if protect and not self._same(protect, qty=qty, price=limit, trigger=trigger):
+            if protect and protect.get("status") != "NOT_TRIGGERED":
+                if self.clock() - protect["created"] >= self.config["reconcile_halt_s"]:
+                    book["exit_reason"] = "protection_unconfirmed"
+                    self.oms.save("EXIT_REQUEST", coin=coin, reason=book["exit_reason"])
+                    return self._cancel([protect])
+                return fills
+            if protect and not self._confirmed_protection(
+                protect, qty=qty, price=limit, trigger=trigger,
+            ):
                 return self._cancel([protect])
             if protect is None:
                 if sell_orders:
@@ -641,23 +879,29 @@ class Runtime:
                 return fills
 
         wanted_buy = desired.get("buy") if desired else None
-        if wanted_buy is None or stopping:
+        if wanted_buy is None or stopping or self.recovery_only:
             if buy_orders:
                 return self._cancel(buy_orders)
             return fills
         price, buy_qty = wanted_buy
-        if buy_qty <= 0 or buy_qty * price < minimum:
+        buy_qty = min(decimal(buy_qty), self._buy_cap(coin, price, maker))
+        if buy_qty < minimum_qty or buy_qty * price < minimum:
             if buy_orders:
                 return self._cancel(buy_orders)
             return fills
-        if qty and protect is None:
+        if qty and not self._confirmed_protection(
+            protect, qty=qty, price=limit, trigger=trigger,
+        ):
             return fills
         if buy_orders:
             order = buy_orders[0]
             if self._same(order, qty=buy_qty, price=price):
                 return fills
             return self._cancel(buy_orders)
-        if self.oms.can_buy(coin, buy_qty, price, maker, minimum, self.marks()):
+        if self.oms.can_buy(
+            coin, buy_qty, price, maker, minimum, self.marks(),
+            exit_fee_rate=taker, current_bid=bid,
+        ):
             self._submit(coin, "buy", "BUY", "LIMIT", buy_qty, maker, price=price)
         return fills
 
@@ -669,7 +913,16 @@ class Runtime:
                 return False
             if qty:
                 protects = [order for order in active if order["role"] == "protect"]
-                if len(protects) != 1 or self.oms.remaining(protects[0]) != qty:
+                book = self.oms.book(coin)
+                if (
+                    len(protects) != 1
+                    or book.get("desired_stop") is None
+                    or book.get("stop_limit") is None
+                    or not self._confirmed_protection(
+                        protects[0], qty=qty,
+                        price=book["stop_limit"], trigger=book["desired_stop"],
+                    )
+                ):
                     return False
         return True
 
@@ -695,6 +948,8 @@ class Runtime:
                 desired_stop=book.get("desired_stop"),
                 stop_limit=book.get("stop_limit"),
                 exit_reason=book.get("exit_reason"),
+                campaign_realized_krw=book.get("campaign_realized"),
+                campaign_budget_krw=book.get("campaign_budget"),
             )
             for coin, book in self.oms.state["books"].items()
             if self.oms.quantity(coin) or self.oms.active(coin)
@@ -704,6 +959,7 @@ class Runtime:
             track="A-2",
             execution_version=EXECUTION_VERSION,
             mode=self.config["mode"],
+            recovery_only=self.recovery_only,
             connected=self.connected,
             private_connected=self.private_connected,
             entry_paused=bool(self.activation_reasons()),
@@ -724,6 +980,8 @@ class Runtime:
             free_cash_krw=str(self.oms.free_cash()),
             realized_krw=self.oms.state["realized"],
             day_realized_krw=self.oms.state["day_realized"],
+            day_equity_pnl_krw=str(self.oms.day_pnl(self.marks())),
+            day_external_flows_krw=self.oms.state.get("day_external_flows", "0"),
             day_stops=self.oms.state["day_stops"],
             halt=self.oms.state["halt"],
             storage=dict(ok=self.storage_ok, public_bytes=used, free_bytes=free),
@@ -738,6 +996,7 @@ class Runtime:
     async def run(self, seconds=None):
         self.loop = asyncio.get_running_loop()
         tasks = []
+        scan_task = None
         try:
             await self.scan()
             await self.refresh_account()
@@ -746,6 +1005,7 @@ class Runtime:
             self.store.event(
                 "START",
                 execution_version=EXECUTION_VERSION,
+                recovery_only=self.recovery_only,
                 config_digest=hashlib.sha256(self.config_path.read_bytes()).hexdigest(),
                 selected=self.oms.state["selected"],
             )
@@ -756,6 +1016,15 @@ class Runtime:
             started = time.monotonic()
             while True:
                 self.wakeup.clear()
+                if scan_task is not None and scan_task.done():
+                    try:
+                        self._apply_scan(scan_task.result())
+                    except (CoinoneError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                        self.counts["scan_errors"] += 1
+                        self.last_scan = self.clock()
+                        self.store.event("SCAN_ERROR", error=type(exc).__name__)
+                    finally:
+                        scan_task = None
                 if seconds is not None and time.monotonic() - started >= seconds:
                     self.stopping = True
                 if self.controls()["stop"]:
@@ -765,6 +1034,7 @@ class Runtime:
                 try:
                     fills, changed = await asyncio.to_thread(self.reconcile, force=force)
                     self.notify_fills(fills)
+                    self.oms.roll_day(self.marks())
                     if fills or changed or self.clock() - self.last_account >= self.config["account_poll_s"]:
                         await self.refresh_account(reconcile=False)
                     now_ms = time.time_ns() // 1_000_000
@@ -800,8 +1070,15 @@ class Runtime:
                             self.counts["risk_cancel_errors"] += 1
                 if self.stopping and self.shutdown_ready():
                     break
-                if not self.stopping and self.clock() - self.last_scan >= self.config["scan_seconds"]:
-                    await self.scan()
+                if (
+                    not self.stopping
+                    and scan_task is None
+                    and self.clock() - self.last_scan >= self.config["scan_seconds"]
+                ):
+                    # Discovery and metadata REST calls must not hold up stop,
+                    # protection, cancellation, or account reconciliation.
+                    self.last_scan = self.clock()
+                    scan_task = asyncio.create_task(self._discover())
                 if self.clock() - self.last_report >= 30:
                     self.report()
                 try:
@@ -826,7 +1103,11 @@ class Runtime:
                     await asyncio.sleep(.25)
             for task in tasks:
                 task.cancel()
+            if scan_task is not None:
+                scan_task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if scan_task is not None:
+                await asyncio.gather(scan_task, return_exceptions=True)
             try:
                 self.report()
             finally:

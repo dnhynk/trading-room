@@ -53,14 +53,19 @@ def ranked(contracts, tickers, config):
 
 
 def retain(previous, held, candidates, size):
-    """Eligible incumbents stay; disqualified holdings wind down; rank only fills slots."""
+    """Eligible incumbents stay; every held/order coin remains watched.
+
+    A held coin that becomes eligible again is not silently promoted when the
+    basket is full. It stays in wind-down (no new risk) until a slot is free,
+    while price, exits, and protection continue to be driven.
+    """
     eligible = {row["coin"] for row in candidates}
-    selected = [coin for coin in previous if coin in eligible]
+    selected = [coin for coin in previous if coin in eligible][:size]
     for row in candidates:
         if len(selected) >= size:
             break
         if row["coin"] not in selected:
             selected.append(row["coin"])
-    wind_down = sorted(set(held) - eligible)
-    watch = list(dict.fromkeys(selected + wind_down))
+    wind_down = sorted(set(held) - set(selected))
+    watch = list(dict.fromkeys(selected + sorted(set(held))))
     return dict(selected=selected, wind_down=wind_down, watch=watch)
