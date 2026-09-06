@@ -614,7 +614,7 @@ class Runtime:
     def validate_intent(
         self, coin, role, side, qty, *, fee_rate=0, price=None,
         minimum_price=None, minimum_gross=None, own_order=None,
-        require_intent=False, operational=True, now_ms=None,
+        require_intent=False, operational=True, resting_order=False, now_ms=None,
     ):
         """Pure admission decision reused for planning, final send, and replay."""
         market = self.markets[coin]
@@ -638,7 +638,11 @@ class Runtime:
                     return reasons[0]
             if self.stopping or not self.connected or not self.private_connected or not self.storage_ok:
                 return "runtime_unavailable"
-            if not market.fresh(now_ms) or not market.book:
+            # A new order needs a recent book.  An already accepted maker
+            # order may keep its queue position while a quiet book emits no
+            # update; websocket liveness, its original signal TTL, current
+            # shape/depth, and every account/risk check still apply.
+            if not market.book or (not resting_order and not market.fresh(now_ms)):
                 return "market_age"
             price = decimal(price, positive=True) if price is not None else None
             current_bid = decimal(market.book["bids"][0]["price"], positive=True)
@@ -1036,10 +1040,15 @@ class Runtime:
                 return fills
             order = buy_orders[0]
             remaining = self.oms.remaining(order)
-            reason = self.validate_intent(
-                coin, "buy", "BUY", remaining,
-                fee_rate=maker, price=order["price"], own_order=order,
-            )
+            order_age = self.clock() - order["created"]
+            if not 0 <= order_age <= self.config["strategy"]["buy_ttl_s"]:
+                reason = "entry_signal_expired"
+            else:
+                reason = self.validate_intent(
+                    coin, "buy", "BUY", remaining,
+                    fee_rate=maker, price=order["price"], own_order=order,
+                    resting_order=True,
+                )
             if reason:
                 self.counts["resting_buy_rejected_" + reason] += 1
                 self.store.event(
