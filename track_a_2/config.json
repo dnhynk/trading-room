@@ -66,6 +66,8 @@
     "swing_s": 600,
     "dip_min_atr": 3.0,
     "v_fast": 1.0,
+    "v_fast_floor": 0.0,
+    "v_depth_elasticity": 0.0,
     "v_slow": 0.3,
     "hold_s": 3,
     "brk_lookback": 1800,

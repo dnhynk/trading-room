@@ -95,6 +95,17 @@ class TrackA2SettingsTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 load(self.write({**self.base, **change}))
 
+    def test_depth_velocity_relaxation_is_paired_and_bounded(self):
+        for floor, elasticity in ((0.75, 0.0), (0.0, 0.5), (1.01, 0.5), (0.75, 2.01)):
+            config = copy.deepcopy(self.base)
+            config["signal"].update(v_fast_floor=floor, v_depth_elasticity=elasticity)
+            with self.subTest(floor=floor, elasticity=elasticity), self.assertRaises(ValueError):
+                load(self.write(config))
+        config = copy.deepcopy(self.base)
+        config["signal"].update(v_fast_floor=0.75, v_depth_elasticity=0.5)
+        loaded = load(self.write(config))
+        self.assertEqual((loaded["signal"]["v_fast_floor"], loaded["signal"]["v_depth_elasticity"]), (0.75, 0.5))
+
     def test_approval_identifier_must_match_its_manifest_path(self):
         config = {
             **self.base,
