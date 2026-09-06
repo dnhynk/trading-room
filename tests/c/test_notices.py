@@ -9,7 +9,7 @@ from unittest.mock import patch
 import urllib.error
 
 from common import notify
-from track_c.ops.notices import CampaignStatistics, DataUnavailable, KST, REPLAY_VERSION, Replay, Source, fill_payload, summary_fields
+from track_c.ops.notices import CampaignStatistics, DataUnavailable, KST, REPLAY_VERSION, Replay, Source, fact_payload, fill_payload, summary_fields
 from track_c.ops.notify import Relay
 
 
@@ -351,6 +351,16 @@ class RelayTests(Fixture):
     def restart(self):
         self.relay.close()
         self.relay=Relay(self.path,self.path/'nonexistent.env',sender=self.send,clock=lambda:self.now)
+
+    def test_local_expiry_is_not_reported_as_an_exchange_rejection(self):
+        local=fact_payload(dict(type='ORDER_REJECTED',seq=1,t_ms=self.now*1000,coin='BTC',
+                                body=dict(transmitted=False,error='market_changed')))
+        exchange=fact_payload(dict(type='ORDER_REJECTED',seq=2,t_ms=self.now*1000,coin='BTC',
+                                   body=dict(error='request rejected')))
+        self.assertIn('전송 전에 폐기',local['lines'][0])
+        self.assertIn('거래소에는 전송되지 않았',local['lines'][0])
+        self.assertNotIn('거래소가 주문을 거절',local['lines'][0])
+        self.assertEqual(exchange['lines'],['거래소가 주문을 거절했습니다.'])
 
     def test_first_start_tails_history_and_restart_does_not_repeat_boot(self):
         self.intent(); self.fill()

@@ -26,7 +26,7 @@ from track_c.market.prices import price_floor
 from track_c.settings import load
 from track_c.ops.store import encoded
 
-VERSION='c4-live-v2.3'
+VERSION='c4-live-v2.4'
 MODES=('structural_sampling','execution_sampling','learned')
 
 
@@ -224,8 +224,7 @@ class LiveRunner(Runtime):
         orders=self.oms.active()
         if any(o['coin']!=coin or o['role']!='entry' or o['status']!='INTENT' for o in orders):return 'orders_changed'
         latest=self.current_state(coin)
-        if (not latest or latest.get('episode_id')!=origin.get('episode_id')
-                or latest['bids']!=state['bids'] or latest['asks']!=state['asks']):return 'market_changed'
+        if not latest or latest.get('episode_id')!=origin.get('episode_id'):return 'market_changed'
         if not 0<=now-latest['book_ms']<=age:return 'book_age'
         latest=admission_state(latest,self.entry_cfg)
         reason=stage(latest,self.entry_cfg)
@@ -282,7 +281,7 @@ class LiveRunner(Runtime):
                             ep=ep,exchange_fills_verified=False)
             if not outcome['accepted']:return
             current=self.current_state(coin)
-            if not current or current['bids']!=s['bids'] or current['asks']!=s['asks']:
+            if not current or current.get('episode_id')!=s.get('episode_id'):
                 raise EntryExpired('market_changed')
             cash,risk=float(self.cash()),float(self.oms.remaining_risk())
             preliminary=plan_for(outcome['action'],s,self.artifact['digest'],mode,self.entry_cfg['entry_ticks'])

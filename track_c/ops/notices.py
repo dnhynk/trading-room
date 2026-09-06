@@ -347,7 +347,9 @@ def fact_payload(fact):
     elif kind == 'ORDER_UNCERTAIN':
         message = '주문 응답 미확정 · 기존 주문을 재조회합니다.'
     elif kind == 'ORDER_REJECTED':
-        message = '거래소가 주문을 거절했습니다.'
+        message = ('최종 재검사에서 주문을 전송 전에 폐기했습니다. 거래소에는 전송되지 않았습니다.'
+                   if fact['body'].get('transmitted') is False else
+                   '거래소가 주문을 거절했습니다.')
     elif kind == 'API_ERROR':
         message = '계정 API 조회 장애 · 신규 진입과 보유 재고 상태를 확인합니다.'
     else:

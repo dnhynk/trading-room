@@ -169,6 +169,20 @@ class LiveOMSTests(unittest.TestCase):
         self.assertEqual(intent['plan']['c4_entry_ticks'],1.)
         self.assertEqual(intent['plan']['c4_mode'],'execution_sampling')
 
+    def test_harmless_book_update_is_revalidated_without_discarding_the_order(self):
+        import asyncio
+        r=self.live_runner(state());original=r.c4states['BTC']
+        latest=deepcopy(original);latest['book_ms']+=1;latest['t_ms']+=1
+        latest['asks'].append((latest['ask']+latest['tick'],3.))
+        calls=[0]
+        def current(_coin):
+            calls[0]+=1
+            return original if calls[0]==1 else latest
+        r.current_state=current
+        asyncio.run(r.decisions())
+        self.assertEqual(len(self.client.submissions),1)
+        self.assertEqual(r.counts['c4_decision_expired'],0)
+
     def test_expired_second_prediction_survival_and_worker_wait_never_submit(self):
         import asyncio
         from unittest.mock import patch
@@ -223,6 +237,18 @@ class LiveOMSTests(unittest.TestCase):
         r=self.live_runner(state());original=asyncio.to_thread
         async def queued(fn,*args,**kwargs):
             if fn.__name__=='enter':r.c4states['BTC']['reference']['m10']=-10.
+            return await original(fn,*args,**kwargs)
+        with patch('track_c.live.asyncio.to_thread',side_effect=queued):asyncio.run(r.decisions())
+        self.assertFalse(self.client.submissions)
+        self.assertEqual(r.counts['c4_decision_expired'],1)
+
+    def test_top_of_book_change_while_queued_changes_the_action_and_is_discarded(self):
+        import asyncio
+        from unittest.mock import patch
+        r=self.live_runner(state());s=r.c4states['BTC'];original=asyncio.to_thread
+        async def queued(fn,*args,**kwargs):
+            if fn.__name__=='enter':
+                s['bid']-=s['tick'];s['bids'][0]=(s['bid'],s['bids'][0][1]);s['book_ms']+=1
             return await original(fn,*args,**kwargs)
         with patch('track_c.live.asyncio.to_thread',side_effect=queued):asyncio.run(r.decisions())
         self.assertFalse(self.client.submissions)
