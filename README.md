@@ -17,6 +17,8 @@ python -m unittest discover -s tests -t .
 python -m track_c.ops.status
 python -m track_a_2.live --check
 python -m track_a_2.status
+python -m track_a_2.observe --coin BTC --coin ETH --seconds 3600
+python -m track_a_2.replay --help
 ```
 
 Python 3.12 이상을 사용한다. 의존성은 `pyproject.toml`에 정의하며 `python -m pip install -e .`로 설치한다. 차트 도구가 필요할 때만 `python -m pip install -e ".[charts]"`를 사용한다.

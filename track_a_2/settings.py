@@ -15,11 +15,13 @@ TOP_FIELDS = {
     "version", "track", "status", "venue", "market", "quote_currency", "sides",
     "mode", "execution_enabled", "portfolio_isolation_required",
     "portfolio_isolation_confirmed", "capital_mode", "live_approval_id",
+    "evaluation_manifest", "evaluation_sha256",
     "expected_egress_ip", "env_path", "state_directory", "strategy_contract",
     "selection_contract", "universe", "basket_size", "max_open_books",
     "min_quote_volume_24h", "min_range_24h_pct", "max_range_24h_pct",
     "max_spread_bp", "scan_seconds", "decision_ms", "quote_max_age_ms",
     "account_poll_s", "account_fresh_s", "reconcile_poll_s", "reconcile_halt_s",
+    "settlement_reconcile_s", "cancel_retry_s", "cancel_max_attempts",
     "account_mismatch_grace_s", "http_timeout_s", "public_storage_max_bytes",
     "cash_fraction", "unit_fraction", "book_notional_fraction",
     "portfolio_notional_fraction", "book_risk_fraction", "daily_loss_fraction",
@@ -81,6 +83,22 @@ def _validate(config, *, root=ROOT):
     approval = config["live_approval_id"]
     if approval is not None and (not isinstance(approval, str) or not APPROVAL.fullmatch(approval)):
         raise ValueError("invalid Track A-2 approval identifier")
+    manifest = config["evaluation_manifest"]
+    manifest_hash = config["evaluation_sha256"]
+    if manifest is not None and (
+        not isinstance(manifest, str)
+        or not re.fullmatch(r"evaluations/a2-eval-[a-z0-9_.-]{4,80}\.json", manifest)
+    ):
+        raise ValueError("invalid Track A-2 evaluation manifest path")
+    if manifest_hash is not None and (
+        not isinstance(manifest_hash, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", manifest_hash)
+    ):
+        raise ValueError("invalid Track A-2 evaluation manifest digest")
+    if (manifest is None) != (manifest_hash is None):
+        raise ValueError("Track A-2 evaluation manifest and digest must be paired")
+    if approval is not None and manifest is not None and manifest != f"evaluations/{approval}.json":
+        raise ValueError("Track A-2 approval and evaluation manifest identity differ")
     address = config["expected_egress_ip"]
     if address is not None:
         try:
@@ -109,6 +127,7 @@ def _validate(config, *, root=ROOT):
         "min_quote_volume_24h", "min_range_24h_pct", "max_range_24h_pct",
         "max_spread_bp", "scan_seconds", "decision_ms", "quote_max_age_ms",
         "account_poll_s", "account_fresh_s", "reconcile_poll_s", "reconcile_halt_s",
+        "settlement_reconcile_s", "cancel_retry_s",
         "account_mismatch_grace_s", "http_timeout_s", "minimum_exit_multiple",
         "stop_limit_buffer_bp", "max_fee_rate",
     ):
@@ -123,6 +142,11 @@ def _validate(config, *, root=ROOT):
         raise ValueError("Track A-2 account polling is slower than its freshness bound")
     if config["reconcile_poll_s"] >= config["reconcile_halt_s"]:
         raise ValueError("Track A-2 reconciliation timing is inverted")
+    if config["settlement_reconcile_s"] < config["reconcile_poll_s"]:
+        raise ValueError("Track A-2 settlement window is shorter than reconciliation polling")
+    _number(config, "cancel_max_attempts", positive=True, high=100, integer=True)
+    if config["cancel_retry_s"] >= config["reconcile_halt_s"]:
+        raise ValueError("Track A-2 cancel retry exceeds reconciliation window")
     _number(config, "public_storage_max_bytes", low=64 * 1024 * 1024, integer=True)
     _number(config, "stop_limit_buffer_ticks", positive=True, high=100, integer=True)
     for name in (

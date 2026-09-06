@@ -1,7 +1,63 @@
 import copy
 from decimal import Decimal as D
+import hashlib
+import json
+from pathlib import Path
 
+from track_a_2 import EXECUTION_VERSION
+from track_a_2.execution.preflight import evaluation_config_digest, evaluation_source_digest
+from track_a_2.settings import resolved_state_directory
 from track_c.execution.coinone import CoinoneError
+
+
+def approved_config(root, config):
+    """Create a pinned synthetic evaluation artifact inside a test workspace."""
+    root = Path(root)
+    source = root / "track_a_2" / "evaluated_source.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("# synthetic evaluated source\n", encoding="utf-8")
+    common = root / "common"
+    common.mkdir(parents=True, exist_ok=True)
+    for name in ("cycle.py", "signal.py", "risk.py"):
+        (common / name).write_text("# synthetic common source\n", encoding="utf-8")
+    shared = root / "track_c" / "execution"
+    shared.mkdir(parents=True, exist_ok=True)
+    for name in ("coinone.py", "http_pool.py", "rate_limit.py"):
+        (shared / name).write_text("# synthetic shared execution source\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]\nname='test'\n", encoding="utf-8")
+    approval = config["live_approval_id"]
+    relative = f"evaluations/{approval}.json"
+    configured = dict(config, evaluation_manifest=relative)
+    manifest = dict(
+        schema=1,
+        track="A-2",
+        approval_id=approval,
+        execution_version=EXECUTION_VERSION,
+        config_digest=evaluation_config_digest(configured),
+        source_digest=evaluation_source_digest(root),
+        universe=configured["universe"],
+        data_digest="a" * 64,
+        result="pass",
+        protocol=dict(
+            holdout=True, feed_contiguous=True, stress_passed=True,
+            ladder_beats_one_unit=True,
+            fixed_selection_from_seed=True, user_approved=True,
+        ),
+        execution=dict(
+            maker_fee="0", taker_fee="0", latency_ms=250, depth_fraction="0.1",
+        ),
+        metrics=dict(
+            main=dict(net_pnl_krw="2", campaigns=1, halt=None),
+            one_unit=dict(net_pnl_krw="1", campaigns=1, halt=None),
+            stress=dict(net_pnl_krw="1", campaigns=1, halt=None),
+        ),
+    )
+    raw = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    path = resolved_state_directory(configured, root) / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    configured["evaluation_sha256"] = hashlib.sha256(raw).hexdigest()
+    return configured
 
 
 class Clock:
@@ -22,6 +78,7 @@ class Client:
         self.cancellations = []
         self.submit_error = None
         self.accept_before_error = False
+        self.cancel_error = None
         self.balance_rows = [dict(currency="KRW", available="100000", limit="0")]
 
     @staticmethod
@@ -68,6 +125,8 @@ class Client:
 
     def cancel(self, coin, cid):
         self.cancellations.append(cid)
+        if self.cancel_error:
+            raise self.cancel_error
         row = self.rows[cid]
         row.update(status="CANCELED", remain_qty="0")
         return {}

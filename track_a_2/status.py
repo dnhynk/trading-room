@@ -23,12 +23,16 @@ def read(config_path=CONFIG):
     if not database.exists():
         return dict(track="A-2", initialized=False, mode=config["mode"], status=config["status"])
     uri = "file:" + database.resolve().as_posix() + "?mode=ro"
+    connection = None
     try:
-        with sqlite3.connect(uri, uri=True, timeout=1) as connection:
-            row = connection.execute("SELECT body FROM state WHERE id=1").fetchone()
+        connection = sqlite3.connect(uri, uri=True, timeout=1)
+        row = connection.execute("SELECT body FROM state WHERE id=1").fetchone()
         state = json.loads(row[0]) if row else None
     except (sqlite3.Error, OSError, ValueError):
         raise RuntimeError("Track A-2 ledger is unreadable") from None
+    finally:
+        if connection is not None:
+            connection.close()
     if not isinstance(state, dict) or state.get("version") != 1:
         raise RuntimeError("Track A-2 ledger identity mismatch")
     positions = {
