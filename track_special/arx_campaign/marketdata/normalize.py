@@ -18,7 +18,7 @@ def _time(value: Any, fallback: datetime) -> datetime:
         return fallback
 
 
-def raw_hash(payload: Mapping[str, Any]) -> str:
+def raw_hash(payload: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 
@@ -47,15 +47,34 @@ class NormalizedRecord:
         return value
 
 
-def normalize_response(record_type: str, payload: Mapping[str, Any], received_at: datetime, *, category: str, symbol: str) -> tuple[NormalizedRecord, ...]:
-    """Retain every payload item, including identical event identity duplicates."""
-    data = payload.get("data", [])
-    items = data if isinstance(data, list) else [data]
+def _items(data: Any) -> list[Any]:
+    if isinstance(data, list):
+        return data
+    if isinstance(data, Mapping):
+        for key in ("list", "resultList"):
+            if isinstance(data.get(key), list):
+                return list(data[key])
+        return [data]
+    return [] if data is None else [data]
+
+
+def _candle(item: Any) -> Mapping[str, Any]:
+    if isinstance(item, Mapping):
+        return item
+    if isinstance(item, (list, tuple)):
+        names = ("ts", "open", "high", "low", "close", "volume", "turnover")
+        return {"candle": list(item), **{name: value for name, value in zip(names, item)}}
+    return {"value": item}
+
+
+def normalize_response(record_type: str, payload: Mapping[str, Any], received_at: datetime, *, category: str, symbol: str, interval: str | None = None) -> tuple[NormalizedRecord, ...]:
+    """Retain every response item and its raw shape; never invent identity fields."""
+    items = _items(payload.get("data", []))
     request_time = _time(payload.get("requestTime"), received_at)
     seen: dict[str, str] = {}
     records = []
     for item in items:
-        item = item if isinstance(item, Mapping) else {"value": item}
+        item = _candle(item) if record_type == "candles" else (item if isinstance(item, Mapping) else {"value": item})
         digest = raw_hash(item)
         sequence = item.get("seq") or item.get("sequence") or item.get("tradeId") or item.get("id")
         identity = str(sequence) if sequence is not None else digest
@@ -63,5 +82,18 @@ def normalize_response(record_type: str, payload: Mapping[str, Any], received_at
         seen.setdefault(identity, digest)
         exchange_time = _time(item.get("ts") or item.get("timestamp") or item.get("cTime") or payload.get("requestTime"), request_time)
         fields = {key: value for key, value in item.items() if key not in {"seq", "sequence", "tradeId", "id", "ts", "timestamp", "cTime"}}
-        records.append(NormalizedRecord("bitget", "uta_v3", category, str(item.get("symbol", symbol)), item.get("baseCoin") or "ARX", item.get("quoteCoin") or "USDT", item.get("settleCoin") or ("USDT" if category == "USDT-FUTURES" else None), record_type, exchange_time, received_at, str(sequence) if sequence is not None else None, digest, duplicate, fields, dict(item)))
+        if record_type == "candles" and interval is not None:
+            duration = _interval_seconds(interval)
+            fields["completed"] = duration is not None and exchange_time.timestamp() + duration <= received_at.timestamp()
+            fields["interval"] = interval
+        # A response missing identity is retained as missing; it is never filled from ARX defaults.
+        records.append(NormalizedRecord("bitget", "uta_v3", category, str(item.get("symbol", symbol)), item.get("baseCoin"), item.get("quoteCoin"), item.get("settleCoin"), record_type, exchange_time, received_at, str(sequence) if sequence is not None else None, digest, duplicate, fields, dict(item)))
     return tuple(records)
+
+
+def _interval_seconds(interval: str) -> int | None:
+    units = {"m": 60, "H": 3600, "D": 86400}
+    try:
+        return int(interval[:-1]) * units[interval[-1]]
+    except (ValueError, KeyError, IndexError):
+        return None
