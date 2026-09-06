@@ -6,6 +6,20 @@
       "status": "paused",
       "restart_requires_user_instruction": true
     },
+    "A-2": {
+      "status": "paused",
+      "venue": "coinone",
+      "market": "spot",
+      "sides": [
+        "long"
+      ],
+      "execution_enabled": false,
+      "implementation": "live_engine",
+      "execution_version": "a2-live-v1",
+      "activation": "manual_multi_lock",
+      "universe": [],
+      "restart_requires_user_instruction": true
+    },
     "B": {
       "status": "paused",
       "restart_requires_user_instruction": true

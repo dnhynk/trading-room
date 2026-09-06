@@ -1,10 +1,11 @@
 # Trading Room
 
-세 가지 매매 전략의 시장 관측, 주문 실행, 재생과 검증을 관리하는 Python 프로젝트다.
+A, A-2, B, C 매매 전략의 시장 관측, 주문 실행, 재생과 검증을 관리하는 Python 프로젝트다.
 
 | 트랙 | 역할 |
 |---|---|
 | [A — 순환매](track_a/README.md) | Bitget 바구니 선정과 감속·정체 기반 순환매 |
+| [A-2 — 코인원 순환매](track_a_2/README.md) | Coinone 현물 롱온리 순환매 실거래 실행기(기본 정지) |
 | [B — 캠페인](track_b/README.md) | Bitget 종목 탐색과 독립 캠페인, 자본 풀 관리 |
 | [C — 유동성 회복](track_c/README.md) | Coinone 시장 상태·주문 조건별 회수 가치 추정과 실체결 관측 |
 
@@ -17,6 +18,8 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e .
 python -m unittest discover -s tests -t .
+python -m track_a_2.live --check
+python -m track_a_2.status
 ```
 
 차트 도구는 `python -m pip install -e ".[charts]"`로 선택 설치한다. 재생·검증 도구의 입력은 다음 명령으로 확인한다.
