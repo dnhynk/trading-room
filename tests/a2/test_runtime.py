@@ -322,7 +322,7 @@ class RuntimeCase(unittest.TestCase):
         self.assertNotIn(order["cid"], self.client.cancellations)
         self.assertEqual(self.runtime.counts["resting_buy_held_without_decision"], 1)
 
-    def test_resting_buy_without_decision_still_cancels_on_stale_book(self):
+    def test_resting_buy_survives_static_book_until_signal_ttl(self):
         self.runtime.connected = self.runtime.private_connected = True
         self.runtime.drive("AAA", self.desired(buy=(100, 100)), fresh=True)
         order = self.runtime.oms.active("AAA", "buy")[0]
@@ -331,8 +331,45 @@ class RuntimeCase(unittest.TestCase):
 
         self.runtime.drive("AAA", None, fresh=False)
 
+        self.assertNotIn(order["cid"], self.client.cancellations)
+        self.assertEqual(self.runtime.counts["resting_buy_held_without_decision"], 1)
+
+    def test_resting_buy_without_decision_cancels_at_signal_ttl(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        self.runtime.drive("AAA", self.desired(buy=(100, 100)), fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+        self.clock.advance(self.config["strategy"]["buy_ttl_s"] + 0.01)
+
+        self.runtime.drive("AAA", None, fresh=False)
+
         self.assertIn(order["cid"], self.client.cancellations)
-        self.assertEqual(self.runtime.counts["resting_buy_rejected_market_age"], 1)
+        self.assertEqual(
+            self.runtime.counts["resting_buy_rejected_entry_signal_expired"], 1,
+        )
+
+    def test_resting_buy_without_decision_cancels_on_disconnect(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        self.runtime.drive("AAA", self.desired(buy=(100, 100)), fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+        self.runtime.connected = False
+
+        self.runtime.drive("AAA", None, fresh=False)
+
+        self.assertIn(order["cid"], self.client.cancellations)
+        self.assertEqual(
+            self.runtime.counts["resting_buy_rejected_runtime_unavailable"], 1,
+        )
+
+    def test_new_buy_intent_still_requires_a_fresh_book(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        self.runtime.markets["AAA"].book_received = 0
+        self.runtime.markets["AAA"].book_exchange = 0
+
+        reason = self.runtime.validate_intent(
+            "AAA", "buy", "BUY", 100, fee_rate=0, price=100,
+        )
+
+        self.assertEqual(reason, "market_age")
 
     def test_explicit_strategy_disarm_still_cancels_resting_buy(self):
         self.runtime.connected = self.runtime.private_connected = True
