@@ -19,7 +19,12 @@ class FixtureClient:
                 raise RuntimeError("unavailable fixture endpoint")
             symbol = args[0] if args else "ARXUSDT"
             category = "SPOT" if name.startswith("spot_") else "USDT-FUTURES"
-            data = [["1788739140000", "1", "2", "1", "2", "3", "4"]] if "candles" in name else {"list": [{"symbol": symbol, "category": category, "ts": "1788739200000"}]}
+            if name == "futures_instruments":
+                data = [{"symbol":"ARXUSDT","category":"USDT-FUTURES","baseCoin":"ARX","quoteCoin":"USDT","type":"perpetual","status":"online","quantityMultiplier":"1","priceMultiplier":"0.00001","minOrderQty":"1","minOrderAmount":"5","makerFeeRate":"0.0002","takerFeeRate":"0.0006","minLeverage":"1","maxLeverage":"20","fundInterval":"4"}]
+            elif name == "spot_instruments":
+                data = [{"symbol":"ARXUSDT","category":"SPOT","baseCoin":"ARX","quoteCoin":"USDT","status":"online"}]
+            else:
+                data = [["1788739140000", "1", "2", "1", "2", "3", "4"]] if "candles" in name else {"list": [{"symbol": symbol, "category": category, "ts": "1788739200000"}]}
             return {"code": "00000", "data": data}, NOW
         return call
 
@@ -39,7 +44,7 @@ class MarketDataTests(unittest.TestCase):
 
     def test_append_only_readback_and_gap_latency_metrics(self) -> None:
         first = normalize_response("ticker", {"data": {"symbol": "ARXUSDT", "ts": "1788739200000", "lastPr": "1"}}, NOW, category="SPOT", symbol="ARXUSDT")[0]
-        second = normalize_response("ticker", {"data": {"symbol": "ARXUSDT", "ts": "1788739200000", "lastPr": "2"}}, NOW + timedelta(seconds=7), category="SPOT", symbol="ARXUSDT")[0]
+        second = normalize_response("ticker", {"data": {"symbol": "ARXUSDT", "ts": "1788739207000", "lastPr": "2"}}, NOW + timedelta(seconds=7), category="SPOT", symbol="ARXUSDT")[0]
         with TemporaryDirectory() as directory:
             store = AppendOnlyJsonlStore(Path(directory))
             self.assertEqual(2, store.append("spot_arxusdt_ticker", (first, second)))
@@ -74,7 +79,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertTrue(candles[0].fields["completed"]); self.assertFalse(candles[1].fields["completed"]); self.assertEqual(candles[0].raw["candle"][0], "1788739140000")
 
     def test_complete_instrument_conversion_keeps_base_quantity_inference_explicit(self) -> None:
-        data = {"symbol": "ARXUSDT", "category": "USDT-FUTURES", "baseCoin": "ARX", "quoteCoin": "USDT", "settleCoin": "USDT", "type": "perpetual", "status": "online", "quantityMultiplier": "1", "priceMultiplier": "0.00001", "minOrderQty": "1", "minOrderAmount": "5", "makerFeeRate": "0.0002", "takerFeeRate": "0.0006", "minLeverage": "1", "maxLeverage": "20", "fundInterval": "4"}
+        data = {"symbol": "ARXUSDT", "category": "USDT-FUTURES", "baseCoin": "ARX", "quoteCoin": "USDT", "type": "perpetual", "status": "online", "quantityMultiplier": "1", "priceMultiplier": "0.00001", "minOrderQty": "1", "minOrderAmount": "5", "makerFeeRate": "0.0002", "takerFeeRate": "0.0006", "minLeverage": "1", "maxLeverage": "20", "fundInterval": "4"}
         spec = instrument_spec_from_observation(data, NOW)
         self.assertEqual(Decimal("1"), spec.contract_multiplier); self.assertTrue(spec.live_identity_verified)
         del data["baseCoin"]
@@ -87,6 +92,9 @@ class MarketDataTests(unittest.TestCase):
             self.assertIn("open_interest", receipt.errors)
             self.assertTrue(receipt.paths["futures_benchmark_BTCUSDT"].exists())
             self.assertTrue(receipt.paths["receipt"].exists())
+            self.assertEqual(receipt.counts["futures_ticker"], receipt.readback_counts["futures_ticker"])
+            self.assertTrue(receipt.futures_identity_verified)
+            self.assertTrue(receipt.spot_identity_verified)
 
 
 if __name__ == "__main__":

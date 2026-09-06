@@ -49,6 +49,7 @@ class ApiFamily(StrEnum):
 class AccountMode(StrEnum):
     UNVERIFIED = "unverified"
     CLASSIC = "classic"
+    UTA_ISOLATED = "uta_isolated"
     UTA_STANDARD = "uta_standard"
     UTA_ADVANCED = "uta_advanced"
 
@@ -142,13 +143,22 @@ class InstrumentSpec:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", utc(self.observed_at))
-        if self.contract_multiplier <= ZERO:
-            raise ValueError("contract multiplier must be positive")
+        if any(
+            value <= ZERO
+            for value in (
+                self.contract_multiplier,
+                self.price_tick,
+                self.quantity_step,
+                self.min_order_quantity,
+                self.min_order_notional,
+            )
+        ):
+            raise ValueError("instrument multiplier, precision, and minimums must be positive")
 
     @property
     def live_identity_verified(self) -> bool:
         return (
-            self.api_family is not ApiFamily.UNVERIFIED
+            self.api_family is ApiFamily.UTA_V3
             and self.symbol == "ARXUSDT"
             and self.category == "USDT-FUTURES"
             and self.base_coin == "ARX"
@@ -180,6 +190,19 @@ class MarketSnapshot:
         object.__setattr__(self, "received_at", utc(self.received_at))
         if self.next_funding_at is not None:
             object.__setattr__(self, "next_funding_at", utc(self.next_funding_at))
+        if self.symbol != "ARXUSDT" or any(
+            value <= ZERO
+            for value in (
+                self.mark_price,
+                self.index_price,
+                self.last_price,
+                self.executable_bid,
+                self.executable_ask,
+            )
+        ):
+            raise ValueError("ARX market snapshot needs distinct positive prices")
+        if self.executable_bid > self.executable_ask:
+            raise ValueError("executable bid cannot exceed ask")
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,8 +226,8 @@ class AccountSnapshot:
     @property
     def entry_preconditions_verified(self) -> bool:
         return (
-            self.api_family is not ApiFamily.UNVERIFIED
-            and self.account_mode not in {AccountMode.UNVERIFIED, AccountMode.UTA_ADVANCED}
+            self.api_family is ApiFamily.UTA_V3
+            and self.account_mode in {AccountMode.UTA_ISOLATED, AccountMode.UTA_STANDARD}
             and self.margin_mode is MarginMode.ISOLATED
             and self.position_mode is PositionMode.ONE_WAY
             and self.margin_coin == "USDT"
@@ -243,12 +266,67 @@ class Reservation:
     created_at: datetime
     expires_at: datetime
     status: OrderStatus
+    stage: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "created_at", utc(self.created_at))
         object.__setattr__(self, "expires_at", utc(self.expires_at))
         if self.quantity_base <= ZERO or self.worst_fill_price <= ZERO:
             raise ValueError("reservation quantity and price must be positive")
+        if self.expires_at <= self.created_at:
+            raise ValueError("reservation expiry must follow creation")
+        if self.stage is not None and self.stage not in {1, 2, 3, 4}:
+            raise ValueError("reservation stage must be 1..4")
+
+
+@dataclass(frozen=True, slots=True)
+class RiskApproval:
+    """Short-lived, immutable bridge from aggregate risk to execution.
+
+    The execution database stores these totals in the same transaction as the
+    order reservation.  This object is an approval record, never permission to
+    call a private exchange endpoint.
+    """
+
+    approval_id: str
+    intention_id: str
+    campaign_id: str
+    config_hash: str
+    approved_quantity_base: Decimal
+    principal_loss_at_stop_usdt: Decimal
+    giveback_at_stop_usdt: Decimal
+    gross_stop_risk_usdt: Decimal
+    gross_notional_usdt: Decimal
+    isolated_margin_usdt: Decimal
+    market_observed_at: datetime
+    account_observed_at: datetime | None
+    created_at: datetime
+    expires_at: datetime
+    risk_state: RiskState
+    live_private_inputs_verified: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("market_observed_at", "created_at", "expires_at"):
+            object.__setattr__(self, name, utc(getattr(self, name)))
+        if self.account_observed_at is not None:
+            object.__setattr__(self, "account_observed_at", utc(self.account_observed_at))
+        if not self.approval_id or not self.config_hash:
+            raise ValueError("approval identity and config hash are required")
+        if self.approved_quantity_base <= ZERO:
+            raise ValueError("approval quantity must be positive")
+        if self.expires_at <= self.created_at:
+            raise ValueError("approval expiry must follow creation")
+        if any(
+            value < ZERO
+            for value in (
+                self.principal_loss_at_stop_usdt,
+                self.giveback_at_stop_usdt,
+                self.gross_stop_risk_usdt,
+                self.gross_notional_usdt,
+                self.isolated_margin_usdt,
+            )
+        ):
+            raise ValueError("risk approval totals cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +358,17 @@ class ProtectionSnapshot:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", utc(self.observed_at))
+        if self.protected_quantity_base < ZERO:
+            raise ValueError("protected quantity cannot be negative")
+        if self.stop_price is not None and self.stop_price <= ZERO:
+            raise ValueError("protection stop must be positive")
+        if self.state is ProtectionState.ACTIVE and (
+            self.stop_price is None
+            or self.protected_quantity_base <= ZERO
+            or not self.exchange_order_id
+            or self.trigger_reference not in {"mark_price", "last_price", "index_price"}
+        ):
+            raise ValueError("active protection needs a queried server order and trigger reference")
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,4 +398,16 @@ class OrderIntent:
             raise ValueError("side must be buy or sell")
         if self.side == "sell" and not self.reduce_only:
             raise ValueError("long-only sell intents must be reduce-only")
-
+        if self.purpose in {OrderPurpose.PROBE_ENTRY, OrderPurpose.PYRAMID_ENTRY}:
+            if self.side != "buy" or self.reduce_only:
+                raise ValueError("long entry must be a non-reduce-only buy")
+            if self.stage not in {1, 2, 3, 4}:
+                raise ValueError("entry stage must be 1..4")
+        elif self.side != "sell" or not self.reduce_only:
+            raise ValueError("all non-entry intents must reduce the one-way long")
+        if self.limit_price is not None and self.limit_price <= ZERO:
+            raise ValueError("limit price must be positive")
+        if not self.config_hash:
+            raise ValueError("config hash is required")
+        if self.market_observed_at > self.created_at or self.created_at >= self.expires_at:
+            raise ValueError("intent observation, creation, and expiry must be ordered")

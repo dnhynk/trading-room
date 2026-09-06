@@ -22,7 +22,23 @@ class CollectionMetrics:
 
 
 def collection_metrics(records: Iterable[NormalizedRecord]) -> CollectionMetrics:
-    ordered = sorted(records, key=lambda item: item.received_at)
-    gaps = [(right.received_at - left.received_at).total_seconds() for left, right in zip(ordered, ordered[1:])]
-    latencies = [(item.received_at - item.exchange_time).total_seconds() * 1000 for item in ordered]
-    return CollectionMetrics(len(ordered), sum(item.duplicate_of is not None for item in ordered), ordered[0].received_at if ordered else None, ordered[-1].received_at if ordered else None, max(gaps) if gaps else None, median(latencies) if latencies else None, sum(value < 0 for value in latencies))
+    values = list(records)
+    exchange_ordered = sorted(values, key=lambda item: item.exchange_time)
+    received_ordered = sorted(values, key=lambda item: item.received_at)
+    gaps = [
+        (right.exchange_time - left.exchange_time).total_seconds()
+        for left, right in zip(exchange_ordered, exchange_ordered[1:])
+    ]
+    latencies = [
+        (item.received_at - item.exchange_time).total_seconds() * 1000
+        for item in values
+    ]
+    return CollectionMetrics(
+        len(values),
+        sum(item.duplicate_of is not None for item in values),
+        received_ordered[0].received_at if received_ordered else None,
+        received_ordered[-1].received_at if received_ordered else None,
+        max(gaps) if gaps else None,
+        median(latencies) if latencies else None,
+        sum(value < 0 for value in latencies),
+    )

@@ -9,8 +9,17 @@ description = "Trading Room strategies including an isolated ARX futures researc
 requires-python = ">=3.12"
 dependencies = ["websockets==17.1", "python-dotenv>=1,<2"]
 
+[project.scripts]
+arx-campaign = "track_special.arx_campaign.cli:main"
+
 [project.optional-dependencies]
 charts = ["matplotlib>=3.9,<4"]
+dev = ["mypy==2.3.1"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["track_special/arx_campaign"]
 
 [tool.setuptools.packages.find]
 where = ["."]

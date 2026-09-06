@@ -14,7 +14,7 @@ def _time(value: Any, fallback: datetime) -> datetime:
         return fallback
     try:
         return datetime.fromtimestamp(int(str(value)) / 1000, timezone.utc)
-    except (ValueError, OverflowError):
+    except (TypeError, ValueError, OverflowError):
         return fallback
 
 
@@ -68,9 +68,10 @@ def _candle(item: Any) -> Mapping[str, Any]:
 
 
 def normalize_response(record_type: str, payload: Mapping[str, Any], received_at: datetime, *, category: str, symbol: str, interval: str | None = None) -> tuple[NormalizedRecord, ...]:
-    """Retain every response item and its raw shape; never invent identity fields."""
+    """Retain every response item and distinguish requested from returned identity."""
     items = _items(payload.get("data", []))
     request_time = _time(payload.get("requestTime"), received_at)
+    response_digest = raw_hash(payload)
     seen: dict[str, str] = {}
     records = []
     for item in items:
@@ -80,13 +81,32 @@ def normalize_response(record_type: str, payload: Mapping[str, Any], received_at
         identity = str(sequence) if sequence is not None else digest
         duplicate = seen.get(identity)
         seen.setdefault(identity, digest)
-        exchange_time = _time(item.get("ts") or item.get("timestamp") or item.get("cTime") or payload.get("requestTime"), request_time)
+        exchange_time = _time(
+            item.get("ts")
+            or item.get("timestamp")
+            or item.get("cTime")
+            or item.get("fundingTime")
+            or item.get("time")
+            or payload.get("requestTime"),
+            request_time,
+        )
         fields = {key: value for key, value in item.items() if key not in {"seq", "sequence", "tradeId", "id", "ts", "timestamp", "cTime"}}
+        fields.update(
+            {
+                "requested_symbol": symbol,
+                "requested_category": category,
+                "response_symbol": item.get("symbol"),
+                "response_category": item.get("category"),
+                "identity_observed": item.get("symbol") is not None,
+                "response_raw_hash": response_digest,
+            }
+        )
         if record_type == "candles" and interval is not None:
             duration = _interval_seconds(interval)
             fields["completed"] = duration is not None and exchange_time.timestamp() + duration <= received_at.timestamp()
             fields["interval"] = interval
-        # A response missing identity is retained as missing; it is never filled from ARX defaults.
+        # ``symbol`` is the requested stream identity. Whether the venue echoed
+        # it is retained separately and must be checked before live use.
         records.append(NormalizedRecord("bitget", "uta_v3", category, str(item.get("symbol", symbol)), item.get("baseCoin"), item.get("quoteCoin"), item.get("settleCoin"), record_type, exchange_time, received_at, str(sequence) if sequence is not None else None, digest, duplicate, fields, dict(item)))
     return tuple(records)
 

@@ -4,6 +4,12 @@ Status date: 2026-09-07. This is a public-data inventory, not account or
 execution validation. The collector uses only unsigned `GET` requests and has
 no API-key, private endpoint, order, or account capability.
 
+Bitget's [2026-06-22 listing notice](https://www.bitget.com/support/articles/12560603886485)
+recorded 20x maximum leverage, four-hour funding, USDT settlement, and tick
+`0.00001`, while explicitly warning that parameters may change. The table and
+collector therefore use the runtime instrument/funding/tier responses; the notice
+is historical evidence only.
+
 | Capability | UTA v3 public route | ARX futures | ARX spot | Status |
 | --- | --- | --- | --- | --- |
 | Instruments | `/api/v3/market/instruments` | `category=USDT-FUTURES`, `symbol=ARXUSDT` | `category=SPOT`, `symbol=ARXUSDT` | documented route; identity must be observed, not assumed |
@@ -29,8 +35,25 @@ interval `4`, maker/taker `.0002`/`.0006`, and tier 1 `0–5000`, leverage `20`,
 MMR `.025`. These, including spot identity and contract-address material, are
 observations rather than guarantees.
 
-Identity is strict: `ARXUSDT` futures is separate from `ARXUSDT` spot and is
-accepted only after its returned instrument states complete base, quote,
-settlement, perpetual/linear and online fields. UTA v3 reports futures order
-quantity in base coin; conversion therefore uses multiplier `1` only for that
-documented inference while retaining `quantityMultiplier` and `priceMultiplier`.
+Identity is strict: `ARXUSDT` futures is separate from `ARXUSDT` spot. The current
+instrument response states ARX base, USDT quote, `USDT-FUTURES`, perpetual and online;
+it does not return a `settleCoin` field. USDT settlement/linearity and base-coin order
+quantity are therefore explicit inferences from the documented UTA category and
+order contract, not invented response fields. Conversion uses multiplier `1` only
+under that documented contract while retaining `quantityMultiplier` and
+`priceMultiplier`. The UTA order mapper uses current `qty`, `timeInForce`, and
+lower-case `reduceOnly=yes|no`; Classic fields never enter that mapper. The separate
+documented TPSL mapper emits a one-way partial-position stop as `side=sell`,
+`reduceOnly=yes`, base-coin `qty`, `slTriggerBy=mark`, and
+`slOrderType=market`, without `posSide` or `marginMode`. It does not sign or send
+the payload and is not evidence that the target account accepts or retains it.
+
+Private capability code exposes only injected signed GETs for
+`/api/v3/account/settings` and `/api/v3/position/current-position`. Account settings
+must explicitly show UTA `unified|hybrid`, level `isolated|basic`, `one_way_mode`, and
+an exact ARXUSDT `isolated` symbol config. Advanced, switching/upgrading, crossed,
+hedge, missing symbol config, external exposure, or unknown auto-top-up blocks entry.
+No signer or private POST implementation exists in this development build.
+Before live review, a non-production capability test must verify strategy-order
+acceptance, query-visible coverage after partial fills, trigger semantics,
+reduce-only reservation/cancellation behavior, and coexistence with other exits.

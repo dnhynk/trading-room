@@ -67,6 +67,27 @@ class ContractTests(unittest.TestCase):
         )
         self.assertFalse(account.entry_preconditions_verified)
 
+    def test_classic_or_advanced_account_cannot_pass_uta_entry_gate(self) -> None:
+        for api_family, account_mode in (
+            (ApiFamily.CLASSIC_V2, AccountMode.CLASSIC),
+            (ApiFamily.UTA_V3, AccountMode.UTA_ADVANCED),
+        ):
+            account = AccountSnapshot(
+                observed_at=NOW,
+                api_family=api_family,
+                account_mode=account_mode,
+                margin_mode=MarginMode.ISOLATED,
+                position_mode=PositionMode.ONE_WAY,
+                margin_coin="USDT",
+                strategy_equity_usdt=Decimal("100"),
+                available_usdt=Decimal("100"),
+                reconciled=True,
+                dedicated_or_verifiably_separated=True,
+                external_exposure_detected=False,
+                auto_margin_top_up_disabled=True,
+            )
+            self.assertFalse(account.entry_preconditions_verified)
+
 
 if __name__ == "__main__":
     unittest.main()

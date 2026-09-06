@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .normalize import NormalizedRecord
 
@@ -28,7 +28,7 @@ class AppendOnlyJsonlStore:
                 count += 1
         return count
 
-    def readback(self, stream_key: str) -> tuple[dict, ...]:
+    def readback(self, stream_key: str) -> tuple[dict[str, Any], ...]:
         path = self._path(stream_key)
         if not path.exists():
             return ()

@@ -10,7 +10,12 @@ The only mode enabled by repository defaults is `observe`. `paper` and `replay` 
 
 Every normalized market record has `venue`, `api_family`, `category`, `symbol`, base/quote/settlement identity, exchange time, receive time, source sequence when available, and a hash of the raw payload. Spot and futures records have distinct stream keys. Mark, index, last, and executable bid/ask retain their names and are never silently substituted.
 
-Collectors are append-only and idempotent on a source event key. They retain duplicates as observations while marking duplicate identity, record reconnects and gaps, and report first/last receive time, count, coverage, longest gap, and latency. Unavailable liquidation or wallet data is stored as unavailable rather than synthesized.
+Collectors are append-only and duplicate-aware. They retain repeated source identities
+as observations while marking duplicates within a response; order and ledger event
+application—not observation recording—is idempotent. Receipts report first/last
+receive time, written and read-back counts, completed-candle coverage, longest source
+gap, latency, and endpoint errors. Unavailable liquidation or wallet data is stored as
+unavailable rather than synthesized.
 
 Research facts store `source_url`, `event_at`, `first_observed_at`, `fetched_at`, `expires_at`, raw hash, and a classification of `official_fact`, `inference`, or `unverified`. Research text can explain but cannot approve an order.
 
@@ -44,7 +49,11 @@ gross_stop_risk = sum(filled_qty * max(entry_price - P_exit, 0))
 
 Realized fees and funding already included in `realized_net_pnl` are never subtracted again. Principal loss, giveback, gross stop risk, gross notional, isolated margin, tier/MMR, liquidation buffer, stage notional, funding, liquidity, and order precision each have independent gates. A tighter stop cannot be invented merely to make size pass.
 
-Reservations and approvals are created in the same database transaction. An approval binds campaign revision, config hash, market/account snapshot times, exact candidate, risk totals, and a short expiry. Execution must re-read all of them immediately before submission; stale approval is unusable.
+Reservations and approvals are created in the same database transaction. An approval
+binds campaign ID, intention ID, config hash, exact approved quantity, market/account
+snapshot times, risk totals, and a short expiry. Execution requires a completed
+restart snapshot reconciliation before reservation, then rechecks config and bound
+snapshot identities immediately before submission. Stale approval is unusable.
 
 Daily and weekly loss are deposit/withdrawal-adjusted equity changes from fixed timezone boundaries. Campaign loss is net PnL against fixed `E0`. Drawdown is measured from the contribution-adjusted strategy-equity high-water mark. Restart and date rollover do not reset durable history. Global triggers enter `EXIT_ONLY`; campaign triggers do not auto-clear at a time boundary.
 
@@ -60,7 +69,12 @@ An `OrderIntent` is not an order. The durable lifecycle is intention → transac
 
 One-way long reduction is a `sell` with `reduce_only` in the selected adapter only after that adapter's account/API family is verified. UTA v3 names and Classic v2 names live in separate wire mappers. Server ACK is not matching confirmation. Reduce-only auto-cancel/replacement behavior is treated as an exchange capability requiring account-level testing.
 
-Protection has its own lifecycle. New exposure is not considered protected until a server-side order covering the actual position quantity is queried as active with the approved trigger reference. Protection-before-entry is not assumed atomic. Any uncovered fill starts a bounded repair deadline; further entries stop, and the approved emergency reduction policy—not an invented market order—determines the next action.
+Protection has its own durable snapshot history. New exposure is not considered
+protected until a fresh `server_query` observation supplies an exchange order ID,
+positive stop, supported trigger reference, validity deadline, and coverage of the
+aggregate position quantity. Protection-before-entry is not assumed atomic. Any
+uncovered fill pauses entries; a later live design must execute the approved bounded
+repair/reduction policy rather than inventing a market order.
 
 ## Ledger contract
 
@@ -73,4 +87,3 @@ Only a new positive high-water increment in cumulative net realized PnL is eligi
 Live entry requires a verified online `ARXUSDT`, `USDT-FUTURES`, linear perpetual instrument for Arcium ARX; a single USDT margin coin; isolated margin; one-way mode; disabled automatic margin top-up; dedicated or verifiably separated strategy equity; no foreign/manual exposure; reconciled positions/orders/protection/ledger; server-side protection capability; fixed leverage while flat; and complete approved live settings.
 
 UTA Advanced/shared multi-asset collateral, crossed margin, hedge mode, unknown/null liquidation semantics, missing tiers, stale account data, or any API-family ambiguity blocks entry. Code never changes account mode, margin mode, or leverage as part of validation.
-

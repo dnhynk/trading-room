@@ -76,8 +76,13 @@ class BitgetUtaV3PublicClient:
         with urlopen(request, timeout=self.timeout_seconds) as response:  # nosec B310: fixed https default, caller may fixture override
             payload = json.loads(response.read().decode("utf-8"))
         received_at = datetime.now(timezone.utc)
-        if not isinstance(payload, dict) or payload.get("code") != "00000":
-            raise RuntimeError(f"Bitget public API rejected {capability}: {payload.get('code')} {payload.get('msg')}")
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Bitget public API returned a non-object for {capability}")
+        if payload.get("code") != "00000":
+            raise RuntimeError(
+                f"Bitget public API rejected {capability}: "
+                f"{payload.get('code')} {payload.get('msg')}"
+            )
         self._validate_identity(payload, params or {}, capability)
         return payload, received_at
 

@@ -25,3 +25,17 @@ index, last, bid, and ask are distinct fields: missing mark or index is stored
 as unavailable rather than substituted from last price. Funding-based strategy
 or profitability claims are unverified without an independent, time-bounded
 evaluation that preserves gaps, duplicates, and collection latency.
+
+The independent isolated-long diagnostic solves the linear equity-versus-maintenance
+equality using actual isolated margin, the observed tier MMR, liquidation close fee,
+and unbooked funding. It never uses `entry × (1 - 1/leverage)`. Approval compares that
+estimate with the exchange position's returned liquidation price and uses the more
+conservative value. Null, zero, negative, stale, or semantically unverified exchange
+values block live entry rather than being labelled “cannot liquidate.” Required stop
+buffer combines volatility, gap stress, and expected slippage.
+
+Funding projections require the currently observed interval and separate base,
+adverse, and extreme assumed rates. They report USDT cost, percent of E0, and percent
+of notional. Displayed/assumed/final-settled rates have separate types; projected
+favorable income is zeroed for risk budgeting, while only a final exchange bill is
+posted to the ledger.
