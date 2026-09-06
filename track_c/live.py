@@ -1,13 +1,15 @@
 """Explicit-mode C4 live owner using the reconciled portfolio and native stops.
 
-structural_sampling collects actual executions without claiming learned alpha.
-learned requires the frozen refined model's support and positive score. No retrain.
+structural_sampling preserves the original 0-tick minimum-lot collection rule.
+execution_sampling uses a registered lower admission floor and the nearest safe
+minimum lot without claiming learned alpha. learned requires frozen model support.
 """
 import argparse
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from decimal import Decimal as D
 import json
+import math
 from pathlib import Path
 import signal
 import time
@@ -24,23 +26,35 @@ from track_c.market.prices import price_floor
 from track_c.settings import load
 from track_c.ops.store import encoded
 
-VERSION='c4-live-v2.2'
-MODES=('structural_sampling','learned')
+VERSION='c4-live-v2.3'
+MODES=('structural_sampling','execution_sampling','learned')
 
 
 class Journal:
     """Preserve the shared execution loop while identifying its C4 decision owner."""
-    def __init__(self,store,model,mode):self.store,self.model,self.mode=store,model,mode
+    def __init__(self,store,model,mode,entry_ticks=None):
+        self.store,self.model,self.mode,self.entry_ticks=store,model,mode,entry_ticks
     def __getattr__(self,name):return getattr(self.store,name)
     def event(self,kind,**fields):
         if kind=='START':
             fields.update(policy='c4',rule=VERSION,model=self.model,c4_live_mode=self.mode,
-                          automatic_retraining=False,shared_execution_code=fields.pop('code',None))
+                          c4_entry_ticks=self.entry_ticks,automatic_retraining=False,
+                          shared_execution_code=fields.pop('code',None))
         return self.store.event(kind,**fields)
+
+
+def admission_state(state,cfg):
+    """Recompute admission from the registered execution policy, without mutating model state."""
+    if not state:return state
+    ref=state.get('reference') or {}
+    common_fall=ref.get('m10') is not None and ref['m10']<=-cfg['common_drop_ticks']
+    eligible=bool(ref.get('ready') and ref.get('dev_ticks',float('-inf'))>=cfg['entry_ticks'] and not common_fall)
+    return dict(state,entry_eligible=eligible)
 
 
 def choose(state,cfg,cash,risk,model,mode):
     if mode not in MODES:raise ValueError('explicit C4 live decision mode required')
+    state=admission_state(state,cfg)
     reason=stage(state,cfg)
     if reason:return dict(accepted=False,reason=reason,candidates=[])
     actions=candidates(state,cfg,float(cash),float(risk))
@@ -49,6 +63,10 @@ def choose(state,cfg,cash,risk,model,mode):
     for a,p in zip(actions,values):
         if mode=='structural_sampling':
             if a['offset']==0 and a['size']=='minimum':ranked.append((0.,a,p))
+        elif mode=='execution_sampling':
+            # The reference lower bound, freshness, depth, cash and risk gates have
+            # already admitted these actions. Sample the closest legal minimum lot.
+            if a['size']=='minimum':ranked.append((a['price'],a,p))
         elif p.get('ready') and p.get('score_krw',0)>0:ranked.append((p['score_krw'],a,p))
     if not ranked:return dict(accepted=False,reason='model_support_or_value' if actions else 'price_size_or_capacity',
                               candidates=[dict(action=a,prediction=p) for a,p in zip(actions,values)])
@@ -57,7 +75,7 @@ def choose(state,cfg,cash,risk,model,mode):
                 candidates=[dict(action=a,prediction=p) for a,p in zip(actions,values)])
 
 
-def plan_for(action,state,model,mode):
+def plan_for(action,state,model,mode,entry_ticks=None):
     text=lambda k:str(D(str(action[k])))
     target=price_floor(state['units'],D(str(state['reference']['lower']))-D(str(state['tick'])))
     return dict(reason=None,qty=text('qty'),entry=text('price'),stop=text('stop'),stop_limit=text('stop_limit'),
@@ -65,7 +83,7 @@ def plan_for(action,state,model,mode):
                 maker='0',taker='0',policy='rule',model=model,take_mode='market',research=True,
                 entry_ttl_s=action['ttl_s'],hold_limit_s=action['hold_s'],horizon_s=action['hold_s'],
                 tick=text('tick'),dev_ticks=action['dev_ticks'],c4_action=action,c4_mode=mode,
-                c4_version=VERSION,decision_t=state['t_ms'])
+                c4_version=VERSION,c4_entry_ticks=entry_ticks,decision_t=state['t_ms'])
 
 
 class LiveBook(Book):
@@ -123,10 +141,16 @@ class LiveRunner(Runtime):
         if cfg['coins']!=['BTC'] or float(cfg['notional_krw'])>20000:raise ValueError('C4 live universe/size mismatch')
         if any(float(cfg[k])!=float(self.c4cfg[k]) for k in ('risk_fraction','daily_loss_fraction','cash_fraction')):
             raise ValueError('C4 live risk must match frozen research constraints')
+        self.entry_cfg=dict(self.c4cfg)
+        if cfg['c4_live_mode']=='execution_sampling':
+            value=cfg.get('c4_sampling_entry_ticks')
+            if type(value) not in (int,float) or not math.isfinite(value) or not 1<=value<self.c4cfg['entry_ticks']:
+                raise ValueError('execution sampling requires an explicit narrower entry threshold')
+            self.entry_cfg['entry_ticks']=float(value)
         self.c4markets={coin:Market(coin,self.c4cfg) for coin in self.c4cfg['coins']}
         self.c4states={};self.c4slot=None;self.c4pending={}
         super().__init__(cfg)
-        self.store=Journal(self.store,self.artifact['digest'],cfg['c4_live_mode'])
+        self.store=Journal(self.store,self.artifact['digest'],cfg['c4_live_mode'],self.entry_cfg['entry_ticks'])
         self.oms=LivePortfolio(cfg,self.client,self.store)
         self.oms.poll_interval=float(cfg.get('reconcile_poll_s',1.))
         self.last_decided=self.oms.state.setdefault('c4_decided_episode',{})
@@ -203,14 +227,15 @@ class LiveRunner(Runtime):
         if (not latest or latest.get('episode_id')!=origin.get('episode_id')
                 or latest['bids']!=state['bids'] or latest['asks']!=state['asks']):return 'market_changed'
         if not 0<=now-latest['book_ms']<=age:return 'book_age'
-        reason=stage(latest,self.c4cfg)
+        latest=admission_state(latest,self.entry_cfg)
+        reason=stage(latest,self.entry_cfg)
         if reason:return reason
         if any(float(v) for v in self.markets[coin].fees.values()):return 'unverified_nonzero_fees'
         reserved=sum(float(o['qty'])*float(o['price']) for o in orders)
         committed=sum(float(o['qty'])*(float(o['price'])-float(plan['stop_limit'])) for o in orders)
         available=min(cash,float(self.cash())+reserved)
         remaining=min(risk,float(self.oms.remaining_risk())+committed)
-        legal=candidates(latest,self.c4cfg,available,remaining)
+        legal=candidates(latest,self.entry_cfg,available,remaining)
         keys=('id','price','qty','stop','stop_limit')
         if not any(all(a[k]==plan['c4_action'][k] for k in keys) for a in legal):return 'action_changed'
         return None
@@ -249,24 +274,25 @@ class LiveRunner(Runtime):
             # Long neighborhood scans must not stop receive-time market ingestion.
             return await asyncio.to_thread(compute)
         try:
-            outcome=await predict('first_choose',choose,s,self.c4cfg,self.cash(),self.oms.remaining_risk(),model,mode)
+            outcome=await predict('first_choose',choose,s,self.entry_cfg,self.cash(),self.oms.remaining_risk(),model,mode)
             if any(float(v) for v in self.markets[coin].fees.values()):outcome.update(accepted=False,reason='unverified_nonzero_fees')
             self.selection[coin]={k:v for k,v in outcome.items() if k not in ('candidates','action')}
             self.store.save(self.oms.state,'C4_DECISION',coin=coin,model=self.artifact['digest'],mode=mode,
-                            market_state=s,decision=outcome,ep=ep,exchange_fills_verified=False)
+                            admission_entry_ticks=self.entry_cfg['entry_ticks'],market_state=s,decision=outcome,
+                            ep=ep,exchange_fills_verified=False)
             if not outcome['accepted']:return
             current=self.current_state(coin)
             if not current or current['bids']!=s['bids'] or current['asks']!=s['asks']:
                 raise EntryExpired('market_changed')
             cash,risk=float(self.cash()),float(self.oms.remaining_risk())
-            preliminary=plan_for(outcome['action'],s,self.artifact['digest'],mode)
+            preliminary=plan_for(outcome['action'],s,self.artifact['digest'],mode,self.entry_cfg['entry_ticks'])
             reason=self.entry_invalid_reason(coin,s,current,preliminary,cash,risk,deadline)
             if reason:raise EntryExpired(reason)
-            fresh=await predict('second_choose',choose,current,self.c4cfg,cash,risk,model,mode)
+            fresh=await predict('second_choose',choose,current,self.entry_cfg,cash,risk,model,mode)
             if (not fresh['accepted'] or
                     any(fresh['action'][k]!=outcome['action'][k] for k in ('id','price','qty','stop','stop_limit'))):
                 raise EntryExpired('action_changed')
-            plan=plan_for(fresh['action'],current,self.artifact['digest'],mode)
+            plan=plan_for(fresh['action'],current,self.artifact['digest'],mode,self.entry_cfg['entry_ticks'])
             plan['c4_prediction']=fresh['prediction']
             plan['c4_probabilities']=await predict('survival',self.models['refined'][0].survival,fresh['action'])
             # All model work is now complete. Do not reset the decision lifetime.
@@ -340,6 +366,7 @@ class LiveRunner(Runtime):
         r.update(policy='c4',model=dict(digest=self.artifact['digest'],state='frozen_'+self.cfg['c4_live_mode']),execution_version=VERSION,
                  c4_live_mode=self.cfg['c4_live_mode'],automatic_retraining=False,
                  c4=dict(version=self.artifact['version'],frozen=True,coins=['BTC'],
+                         admission_entry_ticks=self.entry_cfg['entry_ticks'],minimum_size_only=self.cfg['c4_live_mode']=='execution_sampling',
                          readiness='evaluated_per_candidate',live_calibration='collecting_actual_orders; not_yet_validated'))
         r['rule']['version']=VERSION
         tmp=path.with_suffix('.tmp');tmp.write_text(encoded(r)+'\n');tmp.replace(path)

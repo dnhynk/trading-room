@@ -57,10 +57,11 @@ class DecisionModeTests(unittest.TestCase):
 
     def test_start_identifies_c4_without_rewriting_the_shared_loop(self):
         from unittest.mock import Mock
-        store=Mock();j=Journal(store,'frozen','learned')
+        store=Mock();j=Journal(store,'frozen','learned',2.)
         j.event('START',policy='rule',rule='c3',code='shared')
         body=store.event.call_args.kwargs
         self.assertEqual(body['policy'],'c4');self.assertEqual(body['model'],'frozen')
+        self.assertEqual(body['c4_entry_ticks'],2.)
         self.assertFalse(body['automatic_retraining']);self.assertEqual(body['shared_execution_code'],'shared')
 
     def test_explicit_sampling_and_learned_are_distinct(self):
@@ -70,6 +71,22 @@ class DecisionModeTests(unittest.TestCase):
         self.assertTrue(sampled['accepted']);self.assertFalse(learned['accepted'])
         self.assertEqual(sampled['action']['id'],'0:minimum')
         self.assertFalse(sampled['prediction']['ready'])
+
+    def test_execution_sampling_uses_nearest_safe_minimum_at_one_tick(self):
+        s=state();s['reference'].update(lower=99.5,fair=101.7,upper=103.,dev_ticks=1.2)
+        c=dict(research_cfg(),entry_ticks=1.)
+        sampled=choose(s,c,10000.,100.,UnsupportedModel(),'execution_sampling')
+        self.assertTrue(sampled['accepted'])
+        self.assertEqual(sampled['action']['id'],'-1:minimum')
+        self.assertLess(sampled['action']['price'],s['reference']['lower'])
+        self.assertEqual(sampled['action']['size'],'minimum')
+
+    def test_execution_sampling_keeps_reference_freshness_and_one_tick_floor(self):
+        c=dict(research_cfg(),entry_ticks=1.);model=UnsupportedModel()
+        for change in (dict(entry_fresh=False),dict(reference=dict(state()['reference'],ready=False,reason='reference_disagreement')),
+                       dict(reference=dict(state()['reference'],dev_ticks=.99))):
+            s=state();s.update(change)
+            self.assertFalse(choose(s,c,10000.,100.,model,'execution_sampling')['accepted'])
 
     def test_sampling_does_not_bypass_price_freshness_or_risk(self):
         model=UnsupportedModel()
@@ -110,7 +127,7 @@ class LiveOMSTests(unittest.TestCase):
         from collections import Counter
         from unittest.mock import Mock
         r=LiveRunner.__new__(LiveRunner);r.sample_fairs=lambda:None
-        r.c4cfg=research_cfg();r.c4markets={'BTC':None}
+        r.c4cfg=research_cfg();r.entry_cfg=dict(r.c4cfg);r.c4markets={'BTC':None}
         r.cfg=dict(self.config,c4_live_mode='structural_sampling')
         r.c4pending={'BTC':'decision-ep'};s.update(episode_id='decision-ep',t_ms=time.time_ns()//1000000,book_ms=time.time_ns()//1000000)
         r.c4states={'BTC':s};r.current_state=lambda coin:s;r.last_decided={}
@@ -140,6 +157,17 @@ class LiveOMSTests(unittest.TestCase):
         self.assertEqual(intent['plan']['model'],'c4-test')
         self.assertFalse(intent['plan']['c4_prediction']['ready'])
         self.assertEqual(intent['plan']['c4_mode'],'structural_sampling')
+
+    def test_execution_sampling_submits_nearest_safe_minimum_through_final_guard(self):
+        import asyncio,json
+        s=state();s['reference'].update(lower=99.5,fair=101.7,upper=103.,dev_ticks=1.2)
+        r=self.live_runner(s);r.cfg['c4_live_mode']='execution_sampling';r.entry_cfg=dict(r.c4cfg,entry_ticks=1.)
+        asyncio.run(r.decisions())
+        self.assertEqual(len(self.client.submissions),1)
+        intent=json.loads(self.store.db.execute("select body from events where kind='CAMPAIGN_INTENT'").fetchone()[0])
+        self.assertEqual(intent['plan']['c4_action']['id'],'-1:minimum')
+        self.assertEqual(intent['plan']['c4_entry_ticks'],1.)
+        self.assertEqual(intent['plan']['c4_mode'],'execution_sampling')
 
     def test_expired_second_prediction_survival_and_worker_wait_never_submit(self):
         import asyncio
