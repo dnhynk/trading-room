@@ -310,6 +310,52 @@ class RuntimeCase(unittest.TestCase):
         self.runtime.drive("AAA", desired, fresh=True)
         self.assertEqual(self.runtime.oms.active("AAA", "buy")[0]["cid"], order["cid"])
 
+    def test_resting_buy_survives_missing_feature_decision_with_fresh_book(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        desired = self.desired(buy=(100, 100))
+        self.runtime.drive("AAA", desired, fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+
+        self.runtime.drive("AAA", None, fresh=True)
+
+        self.assertEqual(self.runtime.oms.active("AAA", "buy")[0]["cid"], order["cid"])
+        self.assertNotIn(order["cid"], self.client.cancellations)
+        self.assertEqual(self.runtime.counts["resting_buy_held_without_decision"], 1)
+
+    def test_resting_buy_without_decision_still_cancels_on_stale_book(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        self.runtime.drive("AAA", self.desired(buy=(100, 100)), fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+        self.runtime.markets["AAA"].book_received = 0
+        self.runtime.markets["AAA"].book_exchange = 0
+
+        self.runtime.drive("AAA", None, fresh=False)
+
+        self.assertIn(order["cid"], self.client.cancellations)
+        self.assertEqual(self.runtime.counts["resting_buy_rejected_market_age"], 1)
+
+    def test_explicit_strategy_disarm_still_cancels_resting_buy(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        self.runtime.drive("AAA", self.desired(buy=(100, 100)), fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+
+        self.runtime.drive("AAA", self.desired(), fresh=True)
+
+        self.assertIn(order["cid"], self.client.cancellations)
+
+    def test_missing_feature_decision_cannot_hold_buy_through_pause(self):
+        self.runtime.connected = self.runtime.private_connected = True
+        self.runtime.drive("AAA", self.desired(buy=(100, 100)), fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+        (self.root / "PAUSE").touch()
+
+        self.runtime.drive("AAA", None, fresh=True)
+
+        self.assertIn(order["cid"], self.client.cancellations)
+        self.assertEqual(
+            self.runtime.counts["resting_buy_rejected_repository_pause"], 1,
+        )
+
     def test_empty_initial_feature_is_not_passed_to_strategy(self):
         self.runtime.markets["AAA"].features.f = {}
         self.assertIsNone(self.runtime.desired("AAA", time.time_ns() // 1_000_000))
