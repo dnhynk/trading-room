@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "active_focus": "C",
+  "tracks": {
+    "A": {
+      "status": "paused",
+      "restart_requires_user_instruction": true
+    },
+    "B": {
+      "status": "paused",
+      "restart_requires_user_instruction": true
+    },
+    "C": {
+      "status": "observe",
+      "venue": "coinone",
+      "decision_mode": "structural_sampling",
+      "automatic_retraining": false
+    }
+  }
+}
