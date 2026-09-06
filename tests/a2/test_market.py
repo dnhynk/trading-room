@@ -3,7 +3,10 @@ import unittest
 
 from track_a_2.market.feed import Market
 from track_a_2.market.select import ranked, retain
-from track_a_2.market.units import price_ceil, price_down, price_floor, stop_prices
+from track_a_2.market.units import (
+    price_ceil, price_down, price_floor, stop_prices,
+    stop_prices_for_limit_floor,
+)
 from track_a_2.settings import load
 from track_a_2.strategy.sizing import size
 
@@ -43,6 +46,12 @@ class UnitsTests(unittest.TestCase):
         self.assertEqual(trigger, D("100.0"))
         self.assertLess(limit, trigger)
         self.assertEqual(limit, D("99.90"))
+
+    def test_known_stop_limit_buffer_is_inside_campaign_budget(self):
+        trigger, limit = stop_prices_for_limit_floor(UNITS, "90", 2, 10)
+        self.assertGreater(trigger, limit)
+        self.assertGreaterEqual(limit, D("90"))
+        self.assertGreaterEqual(D(100) * (limit - D(100)), D("-1000"))
 
 
 class SelectionTests(unittest.TestCase):

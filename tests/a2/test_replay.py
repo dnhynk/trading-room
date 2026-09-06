@@ -1,10 +1,15 @@
 import gzip
 import hashlib
+import io
 import json
+from decimal import Decimal as D
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
+from track_a_2.replay.__main__ import main as replay_main, signed_decimal
 from track_a_2.replay.loader import Observation
 from track_a_2.replay.engine import run_observation
 from track_a_2.replay.sim import ReplayClock, SimClient
@@ -84,8 +89,24 @@ class ObservationTests(unittest.TestCase):
             fee_assumption=dict(maker="0", taker="0", source="test"),
         )
         messages = [
-            dict(received_ms=1000, event="CONNECTED", fields={}),
-            dict(received_ms=1001, raw=json.dumps(dict(response_type="PING"))),
+            dict(received_ms=1000, event="SOCKET_OPEN", fields={}),
+            dict(received_ms=1001, raw=json.dumps(dict(response_type="CONNECTED", data={}))),
+            dict(received_ms=1002, raw=json.dumps(dict(
+                response_type="SUBSCRIBED", channel="ORDERBOOK",
+                data={"target_currency": "AAA"},
+            ))),
+            dict(received_ms=1003, raw=json.dumps(dict(
+                response_type="SUBSCRIBED", channel="TRADE",
+                data={"target_currency": "AAA"},
+            ))),
+            dict(received_ms=1004, raw=json.dumps(dict(
+                response_type="DATA", channel="ORDERBOOK",
+                data={"target_currency": "AAA"},
+            ))),
+            dict(received_ms=1005, raw=json.dumps(dict(
+                response_type="DATA", channel="TRADE",
+                data={"target_currency": "AAA"},
+            ))),
         ]
         with gzip.open(path / "public.jsonl.gz", "wt", encoding="utf-8") as target:
             for row in messages:
@@ -97,11 +118,11 @@ class ObservationTests(unittest.TestCase):
         )
         (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         observation = Observation(path)
-        self.assertEqual(list(observation.rows()), [(1001, {"response_type": "PING"})])
-        self.assertEqual(
-            observation.connection_quality(),
-            {"connected": 1, "disconnected": 0, "contiguous": True},
-        )
+        self.assertEqual(len(list(observation.rows())), 5)
+        quality = observation.connection_quality()
+        self.assertTrue(quality["contiguous"])
+        self.assertTrue(quality["coverage_complete"])
+        self.assertEqual(quality["data_streams"], 2)
         self.assertEqual(len(observation.data_digest()), 64)
         (path / "seed.json").write_bytes(seed_raw + b" ")
         with self.assertRaisesRegex(ValueError, "identity"):
@@ -129,6 +150,62 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(result["fills"], 0)
         self.assertEqual(result["net_pnl_krw"], "0")
         self.assertIsNone(result["halt"])
+
+    def test_negative_pnl_is_preserved_as_research_and_rejected_approval(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        parent = Path(folder.name)
+        observation_path = parent / "observation"
+        observation_path.mkdir()
+        observation_files(observation_path, [])
+        root = parent / "trading-room"
+        config_path = root / "track_a_2" / "config.json"
+        config_path.parent.mkdir(parents=True)
+        config = {**load(), "universe": ["AAA"], "basket_size": 1, "max_open_books": 1}
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        digest = Observation(observation_path).data_digest()
+
+        def runner_factory():
+            values = iter(("-1", "5", "-2"))
+
+            def runner(*_args, **_kwargs):
+                return dict(
+                    net_pnl_krw=next(values), campaigns=1, halt=None,
+                    data_digest=digest,
+                )
+
+            return runner
+
+        with patch(
+            "track_a_2.replay.__main__.evaluation_source_digest",
+            return_value="a" * 64,
+        ), redirect_stdout(io.StringIO()):
+            replay_main([
+                str(observation_path), "--config", str(config_path),
+                "--approval-id", "a2-eval-negative-research",
+            ], root=root, runner=runner_factory())
+        research = json.loads((
+            parent / "trading-room-state" / "track-a-2" / "evaluations"
+            / "a2-eval-negative-research.json"
+        ).read_text())
+        self.assertEqual(research["result"], "RESEARCH_ONLY")
+        self.assertEqual(research["metrics"]["main"]["net_pnl_krw"], "-1")
+
+        with patch(
+            "track_a_2.replay.__main__.evaluation_source_digest",
+            return_value="a" * 64,
+        ), redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+            replay_main([
+                str(observation_path), "--config", str(config_path),
+                "--approval-id", "a2-eval-negative-rejected", "--approve",
+            ], root=root, runner=runner_factory())
+        rejected = json.loads((
+            parent / "trading-room-state" / "track-a-2" / "evaluations"
+            / "a2-eval-negative-rejected.json"
+        ).read_text())
+        self.assertEqual(rejected["result"], "REJECTED")
+        self.assertIn("main_not_profitable", rejected["rejection_reasons"])
+        self.assertEqual(signed_decimal("-0.01"), D("-0.01"))
 
 
 class SimulationTests(unittest.TestCase):

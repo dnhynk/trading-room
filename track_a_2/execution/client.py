@@ -29,8 +29,19 @@ def own_id(value):
     return value
 
 
-def read_credentials(path, environ=None):
-    """Read only A-2 credential names; Track C keys are never a fallback."""
+def read_credentials(path, environ=None, *, profile="a2"):
+    """Read the explicitly selected credential namespace without fallback.
+
+    A shared Coinone profile is accepted only when the validated operational
+    configuration selects it. Merely having Track C names in the environment
+    never changes the dedicated A-2 default.
+    """
+    if profile == "coinone_default":
+        return Credentials.read(path, environ=environ, profile="default")
+    if profile == "coinone_aws":
+        return Credentials.read(path, environ=environ, profile="aws")
+    if profile != "a2":
+        raise CoinoneError("invalid A-2 credential profile")
     env = os.environ if environ is None else environ
     values = {}
     try:

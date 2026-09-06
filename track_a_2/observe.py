@@ -27,6 +27,12 @@ from track_c.execution.http_pool import HTTPSPool
 from track_c.execution.rate_limit import Transport
 
 
+PING_INTERVAL_S = 60.0
+PONG_TIMEOUT_S = 10.0
+FIRST_DATA_TIMEOUT_S = 60.0
+MAX_DATA_GAP_MS = 120_000
+
+
 def coins(values):
     result = [symbol(str(value).upper()) for value in values]
     if not result or len(result) > 20 or len(set(result)) != len(result):
@@ -81,9 +87,9 @@ def prepare_observation(config, selected, client, directory, *, now_ms=None, ses
     seed_path = folder / "seed.json"
     seed_path.write_bytes(seed_raw)
     manifest = dict(
-        schema=1,
+        schema=2,
         track="A-2",
-        format="coinone-public-v1",
+        format="coinone-public-v2",
         session=session,
         created_ms=now_ms,
         coins=selected,
@@ -95,6 +101,13 @@ def prepare_observation(config, selected, client, directory, *, now_ms=None, ses
             maker=str(config["max_fee_rate"]),
             taker=str(config["max_fee_rate"]),
             source="configured_ceiling_without_credentials",
+        ),
+        quality_policy=dict(
+            channels=["ORDERBOOK", "TRADE"],
+            ping_interval_s=PING_INTERVAL_S,
+            pong_timeout_s=PONG_TIMEOUT_S,
+            first_data_timeout_s=FIRST_DATA_TIMEOUT_S,
+            max_data_gap_ms=MAX_DATA_GAP_MS,
         ),
     )
     (folder / "manifest.json").write_bytes(_json_bytes(manifest))
@@ -110,10 +123,12 @@ class Capture:
         self.file = gzip.open(self.path, "at", encoding="utf-8")
         self.count = 0
         self.closed = False
+        self.last_received_ms = 0
 
     def write(self, *, received_ms=None, raw=None, event=None, fields=None):
         received_ms = time.time_ns() // 1_000_000 if received_ms is None else int(received_ms)
         row = dict(received_ms=received_ms)
+        self.last_received_ms = max(self.last_received_ms, received_ms)
         if raw is not None:
             row["raw"] = raw
         else:
@@ -135,7 +150,7 @@ class Capture:
         manifest.update(
             completed_ms=max(
                 time.time_ns() // 1_000_000,
-                int(manifest.get("created_ms") or 0),
+                int(manifest.get("created_ms") or 0), self.last_received_ms,
             ),
             message_count=self.count,
             public_sha256=_file_sha256(self.path),
@@ -145,15 +160,20 @@ class Capture:
         temporary.replace(manifest_path)
 
 
-async def record_public(capture, seconds=None):
-    from websockets.asyncio.client import connect
+async def record_public(
+    capture, seconds=None, *, connector=None,
+    ping_interval_s=PING_INTERVAL_S, pong_timeout_s=PONG_TIMEOUT_S,
+    first_data_timeout_s=FIRST_DATA_TIMEOUT_S,
+):
+    if connector is None:
+        from websockets.asyncio.client import connect as connector
 
     started = time.monotonic()
     backoff = 1
     while seconds is None or time.monotonic() - started < seconds:
         try:
             capture.write(event="CONNECTING")
-            async with connect(
+            async with connector(
                 "wss://stream.coinone.co.kr",
                 open_timeout=10,
                 ping_interval=15,
@@ -161,7 +181,12 @@ async def record_public(capture, seconds=None):
                 close_timeout=3,
                 max_queue=4096,
             ) as websocket:
-                capture.write(event="CONNECTED")
+                capture.write(event="SOCKET_OPEN")
+                expected = {
+                    (coin, channel)
+                    for coin in capture.coins
+                    for channel in ("ORDERBOOK", "TRADE")
+                }
                 for coin in capture.coins:
                     for channel in ("ORDERBOOK", "TRADE"):
                         await websocket.send(encoded(dict(
@@ -169,15 +194,60 @@ async def record_public(capture, seconds=None):
                             channel=channel,
                             topic=dict(quote_currency="KRW", target_currency=coin),
                         )))
+                subscribed = set()
+                seen_data = set()
+                opened = time.monotonic()
+                last_ping = opened
+                pong_deadline = None
                 while seconds is None or time.monotonic() - started < seconds:
-                    timeout = 1.0
+                    now = time.monotonic()
+                    if pong_deadline is not None and now >= pong_deadline:
+                        raise TimeoutError("Coinone JSON PONG timeout")
+                    if pong_deadline is None and now - last_ping >= ping_interval_s:
+                        await websocket.send('{"request_type":"PING"}')
+                        capture.write(event="PING_SENT")
+                        last_ping = now
+                        pong_deadline = now + pong_timeout_s
+                    if now - opened >= first_data_timeout_s and seen_data != expected:
+                        raise CoinoneError("public initial data coverage unavailable")
+                    deadlines = [now + 1.0, last_ping + ping_interval_s]
+                    if pong_deadline is not None:
+                        deadlines.append(pong_deadline)
+                    if seen_data != expected:
+                        deadlines.append(opened + first_data_timeout_s)
                     if seconds is not None:
-                        timeout = min(timeout, max(0.001, seconds - (time.monotonic() - started)))
+                        deadlines.append(started + seconds)
+                    timeout = max(0.001, min(deadlines) - now)
                     try:
                         raw = await asyncio.wait_for(websocket.recv(), timeout)
                     except asyncio.TimeoutError:
                         continue
+                    if isinstance(raw, bytes):
+                        raw = raw.decode("utf-8")
                     capture.write(raw=raw)
+                    message = json.loads(raw)
+                    if not isinstance(message, dict):
+                        raise ValueError("invalid public websocket message")
+                    kind = message.get("response_type")
+                    if kind == "ERROR":
+                        raise CoinoneError("public subscription rejected")
+                    if kind == "PONG":
+                        pong_deadline = None
+                        continue
+                    data = message.get("data") or {}
+                    pair = (data.get("target_currency"), message.get("channel"))
+                    if kind == "SUBSCRIBED" and pair in expected:
+                        subscribed.add(pair)
+                    elif kind == "DATA" and pair in expected:
+                        seen_data.add(pair)
+                capture.write(
+                    event="COMPLETED",
+                    fields={
+                        "subscriptions": len(subscribed),
+                        "data_streams": len(seen_data),
+                        "expected_streams": len(expected),
+                    },
+                )
                 return
         except OSError as exc:
             capture.write(event="DISCONNECTED", fields={"error": type(exc).__name__})

@@ -33,9 +33,9 @@ class Observation:
         completed = self.manifest.get("completed_ms")
         message_count = self.manifest.get("message_count")
         if (
-            self.manifest.get("schema") != 1
+            self.manifest.get("schema") not in (1, 2)
             or self.manifest.get("track") != "A-2"
-            or self.manifest.get("format") != "coinone-public-v1"
+            or self.manifest.get("format") not in ("coinone-public-v1", "coinone-public-v2")
             or self.seed.get("schema") != 1
             or not isinstance(coins, list)
             or not coins
@@ -95,13 +95,111 @@ class Observation:
             yield int(envelope["received_ms"]), message
 
     def connection_quality(self):
-        events = [row.get("event") for row in self.envelopes() if "event" in row]
-        connected = sum(event == "CONNECTED" for event in events)
+        envelopes = list(self.envelopes())
+        events = [row.get("event") for row in envelopes if "event" in row]
+        socket_open = sum(event in ("SOCKET_OPEN", "CONNECTED") for event in events)
         disconnected = sum(event == "DISCONNECTED" for event in events)
+        ping_sent = sum(event == "PING_SENT" for event in events)
+        server_connected = 0
+        pongs = 0
+        errors = 0
+        subscribed = set()
+        received = {}
+        channels = tuple(
+            (self.manifest.get("quality_policy") or {}).get("channels")
+            or ("ORDERBOOK", "TRADE")
+        )
+        expected = {
+            (coin, channel) for coin in self.manifest["coins"] for channel in channels
+        }
+        for envelope in envelopes:
+            raw = envelope.get("raw")
+            if raw is None:
+                continue
+            try:
+                message = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                errors += 1
+                continue
+            if not isinstance(message, dict):
+                errors += 1
+                continue
+            kind = message.get("response_type")
+            if kind == "CONNECTED":
+                server_connected += 1
+            elif kind == "PONG":
+                pongs += 1
+            elif kind == "ERROR":
+                errors += 1
+            data = message.get("data") or {}
+            pair = (data.get("target_currency"), message.get("channel"))
+            if pair not in expected:
+                continue
+            if kind == "SUBSCRIBED":
+                subscribed.add(pair)
+            elif kind == "DATA":
+                received.setdefault(pair, []).append(int(envelope["received_ms"]))
+        start = min(
+            (
+                int(row["received_ms"])
+                for row in envelopes
+                if row.get("event") in ("SOCKET_OPEN", "CONNECTED")
+            ),
+            default=self.seed["captured_ms"],
+        )
+        completed = int(self.manifest["completed_ms"])
+        max_allowed = int(
+            (self.manifest.get("quality_policy") or {}).get("max_data_gap_ms")
+            or 120_000
+        )
+        gap_by_stream = {}
+        for pair in expected:
+            times = sorted(received.get(pair, ()))
+            if not times:
+                gap_by_stream[":".join(pair)] = None
+                continue
+            gaps = [max(0, times[0] - start), max(0, completed - times[-1])]
+            gaps.extend(max(0, right - left) for left, right in zip(times, times[1:]))
+            gap_by_stream[":".join(pair)] = max(gaps)
+        coverage_complete = set(received) == expected
+        subscriptions_complete = subscribed == expected
+        gaps_ok = coverage_complete and all(
+            gap is not None and gap <= max_allowed for gap in gap_by_stream.values()
+        )
+        duration_ms = max(0, completed - start)
+        ping_interval_ms = int(
+            float((self.manifest.get("quality_policy") or {}).get("ping_interval_s") or 60)
+            * 1000
+        )
+        heartbeat_ok = duration_ms <= ping_interval_ms or (ping_sent > 0 and pongs >= ping_sent)
+        contiguous = bool(
+            socket_open == 1
+            and server_connected == 1
+            and disconnected == 0
+            and errors == 0
+            and subscriptions_complete
+            and coverage_complete
+            and gaps_ok
+            and heartbeat_ok
+        )
         return dict(
-            connected=connected,
+            socket_open=socket_open,
+            server_connected=server_connected,
             disconnected=disconnected,
-            contiguous=connected == 1 and disconnected == 0,
+            errors=errors,
+            subscriptions=len(subscribed),
+            expected_streams=len(expected),
+            data_streams=len(received),
+            data_messages=sum(len(rows) for rows in received.values()),
+            coverage_complete=coverage_complete,
+            subscriptions_complete=subscriptions_complete,
+            max_data_gap_ms=gap_by_stream,
+            gap_limit_ms=max_allowed,
+            gaps_ok=gaps_ok,
+            ping_sent=ping_sent,
+            pongs=pongs,
+            heartbeat_ok=heartbeat_ok,
+            contiguous=contiguous,
         )
 
     def data_digest(self):
