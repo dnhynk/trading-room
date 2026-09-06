@@ -8,4 +8,3 @@ The `.yaml` files in this directory use JSON syntax, which is a valid YAML subse
 - `live.example.yaml` leaves capital, leverage, loss, funding, holding, liquidation-buffer, emergency-exit, end date, timezone, API family, and approval fields null. Validation must list every missing value and make no exchange mutation.
 
 Increasing budget/leverage/risk, loosening protection, ending cooldown early, or increasing profit reuse is a risk-increasing change. A proposal must record the before/after worst loss, configuration hashes, rationale, a review delay (48 hours is only a comparison default), and explicit approval. Risk reductions may be applied immediately in a later authorized live implementation.
-

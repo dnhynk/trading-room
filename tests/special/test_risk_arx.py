@@ -10,4 +10,3 @@ class RiskTests(unittest.TestCase):
   b=CampaignBook("x",Decimal("100"),(),(),Decimal("0"),Decimal("0"),Decimal("0"),Decimal("0"),Decimal("0"))
   r=RiskEngine().assess(b,EntryCandidate(Decimal("5"),Decimal("10"),Decimal("8"),Decimal("10")),limits)
   self.assertEqual(r.approved_quantity,Decimal("2"))
-

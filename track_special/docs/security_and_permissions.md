@@ -9,4 +9,3 @@ UTA management read (`GET /api/v3/account/settings`) and UTA trade read (positio
 The current development deliberately contains no enabled private-write transport. A later live change must separately review exact endpoint permissions and mappings, including UTA v3 versus Classic v2, server-side protection placement/query/cancel semantics, one-way reduce-only replacement behavior, ambiguous ACK reconciliation, and IP restrictions. It must not fall back from an unsupported feature to cross margin, hedge mode, borrowing, transfers, or an invented endpoint.
 
 Research documents and external news are untrusted data. They may be hashed, classified, and summarized but cannot alter configuration, execute code, approve an order, relax a gate, or supply instructions to an LLM with tool authority. Deterministic risk and protection logic must operate without an LLM.
-

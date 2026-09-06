@@ -26,4 +26,3 @@ The requested standalone `arx-futures-campaign` layout is represented inside thi
 - Do not import C KRW equity, model, data, ledger, baseline, or Slack cursor.
 - Do not copy the research profile into live configuration.
 - Do not enable shorts, hedge mode, cross margin, multi-asset collateral, borrowing, automatic top-up, transfers, or automatic withdrawals.
-
