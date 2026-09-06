@@ -227,6 +227,89 @@ class RuntimeCase(unittest.TestCase):
         self.runtime.drive("AAA", self.desired(trim=trim, trigger=90, limit=89), fresh=True)
         self.assertIn(protect["cid"], self.client.cancellations)
 
+    def test_deferred_profit_after_protection_cancel_reprotects_inventory(self):
+        self.buy_and_fill()
+        old = self.protect()
+        trim = dict(
+            price=100, qty=50, requested_scope="taker", lot=None, tag=None,
+            purpose="profit", ref=100, gate_pct=0.15,
+        )
+        self.runtime.markets["AAA"].book = dict(
+            bids=[{"price": "100.20", "qty": "1000"}],
+            asks=[{"price": "100.21", "qty": "1000"}],
+        )
+        self.runtime.drive("AAA", self.desired(trim=trim, trigger=90, limit=89), fresh=True)
+        self.assertIn(old["cid"], self.client.cancellations)
+        self.runtime.oms.sync_account(
+            self.client.balances(), self.client.active_orders(), {"AAA": "0.1"}
+        )
+        self.runtime.markets["AAA"].book = dict(
+            bids=[{"price": "100.10", "qty": "1000"}],
+            asks=[{"price": "100.22", "qty": "1000"}],
+        )
+        self.runtime.drive("AAA", self.desired(trim=trim, trigger=90, limit=89), fresh=True)
+        protects = self.runtime.oms.active("AAA", "protect")
+        self.assertEqual(len(protects), 1)
+        self.assertNotEqual(protects[0]["cid"], old["cid"])
+        self.assertEqual(self.runtime.oms.book("AAA")["inventory_phase"], "reprotecting")
+
+    def test_undersized_partial_trim_remainder_returns_to_full_protection(self):
+        self.buy_and_fill()
+        self.protect()
+        trim = dict(
+            price=100, qty=50, requested_scope="taker", lot=None, tag=None,
+            purpose="profit", ref=100, gate_pct=0.1,
+        )
+        self.runtime.markets["AAA"].book = dict(
+            bids=[{"price": "101", "qty": "1000"}],
+            asks=[{"price": "101.01", "qty": "1000"}],
+        )
+        desired = self.desired(trim=trim, trigger=90, limit=89)
+        self.runtime.drive("AAA", desired, fresh=True)
+        self.runtime.oms.sync_account(
+            self.client.balances(), self.client.active_orders(), {"AAA": "0.1"}
+        )
+        self.runtime.drive("AAA", desired, fresh=True)
+        sale = self.runtime.oms.active("AAA", "trim")[0]
+        self.client.fill(sale["cid"], "40", "101", status="PARTIALLY_FILLED")
+        self.runtime.reconcile(force=True)
+        self.client.balance_rows = [
+            dict(currency="KRW", available="94040", limit="0"),
+            dict(currency="AAA", available="60", limit="0"),
+        ]
+        self.runtime.oms.sync_account(
+            self.client.balances(), self.client.active_orders(), {"AAA": "0.1"}
+        )
+        small = dict(trim, qty=10)
+        small_desired = self.desired(trim=small, trigger=90, limit=89)
+        self.runtime.drive("AAA", small_desired, fresh=True)
+        self.assertFalse(self.runtime.oms.active("AAA", "trim"))
+        self.runtime.oms.sync_account(
+            self.client.balances(), self.client.active_orders(), {"AAA": "0.1"}
+        )
+        self.runtime.drive("AAA", small_desired, fresh=True)
+        protect = self.runtime.oms.active("AAA", "protect")[0]
+        self.assertEqual(protect["qty"], "60")
+
+    def test_resting_buy_does_not_cancel_itself_at_portfolio_ceiling(self):
+        market = self.runtime.markets["AAA"]
+        market.book = dict(
+            bids=[{"price": "100", "qty": "10000"}],
+            asks=[{"price": "100.01", "qty": "10000"}],
+        )
+        self.runtime.oms.set_strategy_params("AAA", dict(
+            max_notional=60000, qstep=0.1, unit_qty=550,
+            campaign_loss_budget_krw=500,
+        ))
+        self.buy_and_fill(550)
+        self.protect()
+        self.runtime.connected = self.runtime.private_connected = True
+        desired = self.desired(buy=(100, 50), trigger=90, limit=89)
+        self.runtime.drive("AAA", desired, fresh=True)
+        order = self.runtime.oms.active("AAA", "buy")[0]
+        self.runtime.drive("AAA", desired, fresh=True)
+        self.assertEqual(self.runtime.oms.active("AAA", "buy")[0]["cid"], order["cid"])
+
     def test_empty_initial_feature_is_not_passed_to_strategy(self):
         self.runtime.markets["AAA"].features.f = {}
         self.assertIsNone(self.runtime.desired("AAA", time.time_ns() // 1_000_000))
@@ -330,6 +413,31 @@ class RuntimeCase(unittest.TestCase):
             await asyncio.to_thread(guard)
             (self.root / "PAUSE").touch()
             with self.assertRaisesRegex(EntryExpired, "repository_pause"):
+                await asyncio.to_thread(guard)
+        asyncio.run(exercise())
+
+    def test_entry_guard_rechecks_current_two_sided_depth_and_quantity(self):
+        async def exercise():
+            self.runtime.submission_guard = Runtime.submission_guard.__get__(self.runtime, Runtime)
+            self.runtime.loop = asyncio.get_running_loop()
+            self.runtime.connected = self.runtime.private_connected = self.runtime.storage_ok = True
+            order = dict(
+                cid="ta2-buy-depth1234", coin="AAA", role="buy", side="BUY", type="LIMIT",
+                qty="100", price="100", fee_rate="0", status="INTENT", filled="0",
+                gross="0", fee="0", created=self.clock(),
+            )
+            self.runtime.oms.state["orders"][order["cid"]] = order
+            self.runtime.markets["AAA"].book = dict(
+                bids=[{"price": "100", "qty": "1"}],
+                asks=[{"price": "100.01", "qty": "1"}],
+            )
+            now = time.time_ns() // 1_000_000
+            self.runtime.markets["AAA"].book_received = now
+            self.runtime.markets["AAA"].book_exchange = now
+            guard = self.runtime.submission_guard(
+                "AAA", "buy", "BUY", "100", fee_rate="0", price="100",
+            )
+            with self.assertRaisesRegex(EntryExpired, "entry_size_changed"):
                 await asyncio.to_thread(guard)
         asyncio.run(exercise())
 

@@ -29,7 +29,7 @@ def approved_config(root, config):
     relative = f"evaluations/{approval}.json"
     configured = dict(config, evaluation_manifest=relative)
     manifest = dict(
-        schema=1,
+        schema=2,
         track="A-2",
         approval_id=approval,
         execution_version=EXECUTION_VERSION,
@@ -37,7 +37,7 @@ def approved_config(root, config):
         source_digest=evaluation_source_digest(root),
         universe=configured["universe"],
         data_digest="a" * 64,
-        result="pass",
+        result="APPROVED",
         protocol=dict(
             holdout=True, feed_contiguous=True, stress_passed=True,
             ladder_beats_one_unit=True,

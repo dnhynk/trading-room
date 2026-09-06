@@ -125,8 +125,8 @@ def run_observation(
         runtime = Runtime(
             replay_config, config_path=config_path, root=root,
             client=client, store=store, clock=clock,
+            operational_checks=False,
         )
-        runtime.submission_guard = lambda *args, **kwargs: (lambda: None)
         runtime.connected = runtime.private_connected = runtime.storage_ok = True
         runtime.markets = {}
         for coin in plan["watch"]:

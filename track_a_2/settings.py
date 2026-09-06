@@ -14,7 +14,11 @@ CONFIG = Path(__file__).with_name("config.json")
 TOP_FIELDS = {
     "version", "track", "status", "venue", "market", "quote_currency", "sides",
     "mode", "execution_enabled", "portfolio_isolation_required",
-    "portfolio_isolation_confirmed", "capital_mode", "live_approval_id",
+    "portfolio_isolation_confirmed", "shared_portfolio_approved",
+    "credential_profile", "capital_mode", "capital_allocation_krw",
+    "cash_reserve_krw", "shared_reserved_symbols",
+    "repository_ab_controls_acknowledged", "owner_unvalidated_live_approved",
+    "live_approval_id",
     "evaluation_manifest", "evaluation_sha256",
     "expected_egress_ip", "env_path", "state_directory", "strategy_contract",
     "selection_contract", "universe", "basket_size", "max_open_books",
@@ -35,7 +39,9 @@ DYNAMIC_STRATEGY = {
     "daily_loss_limit", "hunt",
 }
 ALLOWED_STRATEGY = set(STRAT) - DYNAMIC_STRATEGY
-APPROVAL = re.compile(r"a2-eval-[a-z0-9_.-]{4,80}")
+EVALUATION_APPROVAL = re.compile(r"a2-eval-[a-z0-9_.-]{4,80}")
+OWNER_APPROVAL = re.compile(r"a2-owner-[a-z0-9_.-]{4,80}")
+APPROVAL = re.compile(r"a2-(?:eval|owner)-[a-z0-9_.-]{4,80}")
 
 
 def _number(config, name, *, low=0, high=None, positive=False, integer=False):
@@ -65,17 +71,21 @@ def _validate(config, *, root=ROOT):
     identity = (
         config["version"], config["track"], config["venue"], config["market"],
         config["quote_currency"], config["sides"], config["capital_mode"],
-        config["portfolio_isolation_required"], config["strategy_contract"],
+        config["strategy_contract"],
         config["selection_contract"],
     )
     if identity != (
-        2, "A-2", "coinone", "spot", "KRW", ["long"], "portfolio_equity", True,
+        3, "A-2", "coinone", "spot", "KRW", ["long"], "portfolio_equity",
         "track_a_long_only_rotation_v1", "coinone_krw_native_v1",
     ):
         raise ValueError("Track A-2 identity or long-only safety contract changed")
     if config["status"] not in ("paused", "active") or config["mode"] not in ("observe", "live"):
         raise ValueError("invalid Track A-2 operating mode")
-    for name in ("execution_enabled", "portfolio_isolation_confirmed"):
+    for name in (
+        "execution_enabled", "portfolio_isolation_required",
+        "portfolio_isolation_confirmed", "shared_portfolio_approved",
+        "repository_ab_controls_acknowledged", "owner_unvalidated_live_approved",
+    ):
         if type(config[name]) is not bool:
             raise ValueError(f"invalid Track A-2 boolean field: {name}")
     if config["execution_enabled"] != (config["mode"] == "live"):
@@ -83,6 +93,12 @@ def _validate(config, *, root=ROOT):
     approval = config["live_approval_id"]
     if approval is not None and (not isinstance(approval, str) or not APPROVAL.fullmatch(approval)):
         raise ValueError("invalid Track A-2 approval identifier")
+    owner_override = config["owner_unvalidated_live_approved"]
+    if owner_override:
+        if not isinstance(approval, str) or not OWNER_APPROVAL.fullmatch(approval):
+            raise ValueError("Track A-2 owner override requires an owner approval identifier")
+    elif isinstance(approval, str) and OWNER_APPROVAL.fullmatch(approval):
+        raise ValueError("Track A-2 owner approval requires the explicit override flag")
     manifest = config["evaluation_manifest"]
     manifest_hash = config["evaluation_sha256"]
     if manifest is not None and (
@@ -99,6 +115,8 @@ def _validate(config, *, root=ROOT):
         raise ValueError("Track A-2 evaluation manifest and digest must be paired")
     if approval is not None and manifest is not None and manifest != f"evaluations/{approval}.json":
         raise ValueError("Track A-2 approval and evaluation manifest identity differ")
+    if owner_override and (manifest is not None or manifest_hash is not None):
+        raise ValueError("Track A-2 owner override cannot masquerade as an evaluation")
     address = config["expected_egress_ip"]
     if address is not None:
         try:
@@ -109,6 +127,8 @@ def _validate(config, *, root=ROOT):
             raise ValueError("invalid Track A-2 egress address")
     if not isinstance(config["env_path"], str) or not config["env_path"]:
         raise ValueError("invalid Track A-2 credential path")
+    if config["credential_profile"] not in ("a2", "coinone_default", "coinone_aws"):
+        raise ValueError("invalid Track A-2 credential profile")
     state = resolved_state_directory(config, root)
     approved_parent = (Path(root).resolve().parent / "trading-room-state").resolve()
     if state != approved_parent / "track-a-2":
@@ -121,6 +141,32 @@ def _validate(config, *, root=ROOT):
         or len(set(universe)) != len(universe)
     ):
         raise ValueError("invalid Track A-2 universe")
+    reserved = config["shared_reserved_symbols"]
+    if (
+        not isinstance(reserved, list) or len(reserved) > 20
+        or any(not isinstance(coin, str) or not re.fullmatch(r"[A-Z0-9]{1,20}", coin) for coin in reserved)
+        or len(set(reserved)) != len(reserved)
+    ):
+        raise ValueError("invalid Track A-2 shared reserved symbols")
+    if set(universe) & set(reserved):
+        raise ValueError("Track A-2 universe overlaps a shared reserved symbol")
+    isolated = config["portfolio_isolation_required"]
+    if isolated:
+        if config["shared_portfolio_approved"] or config["credential_profile"] != "a2":
+            raise ValueError("Track A-2 isolated mode cannot use shared account credentials")
+        if config["capital_allocation_krw"] is not None or config["cash_reserve_krw"] != 0 or reserved:
+            raise ValueError("Track A-2 isolated mode cannot declare shared capital controls")
+    else:
+        if not config["shared_portfolio_approved"]:
+            raise ValueError("Track A-2 shared portfolio requires explicit owner approval")
+        if config["portfolio_isolation_confirmed"]:
+            raise ValueError("Track A-2 shared portfolio cannot claim isolation")
+        if config["credential_profile"] == "a2":
+            raise ValueError("Track A-2 shared portfolio requires an explicit shared credential profile")
+        if not reserved:
+            raise ValueError("Track A-2 shared portfolio requires reserved symbols")
+        _number(config, "capital_allocation_krw", positive=True, high=10_000_000_000)
+        _number(config, "cash_reserve_krw", low=0, high=10_000_000_000)
     _number(config, "basket_size", positive=True, high=20, integer=True)
     _number(config, "max_open_books", positive=True, high=config["basket_size"], integer=True)
     for name in (
@@ -194,7 +240,16 @@ def _validate(config, *, root=ROOT):
         or strategy.get("cap_per_unit") != 0
     ):
         raise ValueError("Track A-2 Coinone execution requires immediate trims and one campaign cap")
+    if owner_override and strategy["max_units"] != 1:
+        raise ValueError("Track A-2 unvalidated owner override is restricted to one unit")
     return config
+
+
+def account_access_approved(config):
+    """Whether the configured isolated or explicitly shared account mode is approved."""
+    if config["portfolio_isolation_required"]:
+        return config["portfolio_isolation_confirmed"] is True
+    return config["shared_portfolio_approved"] is True
 
 
 def load(path=CONFIG, *, root=ROOT):

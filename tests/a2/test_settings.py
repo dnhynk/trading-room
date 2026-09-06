@@ -25,7 +25,7 @@ class TrackA2SettingsTests(unittest.TestCase):
 
     def test_repository_configuration_is_paused_coinone_spot_long_only(self):
         config = self.base
-        self.assertEqual(config["version"], 2)
+        self.assertEqual(config["version"], 3)
         self.assertEqual((config["venue"], config["market"], config["quote_currency"]),
                          ("coinone", "spot", "KRW"))
         self.assertEqual(config["sides"], ["long"])
@@ -33,6 +33,24 @@ class TrackA2SettingsTests(unittest.TestCase):
         self.assertFalse(config["execution_enabled"])
         self.assertFalse(config["portfolio_isolation_confirmed"])
         self.assertEqual(config["universe"], [])
+
+    def test_shared_portfolio_requires_explicit_budget_credentials_and_reserved_symbols(self):
+        shared = {
+            **self.base,
+            "portfolio_isolation_required": False,
+            "portfolio_isolation_confirmed": False,
+            "shared_portfolio_approved": True,
+            "credential_profile": "coinone_default",
+            "capital_allocation_krw": 300000,
+            "cash_reserve_krw": 20000,
+            "shared_reserved_symbols": ["BTC"],
+            "universe": ["ETH"],
+        }
+        self.assertTrue(load(self.write(shared))["shared_portfolio_approved"])
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            load(self.write({**shared, "universe": ["BTC"]}))
+        with self.assertRaisesRegex(ValueError, "explicit owner approval"):
+            load(self.write({**shared, "shared_portfolio_approved": False}))
 
     def test_identity_and_derivative_fields_fail_closed(self):
         for change in ({"sides": ["long", "short"]}, {"venue": "bitget"},
@@ -117,6 +135,26 @@ class TrackA2PreflightTests(unittest.TestCase):
         config = load(self.path, root=self.root)
         self.assertEqual(block_reasons(config, root=self.root, egress="203.0.113.7"), [])
         self.assertTrue(require_live(config, root=self.root, egress="203.0.113.7"))
+
+    def test_explicit_owner_override_is_transparent_and_one_unit_only(self):
+        config = copy.deepcopy(load(CONFIG))
+        config.update(
+            status="active", mode="live", execution_enabled=True,
+            portfolio_isolation_confirmed=True,
+            owner_unvalidated_live_approved=True,
+            live_approval_id="a2-owner-regression-v1",
+            expected_egress_ip="203.0.113.7",
+            universe=["ETH"], basket_size=1, max_open_books=1,
+        )
+        config["strategy"]["max_units"] = 1
+        path = self.root / "track_a_2" / "owner.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        loaded = load(path, root=self.root)
+        self.assertEqual(block_reasons(loaded, root=self.root, egress="203.0.113.7"), [])
+        config["strategy"]["max_units"] = 2
+        path.write_text(json.dumps(config), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "one unit"):
+            load(path, root=self.root)
 
     def test_controls_and_egress_fail_closed(self):
         config = load(self.path, root=self.root)
