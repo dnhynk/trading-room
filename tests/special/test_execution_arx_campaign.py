@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -68,6 +69,14 @@ class TimeoutTransport:
         raise TimeoutError()
 
 
+class ReplyTransport:
+    def __init__(self, reply):
+        self.reply = reply
+
+    def submit(self, *_):
+        return self.reply
+
+
 class ExecutionArxCampaignTests(unittest.TestCase):
     def _reserve(self, engine: CampaignEngine, value: OrderIntent) -> str:
         engine.reconcile_restart(
@@ -104,6 +113,44 @@ class ExecutionArxCampaignTests(unittest.TestCase):
                 engine.reconcile(client_oid, "open")
                 engine.reconcile(client_oid, "open")
                 self.assertEqual(engine.status()["result_unknown_count"], 0)
+
+    def test_uta_ambiguous_and_malformed_replies_never_become_acknowledged(self):
+        replies = (
+            {"msg": "missing code"},
+            {"code": "40010", "msg": "timeout"},
+            {"code": "00000", "data": None},
+            {"code": "00000", "data": {"clientOid": "wrong", "orderId": "1"}},
+            {"code": "00000", "data": {"clientOid": CampaignEngine.client_oid(intent()), "orderId": None}},
+        )
+        for index, reply in enumerate(replies):
+            with self.subTest(reply=reply), TemporaryDirectory() as directory:
+                value = intent(f"i{index}")
+                if index == 4:
+                    reply["data"]["clientOid"] = CampaignEngine.client_oid(value)
+                with CampaignEngine(
+                    Path(directory) / "state.db", ReplyTransport(reply)
+                ) as engine:
+                    self._reserve(engine, value)
+                    if index == 3:
+                        with self.assertRaises(RuntimeError):
+                            self._submit(engine, value)
+                        self.assertEqual("EMERGENCY_HALT", engine.status()["risk_state"])
+                    else:
+                        self._submit(engine, value)
+                        self.assertEqual(
+                            "result_unknown", engine.status()["orders"][0]["status"]
+                        )
+
+    def test_definitive_uta_rejection_is_not_acknowledged(self):
+        with TemporaryDirectory() as directory:
+            value = intent()
+            with CampaignEngine(
+                Path(directory) / "state.db",
+                ReplyTransport({"code": "45110", "msg": "rejected"}),
+            ) as engine:
+                self._reserve(engine, value)
+                self._submit(engine, value)
+                self.assertEqual("rejected", engine.status()["orders"][0]["status"])
 
     def test_cancel_race_fill_pauses_when_aggregate_position_is_unprotected(self):
         with TemporaryDirectory() as directory:
@@ -162,6 +209,56 @@ class ExecutionArxCampaignTests(unittest.TestCase):
                         worst_fill_price=Decimal("10"),
                         at=NOW + timedelta(seconds=3),
                     )
+
+    def test_intention_id_binds_every_order_field(self):
+        with TemporaryDirectory() as directory:
+            value = intent()
+            with CampaignEngine(Path(directory) / "state.db") as engine:
+                self._reserve(engine, value)
+                self.assertEqual(
+                    CampaignEngine.client_oid(value),
+                    engine.reserve(
+                        value,
+                        approval=approval(value),
+                        current_config_hash=value.config_hash,
+                        worst_fill_price=Decimal("10"),
+                        at=NOW + timedelta(seconds=3),
+                    ),
+                )
+                altered = replace(value, limit_price=Decimal("9.5"))
+                with self.assertRaises(RuntimeError):
+                    engine.reserve(
+                        altered,
+                        approval=approval(altered),
+                        current_config_hash=altered.config_hash,
+                        worst_fill_price=Decimal("10"),
+                        at=NOW + timedelta(seconds=3),
+                    )
+
+    def test_protection_requires_aggregate_position_and_exact_mark_coverage(self):
+        with TemporaryDirectory() as directory:
+            value = intent()
+            with CampaignEngine(Path(directory) / "state.db") as engine:
+                client_oid = self._reserve(engine, value)
+                self._submit(engine, value)
+                with self.assertRaises(RuntimeError):
+                    engine.reconcile(client_oid, "filled", Decimal("2"))
+                engine.reconcile(
+                    client_oid,
+                    "filled",
+                    Decimal("2"),
+                    protection_qty=Decimal("2"),
+                    protection_order_id="server-stop",
+                    protection_active=True,
+                    trigger_reference="last_price",
+                    protection_observed_at=NOW + timedelta(seconds=5),
+                    protection_valid_until=NOW + timedelta(minutes=1),
+                    protection_source="server_query",
+                    protection_stop_price=Decimal("8"),
+                    aggregate_position_qty=Decimal("2"),
+                    at=NOW + timedelta(seconds=6),
+                )
+                self.assertEqual("insufficient", engine.status()["orders"][0]["protection"])
 
     def test_live_is_non_operational_and_process_lock_rejects_duplicate(self):
         with TemporaryDirectory() as directory:

@@ -16,6 +16,10 @@ from .normalize import NormalizedRecord, normalize_response, raw_hash
 from .persistence import AppendOnlyJsonlStore
 
 
+RESEARCH_INTERVALS = ("4H", "1H", "5m")
+FUTURES_CANDLE_TYPES = ("market", "mark", "index")
+
+
 @dataclass(frozen=True, slots=True)
 class SnapshotReceipt:
     first_received_at: datetime | None
@@ -55,28 +59,45 @@ def collect_public_snapshot(state_directory: Path, client: Any | None = None) ->
     """Collect a bounded public slice; a failed endpoint does not discard other streams."""
     client = client or BitgetUtaV3PublicClient()
     store = AppendOnlyJsonlStore(state_directory)
-    calls: list[tuple[str, str, str, str, Callable[[], tuple[Mapping[str, Any], datetime]], str | None]] = [
-        ("spot_instruments", "instruments", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_instruments, None),
-        ("futures_instruments", "instruments", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_instruments, None),
-        ("spot_ticker", "ticker", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_ticker, None),
-        ("futures_ticker", "ticker", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_ticker, None),
-        ("spot_book", "orderbook", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_orderbook, None),
-        ("futures_book", "orderbook", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_orderbook, None),
-        ("funding_current", "funding_current", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_funding_current, None),
-        ("funding_history", "funding_history", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_funding_history, None),
-        ("position_tiers", "position_tier", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_position_tiers, None),
-        ("open_interest", "open_interest", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_open_interest, None),
-        ("spot_fills", "fills", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_fills, None),
-        ("futures_fills", "fills", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_fills, None),
-        ("spot_candles", "candles", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_candles, "1m"),
-        ("futures_candles", "candles", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_candles, "1m"),
-        ("liquidations", "liquidations", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_liquidations, None),
+    calls: list[tuple[str, str, str, str, Callable[[], tuple[Mapping[str, Any], datetime]], str | None, str | None]] = [
+        ("spot_instruments", "instruments", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_instruments, None, None),
+        ("futures_instruments", "instruments", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_instruments, None, None),
+        ("spot_ticker", "ticker", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_ticker, None, None),
+        ("futures_ticker", "ticker", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_ticker, None, None),
+        ("spot_book", "orderbook", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_orderbook, None, None),
+        ("futures_book", "orderbook", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_orderbook, None, None),
+        ("funding_current", "funding_current", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_funding_current, None, None),
+        ("funding_history", "funding_history", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_funding_history, None, None),
+        ("position_tiers", "position_tier", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_position_tiers, None, None),
+        ("open_interest", "open_interest", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_open_interest, None, None),
+        ("spot_fills", "fills", SPOT_CATEGORY, SPOT_SYMBOL, client.spot_fills, None, None),
+        ("futures_fills", "fills", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_fills, None, None),
+        ("liquidations", "liquidations", FUTURES_CATEGORY, FUTURES_SYMBOL, client.futures_liquidations, None, None),
     ]
+    for research_interval in RESEARCH_INTERVALS:
+        def fetch_spot_candles(value: str = research_interval) -> tuple[Mapping[str, Any], datetime]:
+            return client.spot_candles(interval=value, candle_type="market")
+
+        calls.append(
+            (f"spot_candles_market_{research_interval}", "candles", SPOT_CATEGORY, SPOT_SYMBOL,
+             fetch_spot_candles, research_interval, "market")
+        )
+        for futures_candle_type in FUTURES_CANDLE_TYPES:
+            def fetch_futures_candles(
+                value: str = research_interval, kind: str = futures_candle_type
+            ) -> tuple[Mapping[str, Any], datetime]:
+                return client.futures_candles(interval=value, candle_type=kind)
+
+            calls.append(
+                (f"futures_candles_{futures_candle_type}_{research_interval}", "candles",
+                 FUTURES_CATEGORY, FUTURES_SYMBOL, fetch_futures_candles,
+                 research_interval, futures_candle_type)
+            )
     for benchmark_symbol in BENCHMARK_SYMBOLS:
         def fetch_benchmark(symbol: str = benchmark_symbol) -> tuple[Mapping[str, Any], datetime]:
             result: tuple[Mapping[str, Any], datetime] = client.futures_ticker(symbol)
             return result
-        calls.append((f"futures_benchmark_{benchmark_symbol}", "benchmark_ticker", FUTURES_CATEGORY, benchmark_symbol, fetch_benchmark, None))
+        calls.append((f"futures_benchmark_{benchmark_symbol}", "benchmark_ticker", FUTURES_CATEGORY, benchmark_symbol, fetch_benchmark, None, None))
     paths: dict[str, Path] = {}
     counts: dict[str, int] = {}
     coverage: dict[str, int] = {}
@@ -89,7 +110,7 @@ def collect_public_snapshot(state_directory: Path, client: Any | None = None) ->
     records: list[NormalizedRecord] = []
     futures_identity_verified = False
     spot_identity_verified = False
-    for stream, record_type, category, symbol, call, interval in calls:
+    for stream, record_type, category, symbol, call, record_interval, record_candle_type in calls:
         paths[stream] = state_directory / f"{stream}.jsonl"
         try:
             payload, received_at = call()
@@ -118,7 +139,15 @@ def collect_public_snapshot(state_directory: Path, client: Any | None = None) ->
                 )
                 if not spot_identity_verified:
                     raise ValueError("spot response is not the exact online ARX/USDT market")
-            rows = normalize_response(record_type, payload, received_at, category=category, symbol=symbol, interval=interval)
+            rows = normalize_response(
+                record_type,
+                payload,
+                received_at,
+                category=category,
+                symbol=symbol,
+                interval=record_interval,
+                candle_type=record_candle_type,
+            )
             counts[stream] = store.append(stream, rows)
             coverage[stream] = (
                 sum(bool(row.fields.get("completed")) for row in rows)

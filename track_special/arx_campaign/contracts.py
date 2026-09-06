@@ -219,6 +219,7 @@ class AccountSnapshot:
     dedicated_or_verifiably_separated: bool
     external_exposure_detected: bool
     auto_margin_top_up_disabled: bool | None
+    asset_mode: str = "unverified"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", utc(self.observed_at))
@@ -231,6 +232,7 @@ class AccountSnapshot:
             and self.margin_mode is MarginMode.ISOLATED
             and self.position_mode is PositionMode.ONE_WAY
             and self.margin_coin == "USDT"
+            and self.asset_mode == "single_asset"
             and self.strategy_equity_usdt is not None
             and self.strategy_equity_usdt > ZERO
             and self.reconciled
@@ -366,9 +368,9 @@ class ProtectionSnapshot:
             self.stop_price is None
             or self.protected_quantity_base <= ZERO
             or not self.exchange_order_id
-            or self.trigger_reference not in {"mark_price", "last_price", "index_price"}
+            or self.trigger_reference != "mark_price"
         ):
-            raise ValueError("active protection needs a queried server order and trigger reference")
+            raise ValueError("active protection needs a queried mark-price server order")
 
 
 @dataclass(frozen=True, slots=True)

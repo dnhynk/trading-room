@@ -45,7 +45,39 @@ class UtaAccountBoundaryTests(unittest.TestCase):
             auto_margin_top_up_disabled=True,
         )
         self.assertEqual(ApiFamily.UTA_V3, snapshot.api_family)
+        self.assertEqual("single_asset", snapshot.asset_mode)
         self.assertTrue(snapshot.entry_preconditions_verified)
+
+    def test_multi_asset_collateral_fails_closed(self):
+        payload = {
+            "code": "00000",
+            "data": {
+                "accountMode": "unified",
+                "accountLevel": "basic",
+                "assetMode": "multi_assets",
+                "holdMode": "one_way_mode",
+                "symbolConfigList": [
+                    {
+                        "category": "USDT-FUTURES",
+                        "symbol": "ARXUSDT",
+                        "marginMode": "isolated",
+                    }
+                ],
+            },
+        }
+        snapshot = account_snapshot_from_uta_settings(
+            payload,
+            observed_at=NOW,
+            strategy_equity_usdt=Decimal("100"),
+            available_usdt=Decimal("90"),
+            margin_coin="USDT",
+            reconciled=True,
+            dedicated_or_verifiably_separated=True,
+            external_exposure_detected=False,
+            auto_margin_top_up_disabled=True,
+        )
+        self.assertEqual("multi_assets", snapshot.asset_mode)
+        self.assertFalse(snapshot.entry_preconditions_verified)
 
     def test_advanced_or_classic_shaped_response_fails_closed(self):
         for account_mode, level in (("unified", "advanced"), ("classic", "basic")):

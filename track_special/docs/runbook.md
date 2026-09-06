@@ -9,7 +9,9 @@
 프로세스 시작마다 `startup_reconciled=false`다. REST 스냅샷으로 ARX 포지션,
 일반/전략 주문, 보호 수량, 외부 주문·포지션 부재를 확인하고 이후 증분과
 합친 뒤에만 진입 예약을 열 수 있다. 결과 불명 중 취소 요구는 상태를
-`cancel_pending`으로 덮지 않고 대사 대기로 남긴다.
+`cancel_pending`으로 덮지 않고 대사 대기로 남긴다. 현재 no-live 명령은
+locally-canceled, cancel-pending, reconciliation-deferred를 구분해 보고하며 거래소
+취소 완료를 주장하지 않는다.
 
 상태 DB는 `TRADING_ROOM_HOME` 또는 레포 형제 `trading-room-state`의 절대 경로에만 둔다. 프로세스 잠금은 DB보다 먼저 획득하며, 남아 있는 잠금은 stale로 추정해 삭제하지 않고 운영자가 소유자를 대사한다. 보호 완료는 주문 ID, 거래소 active 조회, trigger 기준, 커버 수량, 유효 시각이 모두 있는 경우에만 인정한다.
 

@@ -111,6 +111,7 @@ class EntryCandidate:
     # Additional campaign-level future exit cost plus a proportional exit rate.
     future_exit_fee: Decimal = ZERO
     future_exit_fee_rate: Decimal = ZERO
+    existing_position_stressed_funding: Decimal = ZERO
     liquidity_max_quantity: Decimal | None = None
     tier_verified: bool | None = None
     account_verified: bool | None = None
@@ -123,7 +124,10 @@ class EntryCandidate:
     available_usdt: Decimal | None = None
     volatility_gap_slippage: Decimal = ZERO
     is_pyramid: bool = False
+    # Legacy hint is retained for input compatibility but deliberately ignored.
     existing_position_profitable_after_costs: bool = False
+    existing_executable_exit_price: Decimal | None = None
+    existing_position_booked_funding_usdt: Decimal = ZERO
     protective_stop_lowered: bool = False
     recovery_order_larger: bool = False
     funding_allowed: bool = True
@@ -340,6 +344,8 @@ class RiskEngine:
                 candidate.stressed_funding,
                 candidate.future_exit_fee,
                 candidate.future_exit_fee_rate,
+                candidate.existing_position_stressed_funding,
+                candidate.existing_position_booked_funding_usdt,
             )
         ):
             static_reasons.append("INVALID_COST_INPUT")
@@ -349,8 +355,28 @@ class RiskEngine:
             static_reasons.append("PRICE_PRECISION_INVALID")
         if stage < 1 or stage > limits.max_entry_stages:
             static_reasons.append("ENTRY_STAGE_INVALID")
-        if candidate.is_pyramid and not candidate.existing_position_profitable_after_costs:
-            static_reasons.append("PYRAMID_NOT_PROFITABLE_AFTER_COSTS")
+        if candidate.is_pyramid:
+            existing_exit = candidate.existing_executable_exit_price
+            if existing_exit is None or existing_exit <= ZERO or not book.lots:
+                static_reasons.append("PYRAMID_PROFIT_INPUT_UNVERIFIED")
+            else:
+                existing_position_net = sum(
+                    (
+                        lot.quantity_base * (existing_exit - lot.entry_price)
+                        - lot.entry_fee_usdt
+                        - lot.quantity_base
+                        * existing_exit
+                        * candidate.future_exit_fee_rate
+                    )
+                    for lot in book.lots
+                )
+                existing_position_net -= (
+                    candidate.existing_position_booked_funding_usdt
+                    + candidate.existing_position_stressed_funding
+                    + candidate.future_exit_fee
+                )
+                if existing_position_net <= ZERO:
+                    static_reasons.append("PYRAMID_NOT_PROFITABLE_AFTER_COSTS")
         if candidate.protective_stop_lowered:
             static_reasons.append("PROTECTIVE_STOP_LOWERING")
         if candidate.recovery_order_larger:
@@ -395,12 +421,15 @@ class RiskEngine:
             return total * approved / candidate.quantity
 
         def totals(approved: Decimal) -> _Totals:
-            pnl = book.campaign_realized_net_pnl_usdt
-            gross_stop = ZERO
+            existing_funding = (
+                candidate.existing_position_stressed_funding if book.lots else ZERO
+            )
+            pnl = book.campaign_realized_net_pnl_usdt - existing_funding
+            gross_stop = existing_funding
             gross_notional = ZERO
             isolated_margin = ZERO
             pending_commitment = ZERO
-            stressed_funding = ZERO
+            stressed_funding = existing_funding
             stage_notional = book.stage_filled_notional_usdt.get(stage, ZERO)
 
             for lot in book.lots:

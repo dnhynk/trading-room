@@ -23,6 +23,15 @@ def daily_report(data: Mapping[str, Any]) -> str:
     rows = [
         ("전략/위험 상태", f"{_value(data, 'campaign_state')} / {_value(data, 'risk_state')}"),
         ("기준 시각", _value(data, "observed_at")),
+        ("승인 시작자본 E0(USDT)", _decimal(data.get("e0_usdt"))),
+        ("전략 순자산(USDT)", _decimal(data.get("strategy_equity_usdt"))),
+        ("캠페인 순손익(USDT)", _decimal(data.get("campaign_net_pnl_usdt"))),
+        (
+            "일/주 손실(입출금 보정, USDT)",
+            f"{_decimal(data.get('daily_loss_usdt'))} / "
+            f"{_decimal(data.get('weekly_loss_usdt'))}",
+        ),
+        ("고점 대비 하락(USDT)", _decimal(data.get("equity_drawdown_usdt"))),
         ("포지션 수량(ARX)", _decimal(data.get("position_quantity"))),
         ("평균 진입가", _value(data, "average_entry")),
         ("명목금액(USDT)", _decimal(data.get("gross_notional_usdt"))),

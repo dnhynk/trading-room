@@ -213,7 +213,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "pause-entries":
             engine.set_control(RiskState.PAUSE_ENTRIES, "operator")
         elif args.command == "cancel-entry-orders":
-            print(_json({"canceled": engine.cancel_entry_orders(), "exchange_writes": 0}))
+            print(
+                _json(
+                    {
+                        "cancellation_state": engine.cancel_entry_orders(),
+                        "exchange_writes": 0,
+                        "note": "local state only; exchange cancellation is not claimed",
+                    }
+                )
+            )
             return 0
         elif args.command == "request-exit":
             engine.request_exit()

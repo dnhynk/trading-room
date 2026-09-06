@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from ..contracts import (
     OperatingMode,
@@ -26,6 +26,7 @@ from ..contracts import (
 ZERO = Decimal("0")
 TERMINAL = {"filled", "canceled", "rejected"}
 ENTRY_PURPOSES = {OrderPurpose.PROBE_ENTRY.value, OrderPurpose.PYRAMID_ENTRY.value}
+AMBIGUOUS_UTA_CODES = {"40010", "40725", "45001"}
 TRANSITIONS = {
     "reserved": {"submitting", "canceled", "rejected"},
     "submitting": {
@@ -121,8 +122,11 @@ class LiveTransport:
 class PaperTransport:
     writes = 0
 
-    def submit(self, client_oid: str, *_: Any, **__: Any) -> dict[str, str]:
-        return {"clientOid": client_oid, "status": "acknowledged"}
+    def submit(self, client_oid: str, *_: Any, **__: Any) -> dict[str, Any]:
+        return {
+            "code": "00000",
+            "data": {"clientOid": client_oid, "orderId": f"paper-{client_oid}"},
+        }
 
     def cancel(self, client_oid: str) -> dict[str, str]:
         return {"clientOid": client_oid, "status": "cancel_pending"}
@@ -305,6 +309,11 @@ class CampaignEngine:
                 valid_until TEXT,
                 sufficient INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS intention_contracts(
+                intention_id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL,
+                FOREIGN KEY(intention_id) REFERENCES orders(intention_id)
+            );
             """
         )
 
@@ -383,6 +392,28 @@ class CampaignEngine:
         return "arx-" + digest[:28]
 
     @staticmethod
+    def _intent_fingerprint(intent: OrderIntent) -> str:
+        payload = {
+            "intention_id": intent.intention_id,
+            "campaign_id": intent.campaign_id,
+            "purpose": intent.purpose.value,
+            "side": intent.side,
+            "quantity_base": str(intent.quantity_base),
+            "limit_price": str(intent.limit_price) if intent.limit_price is not None else None,
+            "time_in_force": intent.time_in_force,
+            "reduce_only": intent.reduce_only,
+            "stage": intent.stage,
+            "config_hash": intent.config_hash,
+            "market_observed_at": intent.market_observed_at.isoformat(),
+            "created_at": intent.created_at.isoformat(),
+            "expires_at": intent.expires_at.isoformat(),
+            "reason_codes": intent.reason_codes,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
     def _validate_approval(
         intent: OrderIntent,
         approval: RiskApproval | None,
@@ -447,12 +478,15 @@ class CampaignEngine:
                 )
 
         client_oid = self.client_oid(intent)
+        fingerprint = self._intent_fingerprint(intent)
         prior = self.db.execute(
-            "SELECT client_oid,config_hash,qty FROM orders WHERE intention_id=?",
+            "SELECT o.client_oid,c.fingerprint FROM orders o "
+            "LEFT JOIN intention_contracts c ON c.intention_id=o.intention_id "
+            "WHERE o.intention_id=?",
             (intent.intention_id,),
         ).fetchone()
         if prior:
-            if prior[1] != intent.config_hash or Decimal(prior[2]) != intent.quantity_base:
+            if prior[1] is None or prior[1] != fingerprint:
                 raise RuntimeError("intention ID was reused for different content")
             return str(prior[0])
 
@@ -493,6 +527,10 @@ class CampaignEngine:
                     str(approval.isolated_margin_usdt) if approval else None,
                 ),
             )
+            self.db.execute(
+                "INSERT INTO intention_contracts(intention_id,fingerprint) VALUES(?,?)",
+                (intent.intention_id, fingerprint),
+            )
             self.event(
                 "risk_approved_and_reserved",
                 intention=intent.intention_id,
@@ -501,6 +539,24 @@ class CampaignEngine:
                 worst_fill=str(worst_fill) if worst_fill is not None else None,
             )
         return client_oid
+
+    def _record_ambiguous_submit(
+        self, intention_id: str, client_oid: str, reason: str, **detail: Any
+    ) -> None:
+        with self.transaction():
+            self.db.execute(
+                "UPDATE orders SET status='result_unknown',reconciliation_required=1,updated=? "
+                "WHERE intention_id=?",
+                (now(), intention_id),
+            )
+            self.event(
+                "ambiguous_submit",
+                intention=intention_id,
+                clientOid=client_oid,
+                reason=reason,
+                **detail,
+            )
+            self._set_control_no_transaction(RiskState.PAUSE_ENTRIES, reason)
 
     def submit(
         self,
@@ -555,29 +611,74 @@ class CampaignEngine:
                 row["client_oid"], row["side"], Decimal(row["qty"]), row["purpose"]
             )
         except (TimeoutError, ConnectionError):
+            self._record_ambiguous_submit(
+                intention_id,
+                str(row["client_oid"]),
+                "ambiguous_transport_failure",
+            )
+            return str(row["client_oid"])
+
+        if not isinstance(reply, Mapping):
+            self._record_ambiguous_submit(
+                intention_id, str(row["client_oid"]), "malformed_exchange_reply"
+            )
+            return str(row["client_oid"])
+        code = str(reply.get("code") or "")
+        if not code:
+            self._record_ambiguous_submit(
+                intention_id, str(row["client_oid"]), "missing_uta_reply_code"
+            )
+            return str(row["client_oid"])
+        if code in AMBIGUOUS_UTA_CODES:
+            self._record_ambiguous_submit(
+                intention_id,
+                str(row["client_oid"]),
+                "documented_ambiguous_uta_reply",
+                exchange_code=code,
+            )
+            return str(row["client_oid"])
+        if code != "00000":
             with self.transaction():
                 self.db.execute(
-                    "UPDATE orders SET status='result_unknown',reconciliation_required=1,updated=? "
-                    "WHERE intention_id=?",
+                    "UPDATE orders SET status='rejected',updated=? WHERE intention_id=?",
                     (now(), intention_id),
                 )
                 self.event(
-                    "ambiguous_submit",
+                    "submit_rejected",
                     intention=intention_id,
                     clientOid=row["client_oid"],
-                )
-                self._set_control_no_transaction(
-                    RiskState.PAUSE_ENTRIES, "ambiguous_entry_submit"
+                    exchange_code=code or "MISSING",
                 )
             return str(row["client_oid"])
-        if reply.get("clientOid") not in {None, row["client_oid"]}:
+
+        data = reply.get("data")
+        if not isinstance(data, Mapping):
+            self._record_ambiguous_submit(
+                intention_id, str(row["client_oid"]), "missing_uta_ack_data"
+            )
+            return str(row["client_oid"])
+        returned_client_oid = data.get("clientOid")
+        if returned_client_oid != row["client_oid"]:
+            self._record_ambiguous_submit(
+                intention_id,
+                str(row["client_oid"]),
+                "exchange_ack_identity_mismatch",
+                returned_client_oid=returned_client_oid,
+            )
             self.halt("exchange_ack_identity_mismatch")
-            raise RuntimeError("exchange ACK returned a different clientOid")
+            raise RuntimeError("exchange ACK did not return the exact clientOid")
+        if not data.get("orderId"):
+            self._record_ambiguous_submit(
+                intention_id,
+                str(row["client_oid"]),
+                "uta_ack_order_id_missing_requires_reconciliation",
+            )
+            return str(row["client_oid"])
         with self.transaction():
             self.db.execute(
                 "UPDATE orders SET status='acknowledged',exchange_id=?,updated=? "
                 "WHERE intention_id=?",
-                (reply.get("orderId"), now(), intention_id),
+                (data["orderId"], now(), intention_id),
             )
             self.event("ack", intention=intention_id, final=False)
         return str(row["client_oid"])
@@ -616,6 +717,12 @@ class CampaignEngine:
             raise ValueError("filled quantity cannot decrease")
         if filled > Decimal(row["qty"]):
             raise ValueError("fill exceeds order quantity")
+        if protection_qty < ZERO or (
+            aggregate_position_qty is not None and aggregate_position_qty < ZERO
+        ):
+            raise ValueError("protection and aggregate position quantities cannot be negative")
+        if row["purpose"] in ENTRY_PURPOSES and filled > ZERO and aggregate_position_qty is None:
+            raise RuntimeError("entry fills require aggregate position quantity reconciliation")
         if not_found:
             if not (
                 old == "result_unknown"
@@ -643,7 +750,7 @@ class CampaignEngine:
         queried_active = bool(
             protection_active
             and protection_order_id
-            and trigger_reference in {"mark_price", "last_price", "index_price"}
+            and trigger_reference == "mark_price"
             and observed
             and valid_until
             and observed <= reconciled_at
@@ -664,7 +771,9 @@ class CampaignEngine:
         protection = row["protection"]
         if required_protection > ZERO:
             protection = (
-                "active" if queried_active and protected >= required_protection else "insufficient"
+                "active"
+                if queried_active and protected == required_protection
+                else "insufficient"
             )
 
         with self.transaction():
@@ -733,7 +842,10 @@ class CampaignEngine:
                 self._set_control_no_transaction(RiskState.PAUSE_ENTRIES, "protection_gap")
         return True
 
-    def cancel_entry_orders(self) -> int:
+    def cancel_entry_orders(self) -> dict[str, int]:
+        locally_canceled = 0
+        cancel_pending = 0
+        reconciliation_deferred = 0
         with self.transaction():
             rows = self.db.execute(
                 "SELECT client_oid,status FROM orders WHERE purpose IN "
@@ -742,6 +854,7 @@ class CampaignEngine:
             ).fetchall()
             for row in rows:
                 if row["status"] in {"submitting", "result_unknown"}:
+                    reconciliation_deferred += 1
                     self.db.execute(
                         "UPDATE orders SET reconciliation_required=1,updated=? WHERE client_oid=?",
                         (now(), row["client_oid"]),
@@ -752,6 +865,10 @@ class CampaignEngine:
                     )
                     continue
                 target = "canceled" if row["status"] == "reserved" else "cancel_pending"
+                if target == "canceled":
+                    locally_canceled += 1
+                else:
+                    cancel_pending += 1
                 self.db.execute(
                     "UPDATE orders SET status=?,updated=? WHERE client_oid=?",
                     (target, now(), row["client_oid"]),
@@ -761,7 +878,12 @@ class CampaignEngine:
                     clientOid=row["client_oid"],
                     local_only=target == "canceled",
                 )
-        return len(rows)
+        return {
+            "matched": len(rows),
+            "locally_canceled": locally_canceled,
+            "cancel_pending": cancel_pending,
+            "reconciliation_deferred": reconciliation_deferred,
+        }
 
     def request_exit(self) -> None:
         self.set_control(RiskState.EXIT_ONLY, "operator_requested_exit")

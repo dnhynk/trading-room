@@ -64,6 +64,7 @@ class ContractTests(unittest.TestCase):
             dedicated_or_verifiably_separated=False,
             external_exposure_detected=False,
             auto_margin_top_up_disabled=None,
+            asset_mode="unverified",
         )
         self.assertFalse(account.entry_preconditions_verified)
 
@@ -85,6 +86,7 @@ class ContractTests(unittest.TestCase):
                 dedicated_or_verifiably_separated=True,
                 external_exposure_detected=False,
                 auto_margin_top_up_disabled=True,
+                asset_mode="single_asset",
             )
             self.assertFalse(account.entry_preconditions_verified)
 

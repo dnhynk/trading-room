@@ -61,6 +61,10 @@ class ReplayResult:
     final_value: Decimal = ZERO
     unprotected_quantity: Decimal = ZERO
     liquidation_verifiable: bool = False
+    exit_filled_quantity: Decimal = ZERO
+    remaining_position_quantity: Decimal = ZERO
+    estimated_remaining_exit_cost: Decimal = ZERO
+    protection_gap_detected: bool = False
 
 
 def replay(
@@ -97,7 +101,9 @@ def replay(
     entry_price = first.ask * (Decimal("1") + first.delay_bps / BPS)
     fees = filled * entry_price * fee_rate
     funding = ZERO
-    exit_price: Decimal | None = None
+    exit_value = ZERO
+    exit_filled = ZERO
+    remaining = filled
     notes: list[str] = []
     liquidated = False
     liquidation_verifiable = all(bar.liquidation_price is not None for bar in observations)
@@ -107,7 +113,7 @@ def replay(
             if bar.mark is None:
                 notes.append("funding_settlement_mark_unavailable")
             else:
-                funding += filled * bar.mark * bar.funding_rate
+                funding += remaining * bar.mark * bar.funding_rate
 
         executable_bid = bar.bid * (Decimal("1") - bar.delay_bps / BPS)
         trigger_price = bar.mark if stop_trigger_reference == "mark_price" else bar.last
@@ -123,51 +129,83 @@ def replay(
         if liquidation_crossed:
             assert bar.liquidation_price is not None
             exit_price = min(executable_bid, bar.liquidation_price)
+            exit_value += remaining * exit_price
+            fees += remaining * exit_price * fee_rate
+            exit_filled += remaining
+            remaining = ZERO
             liquidated = True
             notes.append("explicit_synthetic_liquidation_before_stop")
             break
 
         stop_crossed = stop is not None and (
-            trigger_price <= stop if trigger_price is not None else bar.low <= stop
+            (trigger_price is not None and trigger_price <= stop) or bar.low <= stop
         )
         if stop_crossed:
             assert stop is not None
             exit_price = min(stop, executable_bid)
+            exit_depth = bar.bid_depth if bar.bid_depth is not None else bar.available_quantity
+            exit_quantity = min(remaining, max(exit_depth, ZERO))
+            exit_value += exit_quantity * exit_price
+            fees += exit_quantity * exit_price * fee_rate
+            exit_filled += exit_quantity
+            remaining -= exit_quantity
             notes.append("stop_before_profit_same_bar")
             if not server_protection_verified:
                 notes.append("protective_execution_unverified")
+            if remaining > ZERO:
+                notes.append("partial_stop_exit_exposure_remains")
+                continue
             break
         if take_profit is not None and bar.high >= take_profit:
             exit_price = min(take_profit, executable_bid)
+            exit_depth = bar.bid_depth if bar.bid_depth is not None else bar.available_quantity
+            exit_quantity = min(remaining, max(exit_depth, ZERO))
+            exit_value += exit_quantity * exit_price
+            fees += exit_quantity * exit_price * fee_rate
+            exit_filled += exit_quantity
+            remaining -= exit_quantity
             notes.append("take_profit")
+            if remaining > ZERO:
+                notes.append("partial_take_profit_exposure_remains")
+                continue
             break
 
-    if exit_price is None:
-        last = observations[-1]
-        exit_price = last.bid * (Decimal("1") - last.delay_bps / BPS)
+    last = observations[-1]
+    current_value = remaining * last.bid
+    estimated_remaining_exit_cost = current_value * fee_rate
+    if remaining > ZERO:
         notes.append("marked_to_conservative_executable_bid")
+        notes.append("position_exposure_remains")
     if not liquidation_verifiable:
         notes.append("liquidation_not_verifiable_without_position_estimates")
 
-    exit_fee = filled * exit_price * fee_rate
-    fees += exit_fee
-    net = filled * (exit_price - entry_price) - fees - funding
-    last_value = filled * observations[-1].bid
-    unprotected = ZERO if server_protection_verified else filled
+    net = (
+        exit_value
+        + current_value
+        - filled * entry_price
+        - fees
+        - funding
+        - estimated_remaining_exit_cost
+    )
+    unprotected = ZERO if server_protection_verified else remaining
     return ReplayResult(
         filled,
         quantity - filled,
         filled * entry_price,
-        filled * exit_price,
+        exit_value,
         fees,
         funding,
         net,
         liquidated,
         tuple(dict.fromkeys(notes)),
-        last_value,
-        filled * exit_price,
+        current_value,
+        exit_value + current_value,
         unprotected,
         liquidation_verifiable,
+        exit_filled,
+        remaining,
+        estimated_remaining_exit_cost,
+        filled > ZERO and not server_protection_verified,
     )
 
 
@@ -175,8 +213,15 @@ def compare(actual: ReplayResult, baseline: ReplayResult) -> dict[str, Decimal |
     return {
         "net_pnl_delta": actual.net_pnl - baseline.net_pnl,
         "fill_delta": actual.filled_quantity - baseline.filled_quantity,
+        "exit_fill_delta": actual.exit_filled_quantity - baseline.exit_filled_quantity,
+        "remaining_exposure_delta": (
+            actual.remaining_position_quantity - baseline.remaining_position_quantity
+        ),
+        "unfilled_entry_delta": actual.unfilled_quantity - baseline.unfilled_quantity,
         "worse_than_baseline": actual.net_pnl < baseline.net_pnl,
         "liquidation_delta": int(actual.liquidated) - int(baseline.liquidated),
+        "protection_gap_delta": int(actual.protection_gap_detected)
+        - int(baseline.protection_gap_detected),
     }
 
 

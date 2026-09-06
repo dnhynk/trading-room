@@ -18,7 +18,7 @@ is historical evidence only.
 | Current funding | `/api/v3/market/current-fund-rate` | yes | no | documented for futures, including interval and next-update fields |
 | Funding history | `/api/v3/market/history-fund-rate` | yes | no | documented `cursor`/`limit` route; records are in `data.resultList` |
 | Open interest | `/api/v3/market/open-interest` | yes | no | documented public snapshot route |
-| Candles / public trades | `/api/v3/market/candles`, `/api/v3/market/fills` | yes | yes | documented routes; only elapsed candles are labelled completed |
+| Candles / public trades | `/api/v3/market/candles`, `/api/v3/market/fills` | market/mark/index at `4H`,`1H`,`5m` | market at `4H`,`1H`,`5m` | documented routes; only elapsed candles are labelled completed |
 | Position tiers | `/api/v3/market/position-tier` | yes | n/a | public tier list; tier/min/max/leverage/MMR are retained |
 | Liquidations | `/api/v3/market/liquidations` | yes | n/a | public three-day history; `data.list` and cursor are retained |
 
@@ -50,8 +50,9 @@ the payload and is not evidence that the target account accepts or retains it.
 
 Private capability code exposes only injected signed GETs for
 `/api/v3/account/settings` and `/api/v3/position/current-position`. Account settings
-must explicitly show UTA `unified|hybrid`, level `isolated|basic`, `one_way_mode`, and
-an exact ARXUSDT `isolated` symbol config. Advanced, switching/upgrading, crossed,
+must explicitly show UTA `unified|hybrid`, level `isolated|basic`, `one_way_mode`, an
+exact `assetMode=single_asset` value, and an ARXUSDT `isolated` symbol config. Missing
+or `multi_assets` asset mode, Advanced, switching/upgrading, crossed,
 hedge, missing symbol config, external exposure, or unknown auto-top-up blocks entry.
 No signer or private POST implementation exists in this development build.
 Before live review, a non-production capability test must verify strategy-order

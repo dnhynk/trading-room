@@ -21,6 +21,21 @@ class LiquidationCheck:
     reason_codes: tuple[str, ...]
 
 
+def independent_long_bankruptcy_price(
+    *,
+    quantity_base: Decimal,
+    average_entry_price: Decimal,
+    isolated_margin_usdt: Decimal,
+    unbooked_funding_cost_usdt: Decimal = ZERO,
+) -> Decimal:
+    """Return the zero-equity price, distinct from the maintenance liquidation price."""
+
+    if quantity_base <= ZERO or average_entry_price <= ZERO or isolated_margin_usdt < ZERO:
+        raise ValueError("invalid isolated long position")
+    remaining_margin = isolated_margin_usdt - max(unbooked_funding_cost_usdt, ZERO)
+    return max(ZERO, average_entry_price - remaining_margin / quantity_base)
+
+
 def independent_long_liquidation_price(
     *,
     quantity_base: Decimal,

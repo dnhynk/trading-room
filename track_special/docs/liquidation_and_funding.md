@@ -34,6 +34,13 @@ conservative value. Null, zero, negative, stale, or semantically unverified exch
 values block live entry rather than being labelled “cannot liquidate.” Required stop
 buffer combines volatility, gap stress, and expected slippage.
 
+The separate bankruptcy diagnostic solves for zero isolated-position equity without
+maintenance margin, while liquidation solves the earlier maintenance-margin plus
+close-fee boundary. They are never labelled interchangeably. The current position
+contract does not provide an independently verified bankruptcy field, so that value
+remains a local diagnostic rather than exchange fact; a stop trigger and its eventual
+executable fill are separate values again.
+
 Funding projections require the currently observed interval and separate base,
 adverse, and extreme assumed rates. They report USDT cost, percent of E0, and percent
 of notional. Displayed/assumed/final-settled rates have separate types; projected

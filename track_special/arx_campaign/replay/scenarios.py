@@ -74,7 +74,7 @@ SCENARIOS = {
     ),
     "trading_halt": ChaosScenario(
         "trading_halt",
-        (_bar("10", "10", "10", "10", "9.9", "10.1", bid_depth=Decimal("0"), ask_depth=Decimal("0"), mark=Decimal("10")),),
+        (_bar("10", "10", "9", "9", "8.9", "10.1", bid_depth=Decimal("0"), ask_depth=Decimal("1"), mark=Decimal("9")),),
         ("venue_trading_halt", "exposure_may_remain"),
     ),
     "server_stop_rejected": ChaosScenario(

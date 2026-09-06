@@ -18,3 +18,23 @@ class ReplayArxCampaignTests(unittest.TestCase):
   result=replay([bar],Decimal("1"),stop=Decimal("8.5"))
   self.assertTrue(result.liquidated)
   self.assertIn("explicit_synthetic_liquidation_before_stop",result.notes)
+
+ def test_disappearing_bid_depth_reports_remaining_exposure(self):
+  bar=ReplayBar(
+   Decimal("10"),Decimal("10"),Decimal("8"),Decimal("8.5"),Decimal("8.4"),Decimal("10"),
+   ask_depth=Decimal("1"),bid_depth=Decimal("0"),mark=Decimal("8.5"),
+  )
+  result=replay([bar],Decimal("1"),stop=Decimal("9"),server_protection_verified=True)
+  self.assertEqual(Decimal("0"),result.exit_filled_quantity)
+  self.assertEqual(Decimal("1"),result.remaining_position_quantity)
+  self.assertEqual(Decimal("0"),result.exit_value)
+  self.assertIn("position_exposure_remains",result.notes)
+
+ def test_stop_uses_adverse_intrabar_low_when_point_mark_misses_the_cross(self):
+  bar=ReplayBar(
+   Decimal("10"),Decimal("10.5"),Decimal("8"),Decimal("10"),Decimal("8.8"),Decimal("10"),
+   mark=Decimal("10"),bid_depth=Decimal("1"),
+  )
+  result=replay([bar],Decimal("1"),stop=Decimal("9"))
+  self.assertEqual(Decimal("1"),result.exit_filled_quantity)
+  self.assertIn("stop_before_profit_same_bar",result.notes)

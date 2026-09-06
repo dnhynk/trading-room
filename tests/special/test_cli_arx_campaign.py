@@ -65,6 +65,18 @@ class CliArxCampaignTests(unittest.TestCase):
         self.assertIn("not_profitability_evidence", value["evidence_kind"])
         self.assertEqual(0, value["exchange_writes"])
 
+    def test_cancel_entries_does_not_claim_exchange_cancellation(self):
+        with TemporaryDirectory() as directory:
+            output = StringIO()
+            state = str((Path(directory) / "campaign.sqlite").resolve())
+            with redirect_stdout(output):
+                result = main(["--state", state, "cancel-entry-orders"])
+        value = json.loads(output.getvalue())
+        self.assertEqual(0, result)
+        self.assertEqual(0, value["exchange_writes"])
+        self.assertNotIn("canceled", value)
+        self.assertEqual(0, value["cancellation_state"]["matched"])
+
 
 if __name__ == "__main__":
     unittest.main()

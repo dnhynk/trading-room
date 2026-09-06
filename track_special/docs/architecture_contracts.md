@@ -47,7 +47,7 @@ gross_stop_risk = sum(filled_qty * max(entry_price - P_exit, 0))
                   + costs not already posted to realized PnL
 ```
 
-Realized fees and funding already included in `realized_net_pnl` are never subtracted again. Principal loss, giveback, gross stop risk, gross notional, isolated margin, tier/MMR, liquidation buffer, stage notional, funding, liquidity, and order precision each have independent gates. A tighter stop cannot be invented merely to make size pass.
+Realized fees and funding already included in `realized_net_pnl` are never subtracted again. Principal loss, giveback, gross stop risk, gross notional, isolated margin, tier/MMR, liquidation buffer, stage notional, funding, liquidity, and order precision each have independent gates. Projected funding for already-filled lots, each active reservation, and the candidate is included separately; settled funding already in realized PnL is not repeated. A tighter stop cannot be invented merely to make size pass.
 
 Reservations and approvals are created in the same database transaction. An approval
 binds campaign ID, intention ID, config hash, exact approved quantity, market/account
@@ -65,14 +65,14 @@ The deterministic state machine is `WATCH → PROBE → BUILD → RIDE → HARVE
 
 ## Order and protection contract
 
-An `OrderIntent` is not an order. The durable lifecycle is intention → transactional reservation/approval → submitting → ACK/result-unknown → exchange reconciliation → open/partial/fill/cancel/reject. Timeouts and named ambiguous error codes are reconciled by client order ID before any retry. Duplicate events are idempotent; cancel-pending fills remain fills.
+An `OrderIntent` is not an order. The durable lifecycle is intention → transactional reservation/approval → submitting → ACK/result-unknown → exchange reconciliation → open/partial/fill/cancel/reject. The intention ID is bound to a hash of every immutable intent field. Timeouts, malformed or identity-less ACKs, null order IDs, and named ambiguous error codes are reconciled by client order ID before any retry. Definitive rejection is never recorded as ACK. Duplicate events are idempotent; cancel-pending fills remain fills.
 
 One-way long reduction is a `sell` with `reduce_only` in the selected adapter only after that adapter's account/API family is verified. UTA v3 names and Classic v2 names live in separate wire mappers. Server ACK is not matching confirmation. Reduce-only auto-cancel/replacement behavior is treated as an exchange capability requiring account-level testing.
 
 Protection has its own durable snapshot history. New exposure is not considered
 protected until a fresh `server_query` observation supplies an exchange order ID,
-positive stop, supported trigger reference, validity deadline, and coverage of the
-aggregate position quantity. Protection-before-entry is not assumed atomic. Any
+positive stop, mark-price trigger reference, validity deadline, and exact coverage of
+an explicitly reconciled aggregate position quantity. Protection-before-entry is not assumed atomic. Any
 uncovered fill pauses entries; a later live design must execute the approved bounded
 repair/reduction policy rather than inventing a market order.
 
@@ -84,6 +84,6 @@ Only a new positive high-water increment in cumulative net realized PnL is eligi
 
 ## Account and live gate contract
 
-Live entry requires a verified online `ARXUSDT`, `USDT-FUTURES`, linear perpetual instrument for Arcium ARX; a single USDT margin coin; isolated margin; one-way mode; disabled automatic margin top-up; dedicated or verifiably separated strategy equity; no foreign/manual exposure; reconciled positions/orders/protection/ledger; server-side protection capability; fixed leverage while flat; and complete approved live settings.
+Live entry requires a verified online `ARXUSDT`, `USDT-FUTURES`, linear perpetual instrument for Arcium ARX; an explicit `assetMode=single_asset` observation and single USDT margin coin; isolated margin; one-way mode; disabled automatic margin top-up; dedicated or verifiably separated strategy equity; no foreign/manual exposure; reconciled positions/orders/protection/ledger; server-side protection capability; fixed leverage while flat; and complete approved live settings.
 
 UTA Advanced/shared multi-asset collateral, crossed margin, hedge mode, unknown/null liquidation semantics, missing tiers, stale account data, or any API-family ambiguity blocks entry. Code never changes account mode, margin mode, or leverage as part of validation.

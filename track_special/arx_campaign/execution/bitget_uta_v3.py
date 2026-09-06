@@ -130,4 +130,5 @@ def account_snapshot_from_uta_settings(
         dedicated_or_verifiably_separated=dedicated_or_verifiably_separated,
         external_exposure_detected=external_exposure_detected,
         auto_margin_top_up_disabled=auto_margin_top_up_disabled,
+        asset_mode=str(data.get("assetMode") or "unverified"),
     )

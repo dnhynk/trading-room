@@ -3,11 +3,28 @@ import unittest
 
 from track_special.arx_campaign.risk import (
     check_liquidation_buffer,
+    independent_long_bankruptcy_price,
     independent_long_liquidation_price,
 )
 
 
 class LiquidationTests(unittest.TestCase):
+    def test_bankruptcy_is_distinct_from_maintenance_liquidation(self):
+        bankruptcy = independent_long_bankruptcy_price(
+            quantity_base=Decimal("10"),
+            average_entry_price=Decimal("10"),
+            isolated_margin_usdt=Decimal("20"),
+        )
+        liquidation = independent_long_liquidation_price(
+            quantity_base=Decimal("10"),
+            average_entry_price=Decimal("10"),
+            isolated_margin_usdt=Decimal("20"),
+            maintenance_margin_rate=Decimal("0.05"),
+            liquidation_close_fee_rate=Decimal("0.01"),
+        )
+        self.assertEqual(Decimal("8"), bankruptcy)
+        self.assertGreater(liquidation, bankruptcy)
+
     def test_independent_estimate_uses_margin_tier_fee_and_funding(self):
         price = independent_long_liquidation_price(
             quantity_base=Decimal("10"),

@@ -67,7 +67,16 @@ def _candle(item: Any) -> Mapping[str, Any]:
     return {"value": item}
 
 
-def normalize_response(record_type: str, payload: Mapping[str, Any], received_at: datetime, *, category: str, symbol: str, interval: str | None = None) -> tuple[NormalizedRecord, ...]:
+def normalize_response(
+    record_type: str,
+    payload: Mapping[str, Any],
+    received_at: datetime,
+    *,
+    category: str,
+    symbol: str,
+    interval: str | None = None,
+    candle_type: str | None = None,
+) -> tuple[NormalizedRecord, ...]:
     """Retain every response item and distinguish requested from returned identity."""
     items = _items(payload.get("data", []))
     request_time = _time(payload.get("requestTime"), received_at)
@@ -105,6 +114,7 @@ def normalize_response(record_type: str, payload: Mapping[str, Any], received_at
             duration = _interval_seconds(interval)
             fields["completed"] = duration is not None and exchange_time.timestamp() + duration <= received_at.timestamp()
             fields["interval"] = interval
+            fields["candle_type"] = candle_type or "market"
         # ``symbol`` is the requested stream identity. Whether the venue echoed
         # it is retained separately and must be checked before live use.
         records.append(NormalizedRecord("bitget", "uta_v3", category, str(item.get("symbol", symbol)), item.get("baseCoin"), item.get("quoteCoin"), item.get("settleCoin"), record_type, exchange_time, received_at, str(sequence) if sequence is not None else None, digest, duplicate, fields, dict(item)))
