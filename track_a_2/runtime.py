@@ -1024,6 +1024,32 @@ class Runtime:
                 return fills
             book["inventory_phase"] = "protected"
 
+        # A missing decision is not a strategy instruction to cancel.  The
+        # per-second feature closes only after the first message of the next
+        # exchange second, so it can briefly be unavailable while the order
+        # book itself is still current.  Keep an already admitted maker order
+        # through that gap, but re-run every execution/risk guard against its
+        # remaining quantity and the current book.  No new order can be born
+        # without a complete strategy decision.
+        if desired is None and not stopping and not self.recovery_only:
+            if not buy_orders:
+                return fills
+            order = buy_orders[0]
+            remaining = self.oms.remaining(order)
+            reason = self.validate_intent(
+                coin, "buy", "BUY", remaining,
+                fee_rate=maker, price=order["price"], own_order=order,
+            )
+            if reason:
+                self.counts["resting_buy_rejected_" + reason] += 1
+                self.store.event(
+                    "RESTING_BUY_CANCEL", coin=coin, cid=order["cid"],
+                    reason=reason, decision="unavailable",
+                )
+                return self._cancel(buy_orders)
+            self.counts["resting_buy_held_without_decision"] += 1
+            return fills
+
         wanted_buy = None if trim_deferred else desired.get("buy") if desired else None
         if wanted_buy is None or stopping or self.recovery_only:
             if buy_orders:
@@ -1037,11 +1063,19 @@ class Runtime:
                 wanted_qty,
                 self._buy_cap(coin, price, maker, exclude_order=order),
             )
-            if (
-                maintained_qty < minimum_qty
-                or maintained_qty * price < minimum
-                or not self._same(order, qty=maintained_qty, price=price)
-            ):
+            maintenance_reason = None
+            if maintained_qty < minimum_qty or maintained_qty * price < minimum:
+                maintenance_reason = "entry_minimum_changed"
+            elif not self._same(order, qty=maintained_qty, price=price):
+                maintenance_reason = "entry_shape_changed"
+            if maintenance_reason:
+                self.counts["resting_buy_rejected_" + maintenance_reason] += 1
+                self.store.event(
+                    "RESTING_BUY_CANCEL", coin=coin, cid=order["cid"],
+                    reason=maintenance_reason, decision="available",
+                    order_qty=order["qty"], wanted_qty=str(maintained_qty),
+                    order_price=order.get("price"), wanted_price=str(price),
+                )
                 return self._cancel(buy_orders)
             reason = self.validate_intent(
                 coin, "buy", "BUY", maintained_qty,
@@ -1049,6 +1083,10 @@ class Runtime:
             )
             if reason:
                 self.counts["resting_buy_rejected_" + reason] += 1
+                self.store.event(
+                    "RESTING_BUY_CANCEL", coin=coin, cid=order["cid"],
+                    reason=reason, decision="available",
+                )
                 return self._cancel(buy_orders)
             return fills
         buy_qty = min(wanted_qty, self._buy_cap(coin, price, maker))
