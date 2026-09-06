@@ -227,6 +227,14 @@ def _validate(config, *, root=ROOT):
     bad = valid_params(forced, signal)
     if bad:
         raise ValueError("invalid Track A-2 strategy parameters: " + ",".join(bad))
+    velocity_floor = signal.get("v_fast_floor", 0.0)
+    velocity_elasticity = signal.get("v_depth_elasticity", 0.0)
+    if bool(velocity_floor) != bool(velocity_elasticity):
+        raise ValueError("Track A-2 depth/velocity relaxation fields must be paired")
+    if velocity_floor and not 0 < velocity_floor <= signal.get("v_fast", SIG["v_fast"]):
+        raise ValueError("Track A-2 fast velocity floor exceeds the base threshold")
+    if velocity_elasticity > 2:
+        raise ValueError("Track A-2 depth/velocity elasticity exceeds its safety bound")
     if strategy.get("entry_random", 0) or strategy.get("exit_random", 0):
         raise ValueError("Track A-2 measurement baselines cannot execute live")
     if not isinstance(strategy.get("max_units"), int) or not 1 <= strategy["max_units"] <= 10:
