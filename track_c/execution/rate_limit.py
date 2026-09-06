@@ -3,6 +3,7 @@ from collections import deque
 import threading
 import time
 from urllib.parse import urlsplit
+from track_c.execution.coinone import check_before_send
 
 
 class Transport:
@@ -21,4 +22,5 @@ class Transport:
                 if len(history)<limit: history.append(now); break
                 delay=max(.001,history[0]+window-now)
             self.sleep(delay); self.wait_seconds+=delay
+        check_before_send(request)
         return self.send(request,timeout)

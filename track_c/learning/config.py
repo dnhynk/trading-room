@@ -6,12 +6,13 @@ import math
 from pathlib import Path
 
 DEFAULTS = dict(
-    version='c4-liquidity-v1', coins=['BTC'], notional_krw=20000., entry_ticks=2.,
+    version='c4-liquidity-v2', coins=['BTC'], notional_krw=20000., entry_ticks=2.,
     basis_window_s=1800, basis_min_samples=60, basis_quiet_ticks=1.5,
     basis_break_s=180, leader_max_age_ms=3000, book_max_age_ms=1500, sampling_book_age_ms=3000,
     disagreement_ticks=2., episode_quiet_s=32, episode_max_s=240,
     sell_depth_ratio=1., common_drop_ticks=1., ttl_s=8, hold_s=180,
     latency_ms=250, cancel_latency_ms=500, decision_ms=500,
+    exit_protocol='protect_cancel_reconcile',
     depth_haircut=.5, depth_fraction=.1, flow_fraction=.2,
     risk_fraction=.0025, daily_loss_fraction=.015, cash_fraction=.95,
     risk_aversion=.1, capital_cost_bp_hour=1., min_attempts=30, min_fills=10,
@@ -25,6 +26,8 @@ def validate(cfg=None):
     cfg = {**deepcopy(DEFAULTS), **(cfg or {})}
     if set(cfg) != set(DEFAULTS) or cfg['version'] != DEFAULTS['version'] or cfg['coins'] != ['BTC']:
         raise ValueError('invalid C4 schema/universe')
+    if cfg['exit_protocol'] not in ('protect_cancel_reconcile','direct'):
+        raise ValueError('invalid C4 exit protocol')
     for key, value in DEFAULTS.items():
         if isinstance(value, (int, float)):
             if type(cfg[key]) not in (int, float) or not math.isfinite(cfg[key]):

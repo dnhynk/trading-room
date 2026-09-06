@@ -37,10 +37,21 @@ def label(i,net=2.,filled=1.):
                 gross_bp=10000*filled+net,spent_bp=10000*filled,
                 terminal_bp=net,cause='recovery' if net>0 else 'collapse',duration_s=1.,
                 occupied_s=1.,exit_model='exit',exit_trained_until=0,
+                exit_protocol='protect_cancel_reconcile',
                 cash_net_krw=net*a['notional']/10000,residual_qty=0.)
 
 
 class StateValueTests(unittest.TestCase):
+    def test_old_or_different_execution_labels_cannot_enter_the_new_model(self):
+        for protocol in (None,'direct'):
+            with self.subTest(protocol=protocol):
+                row=label(0);row['exit_protocol']=protocol
+                with self.assertRaisesRegex(ValueError,'protocol'):
+                    CashModel.fit([row],UNTIL,cfg(),'exit')
+                row['exit_model']='structural'
+                with self.assertRaisesRegex(ValueError,'protocol'):
+                    HazardModel.fit([row],[],UNTIL,cfg())
+
     def test_candidates_keep_original_price_quantity_and_safety(self):
         s=state();s['ask']=102.;s['asks']=[(102.,10.)]
         old=old_candidates(s,cfg(),10000.,100.)
@@ -135,7 +146,7 @@ class ExecutionAndHoldTests(unittest.TestCase):
         for reason in ('recovery','stop','timeout'):
             with self.subTest(reason=reason):
                 a=Attempt(action(),cfg(),state());a.event(trade(1000300));a.request_exit(1000400,reason)
-                a.advance(1000700)
+                a.advance(1001400)
                 self.assertEqual(a.result()['reason'],reason)
                 self.assertEqual(a.result()['cause'],'recovery' if reason=='recovery' else 'timeout' if reason=='timeout' else 'collapse')
 
@@ -154,18 +165,19 @@ class ExecutionAndHoldTests(unittest.TestCase):
     def test_minimum_order_is_rechecked_at_sell_arrival(self):
         ac=action();ac['minimum']=80.
         a=Attempt(ac,cfg(),state());a.event(trade(1000300));a.request_exit(1000400,'stop')
-        a.event(book(1000500,70.));a.advance(1000700)
+        a.event(book(1000500,70.));a.advance(1001400)
         r=a.result();self.assertEqual(r['sold_qty'],0.);self.assertEqual(r['residual_qty'],1.)
         self.assertEqual(r['cash_net_krw'],-100.);self.assertEqual(r['reason'],'residual')
 
     def test_paired_exits_both_use_arrival_book_and_include_later_failure(self):
         a=Attempt(action(),cfg(),state());a.event(trade(1000300));a.event(book(1000400,100.))
         pair=ExitPair(a,1000450,state(1000450))
-        for obj in (a,pair.sell):obj.event(book(1000600,99.));obj.advance(1000750)
+        for obj in (a,pair.sell):obj.event(book(1000600,99.))
+        pair.sell.advance(1001400)
         self.assertEqual(pair.sell.gross,99.)  # Not the instantaneous100 quote.
         a.event(book(1000900,96.));a.decide(1001000,state(1001000,96.))
-        a.event(book(1001100,95.));a.advance(1001300)
-        r=pair.result(1001300)
+        a.event(book(1001100,95.));a.advance(1001800)
+        r=pair.result(1001800)
         self.assertFalse(r['censored']);self.assertEqual(r['hold_reason'],'stop')
         self.assertEqual(r['hold_cash_krw']-r['sell_cash_krw'],-4.)
 
@@ -173,9 +185,9 @@ class ExecutionAndHoldTests(unittest.TestCase):
         a=Attempt(action(),cfg(),state());a.event(trade(1000300))
         a.sold=.5;a.gross=50.
         pair=ExitPair(a,1000400,state(1000400))
-        pair.sell.advance(1000700)
-        a.event(book(1000800,96.));a.decide(1000900,state(1000900,96.));a.advance(1001200)
-        r=pair.result(1001200)
+        pair.sell.advance(1001400)
+        a.event(book(1000800,96.));a.decide(1000900,state(1000900,96.));a.advance(1001700)
+        r=pair.result(1001700)
         self.assertEqual(r['filled_qty'],.5)
         self.assertAlmostEqual(r['sell_cash_krw'],50.)
         self.assertAlmostEqual(r['hold_cash_krw'],48.)
@@ -201,7 +213,7 @@ class ExecutionAndHoldTests(unittest.TestCase):
             a.cancel(1000400)
             a.event(book(1000700,104. if good else 90.))
             a.decide(1001000,state(1001000,104. if good else 90.))
-            a.event(book(1001100,104. if good else 90.));a.advance(1001300)
+            a.event(book(1001100,104. if good else 90.));a.advance(1002100)
             r=a.result();r['episode_id']='good' if good else 'bad'
             return r
         base=[run(True,1.),run(False,1.)];stress=[run(True,2.),run(False,2.)]

@@ -25,7 +25,7 @@ def sources():
 
 
 def embargo(cfg):
-    return (cfg['ttl_s']+cfg['hold_s'])*1000+cfg['cancel_latency_ms']+3*cfg['latency_ms']+2*cfg['decision_ms']
+    return (cfg['ttl_s']+cfg['hold_s'])*1000+2*cfg['cancel_latency_ms']+4*cfg['latency_ms']+3*cfg['decision_ms']
 
 
 def stage(state,cfg):

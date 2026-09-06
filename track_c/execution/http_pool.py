@@ -7,7 +7,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from track_c.execution.coinone import CoinoneError
+from track_c.execution.coinone import CoinoneError, check_before_send
 
 
 class HTTPSPool:
@@ -33,6 +33,11 @@ class HTTPSPool:
             connection.timeout = timeout
             if connection.sock: connection.sock.settimeout(timeout)
             path = url.path + ('?'+url.query if url.query else '')
+            # Pool and connection establishment can both outlive an entry decision.
+            # Establish TLS first, then validate immediately before writing HTTP.
+            if getattr(request, 'before_send', None) is not None:
+                if connection.sock is None: connection.connect()
+                check_before_send(request)
             # A closed pooled connection is discarded on error, never retried.
             connection.request(request.get_method(), path, body=request.data, headers=dict(request.header_items()))
             response = connection.getresponse()

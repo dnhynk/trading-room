@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock,patch
 from urllib.request import Request
-from track_c.execution.coinone import CoinoneError
+from track_c.execution.coinone import CoinoneError, EntryExpired
 from track_c.execution.http_pool import HTTPSPool
 class Connection:
     def __init__(self, host, timeout=3, *, status=200, raw=b'{"result":"success","error_code":"0"}', error=None):
@@ -23,6 +23,34 @@ class Connection:
     def close(self): self.closed = True
 
 class TransportTests(unittest.TestCase):
+    def test_throttle_pool_and_tls_waits_cannot_transmit_an_expired_entry(self):
+        from track_c.execution.client import CoinoneExecution
+        from track_c.execution.coinone import Credentials
+        from track_c.execution.rate_limit import Transport
+        for phase in ('throttle','pool','tls'):
+            with self.subTest(phase=phase):
+                now=[0.];conn=Connection('api.coinone.co.kr')
+                pool=HTTPSPool(size=1,factory=lambda *a,**k:conn)
+                throttle=Transport(pool,clock=lambda:now[0],sleep=lambda delay:now.__setitem__(0,now[0]+delay))
+                if phase=='throttle':throttle.history['order'].extend([0.]*35)
+                elif phase=='pool':
+                    get=pool.slots.get
+                    def delayed_get(*args,**kwargs):
+                        now[0]=2.;return get(*args,**kwargs)
+                    pool.slots.get=delayed_get
+                else:
+                    conn.sock=None
+                    def connect():now[0]=2.;conn.sock=Mock()
+                    conn.connect=connect
+                client=CoinoneExecution(Credentials('test','test'),transport=throttle)
+                def guard():
+                    if now[0]>.5:raise EntryExpired('decision_age')
+                with self.assertRaises(EntryExpired):
+                    client.submit(dict(cid='tc-entry-test0000',coin='BTC',role='entry',side='BUY',type='LIMIT',qty='1',price='100'),before_send=guard)
+                self.assertEqual(conn.requests,[])
+                self.assertEqual(pool.slots.qsize(),1)
+                pool.close()
+
     def test_persistent_signed_requests_are_sent_once(self):
         factory = Mock(side_effect=Connection)
         pool = HTTPSPool(size=1, factory=factory); self.addCleanup(pool.close)

@@ -94,6 +94,7 @@ class CashModel:
     def fit(cls,rows,until,cfg,exit_digest):
         saved=[]
         for r in unique_rows(rows,until):
+            if r.get('exit_protocol')!=cfg['exit_protocol']:raise ValueError('entry label exit protocol mismatch')
             if r['exit_model']!=exit_digest:raise ValueError('entry labels used another exit policy')
             if r['start_ms']<=r.get('exit_trained_until',-1):raise ValueError('exit training leaked into entry labels')
             saved.append(r)
@@ -115,6 +116,8 @@ class CashModel:
         expected=None if bounds['mean'] is None else bounds['mean']*scale
         conditional=weighted(filled,'net_bp')
         out=dict(s,score_krw=None,expected_net_krw=expected,net_interval_bp=bounds,
+                 value_basis='public_replay_execution_hypothesis',live_execution_verified=False,
+                 exit_protocol=self.cfg['exit_protocol'],
                  p_fill=(fw+.5)/(total+1) if total else None,p_fill_empirical=empirical,
                  expected_fill_fraction=weighted(rows,'fill_fraction'),
                  fill_conditioned_net_krw=conditional*scale if conditional is not None else None,
@@ -143,6 +146,8 @@ class HazardModel:
     @classmethod
     def fit(cls,rows,pairs,until,cfg):
         rows=list(unique_rows(rows,until));pairs=list(unique_rows(pairs,until,paired=True))
+        if any(r.get('exit_protocol')!=cfg['exit_protocol'] for r in rows+pairs):
+            raise ValueError('exit label protocol mismatch')
         if any(r['exit_model']!='structural' for r in rows):raise ValueError('fixed structural exit labels required')
         doc=dict(kind='c4-paired-exit-v2',trained_until=until,config=digest(cfg),widths=WIDTHS,
                  hold_widths=HOLD_WIDTHS,rows=[r for r in rows if r['filled_qty']>0 or r['censored']],pairs=pairs,
@@ -153,6 +158,7 @@ class HazardModel:
     def survival(self,action):
         local=neighborhood(self.doc['rows'],action)
         status=support(local,self.cfg,fills=False)
+        status.update(probability_basis='public_replay_execution_hypothesis',live_execution_verified=False)
         incidence=dict(recovery=0.,collapse=0.,timeout=0.)
         survival=1.;left=-1.;out=[]
         for right in self.cfg['hazard_seconds']:
@@ -184,6 +190,7 @@ class HazardModel:
         known=[rw for rw in local if not rw[0]['censored']]
         scale=(qty or action['qty'])*action['price']/10000
         out=dict(s,hold=None,paired_interval_bp=bounds,
+                 value_basis='public_replay_execution_hypothesis',live_execution_verified=False,
                  incremental_mean_krw=bounds['mean']*scale if bounds['mean'] is not None else None,
                  expected_hold_recovery_krw=weighted(known,'hold_bp')*scale if known else None,
                  expected_sell_recovery_krw=weighted(known,'sell_bp')*scale if known else None,

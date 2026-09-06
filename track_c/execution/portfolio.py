@@ -148,7 +148,7 @@ class Portfolio:
         self.state.update(cash_krw=str(actual),capital_initialized=True,capital_at=self.clock(),external_flows=str(D(self.state['external_flows'])+delta))
         self.store.save(self.state,'CAPITAL_INITIALIZED' if initial else 'EXTERNAL_CAPITAL' if delta else 'CAPITAL_SYNC',balance=str(actual),external_delta=str(delta))
         return True
-    def enter(self,coin,plan,feature,minimum):
+    def enter(self,coin,plan,feature,minimum,*,before_send=None):
         self.roll_day()
         if coin in self.campaigns: return False
         required=D(plan['qty'])*D(plan['entry'])
@@ -159,6 +159,6 @@ class Portfolio:
             risk += D(residual['qty'])*max(D(0),residual_mark(residual)-D(plan['stop_limit']))
         if required>max(D(0),D(self.state['cash_krw'])*D(self.config['cash_fraction'])-self.reserved_cash()) or risk>self.remaining_risk(merging): return False
         if plan.get('research') and D(self.state['research_loss_day'])+self.committed_risk(merging)+risk>self.equity*D(self.config['risk_fraction']): return False
-        return self.book(coin).enter(coin,plan,feature,minimum)
+        return self.book(coin).enter(coin,plan,feature,minimum,before_send=before_send)
     def request_exit(self,reason):
         for coin in list(self.campaigns): self.book(coin).request_exit(reason)

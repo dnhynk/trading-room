@@ -5,6 +5,7 @@ learned requires the frozen refined model's support and positive score. No retra
 """
 import argparse
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeout
 from decimal import Decimal as D
 import json
 from pathlib import Path
@@ -18,11 +19,12 @@ from track_c.learning.features import candidates
 from track_c.replay.engine import stage
 from track_c.market.microstructure import liquidate
 from track_c.execution.portfolio import Portfolio, Book
+from track_c.execution.coinone import EntryExpired
 from track_c.market.prices import price_floor
 from track_c.settings import load
 from track_c.ops.store import encoded
 
-VERSION='c4-live-v2.1-layout1'
+VERSION='c4-live-v2.2'
 MODES=('structural_sampling','learned')
 
 
@@ -116,6 +118,8 @@ class LiveRunner(Runtime):
     def __init__(self,cfg):
         if cfg.get('c4_live_mode') not in MODES:raise ValueError('explicit C4 live mode required')
         self.artifact,self.c4cfg,self.models=read_model(cfg['c4_model_path'])
+        if self.c4cfg['exit_protocol']!='protect_cancel_reconcile':
+            raise ValueError('live owner requires protection-aware replay; direct is comparison-only')
         if cfg['coins']!=['BTC'] or float(cfg['notional_krw'])>20000:raise ValueError('C4 live universe/size mismatch')
         if any(float(cfg[k])!=float(self.c4cfg[k]) for k in ('risk_fraction','daily_loss_fraction','cash_fraction')):
             raise ValueError('C4 live risk must match frozen research constraints')
@@ -178,6 +182,114 @@ class LiveRunner(Runtime):
         if not meta:return None
         return self.c4markets[coin].snapshot(time.time_ns()//1000000,meta.contract,meta.units)
 
+    def entry_invalid_reason(self,coin,origin,state,plan,cash,risk,deadline):
+        """Cheap validation on the event-loop thread; never run another prediction."""
+        now=time.time_ns()//1000000
+        age=self.c4cfg['book_max_age_ms']
+        if time.monotonic()>deadline or not 0<=now-origin['t_ms']<=age:return 'decision_age'
+        if not 0<=now-state['book_ms']<=age:return 'book_age'
+        if (not self.connected or not self.private_connected or self.stopping or not self.storage_ok
+                or self.cfg['mode']!='live' or not self.cfg['funding_confirmed']
+                or (self.directory/'PAUSE').exists() or (self.directory/'STOP').exists()):return 'runtime_unavailable'
+        if not 0<=time.time()-self.account_at<=5:return 'account_age'
+        if coin in self.foreign_assets or self.oms.state['halt']:return 'ownership_or_halt'
+        # The final transport check follows our durable INTENT. That reservation
+        # may exist, but no other campaign/order or already submitted entry may.
+        own=list(self.oms.campaigns.values())
+        if any(c['plan'] is not plan or D(c['qty']) for c in own):return 'ownership_changed'
+        orders=self.oms.active()
+        if any(o['coin']!=coin or o['role']!='entry' or o['status']!='INTENT' for o in orders):return 'orders_changed'
+        latest=self.current_state(coin)
+        if (not latest or latest.get('episode_id')!=origin.get('episode_id')
+                or latest['bids']!=state['bids'] or latest['asks']!=state['asks']):return 'market_changed'
+        if not 0<=now-latest['book_ms']<=age:return 'book_age'
+        reason=stage(latest,self.c4cfg)
+        if reason:return reason
+        if any(float(v) for v in self.markets[coin].fees.values()):return 'unverified_nonzero_fees'
+        reserved=sum(float(o['qty'])*float(o['price']) for o in orders)
+        committed=sum(float(o['qty'])*(float(o['price'])-float(plan['stop_limit'])) for o in orders)
+        available=min(cash,float(self.cash())+reserved)
+        remaining=min(risk,float(self.oms.remaining_risk())+committed)
+        legal=candidates(latest,self.c4cfg,available,remaining)
+        keys=('id','price','qty','stop','stop_limit')
+        if not any(all(a[k]==plan['c4_action'][k] for k in keys) for a in legal):return 'action_changed'
+        return None
+
+    def submission_guard(self,coin,origin,state,plan,cash,risk,deadline):
+        loop=asyncio.get_running_loop()
+        async def validate():
+            return self.entry_invalid_reason(coin,origin,state,plan,cash,risk,deadline)
+        def check():
+            # Called inside the worker and again after throttle/pool/TLS waits.
+            # Market.snapshot mutates history, so access it only on its owner loop.
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise EntryExpired('decision_age')
+            future=asyncio.run_coroutine_threadsafe(validate(),loop)
+            try:reason=future.result(timeout=remaining)
+            except FutureTimeout:
+                future.cancel()
+                raise EntryExpired('validation_wait_expired') from None
+            if reason:raise EntryExpired(reason)
+            if time.monotonic()>deadline:raise EntryExpired('decision_age')
+        return check
+
+    async def evaluate_entry(self,coin,ep,s):
+        started=time.monotonic();timings={};expiry=None
+        age=self.c4cfg['book_max_age_ms']
+        deadline=started+max(0,min(s['t_ms'],s['book_ms'])+age-time.time_ns()//1000000)/1000
+        model=self.models['refined'][1];mode=self.cfg['c4_live_mode']
+        async def predict(phase,fn,*args):
+            queued=time.monotonic()
+            def compute():
+                timings[phase+'_queue_ms']=(time.monotonic()-queued)*1000
+                begin=time.perf_counter()
+                try:return fn(*args)
+                finally:timings[phase+'_ms']=(time.perf_counter()-begin)*1000
+            # Model documents and the captured state are immutable during a run.
+            # Long neighborhood scans must not stop receive-time market ingestion.
+            return await asyncio.to_thread(compute)
+        try:
+            outcome=await predict('first_choose',choose,s,self.c4cfg,self.cash(),self.oms.remaining_risk(),model,mode)
+            if any(float(v) for v in self.markets[coin].fees.values()):outcome.update(accepted=False,reason='unverified_nonzero_fees')
+            self.selection[coin]={k:v for k,v in outcome.items() if k not in ('candidates','action')}
+            self.store.save(self.oms.state,'C4_DECISION',coin=coin,model=self.artifact['digest'],mode=mode,
+                            market_state=s,decision=outcome,ep=ep,exchange_fills_verified=False)
+            if not outcome['accepted']:return
+            current=self.current_state(coin)
+            if not current or current['bids']!=s['bids'] or current['asks']!=s['asks']:
+                raise EntryExpired('market_changed')
+            cash,risk=float(self.cash()),float(self.oms.remaining_risk())
+            preliminary=plan_for(outcome['action'],s,self.artifact['digest'],mode)
+            reason=self.entry_invalid_reason(coin,s,current,preliminary,cash,risk,deadline)
+            if reason:raise EntryExpired(reason)
+            fresh=await predict('second_choose',choose,current,self.c4cfg,cash,risk,model,mode)
+            if (not fresh['accepted'] or
+                    any(fresh['action'][k]!=outcome['action'][k] for k in ('id','price','qty','stop','stop_limit'))):
+                raise EntryExpired('action_changed')
+            plan=plan_for(fresh['action'],current,self.artifact['digest'],mode)
+            plan['c4_prediction']=fresh['prediction']
+            plan['c4_probabilities']=await predict('survival',self.models['refined'][0].survival,fresh['action'])
+            # All model work is now complete. Do not reset the decision lifetime.
+            reason=self.entry_invalid_reason(coin,s,current,plan,cash,risk,deadline)
+            if reason:raise EntryExpired(reason)
+            guard=self.submission_guard(coin,s,current,plan,cash,risk,deadline)
+            queued=time.monotonic()
+            def enter():
+                timings['worker_queue_ms']=(time.monotonic()-queued)*1000
+                return self.oms.enter(coin,plan,current,self.markets[coin].contract['min_order_amount'],before_send=guard)
+            entered=await asyncio.to_thread(enter)
+            if not entered:self.store.event('C4_ENTRY_REJECTED',coin=coin,episode_id=ep,reason='portfolio_admission_guard')
+        except EntryExpired as exc:
+            expiry=str(exc)
+            self.counts['c4_decision_expired']+=1
+            self.selection[coin]=dict(reason='decision_expired',detail=expiry)
+            self.store.event('C4_ENTRY_REJECTED',coin=coin,episode_id=ep,reason='decision_expired',detail=expiry,transmitted=False)
+        finally:
+            self.store.event('C4_DECISION_TIMING',coin=coin,episode_id=ep,model=self.artifact['digest'],
+                             **timings,total_ms=(time.monotonic()-started)*1000,expiry_reason=expiry,
+                             cash_rows=len(getattr(model,'doc',{}).get('rows',[])),
+                             hazard_rows=len(getattr(self.models['refined'][0],'doc',{}).get('rows',[])))
+
     async def decisions(self):
         self.sample_fairs()
         self.selection={c:dict(reason='record_only') for c in self.markets if c not in self.c4markets}
@@ -196,29 +308,7 @@ class LiveRunner(Runtime):
             s=self.current_state(coin)
             if not s or s.get('episode_id')!=ep:
                 self.selection[coin]=dict(reason='episode_expired');continue
-            outcome=choose(s,self.c4cfg,self.cash(),self.oms.remaining_risk(),self.models['refined'][1],self.cfg['c4_live_mode'])
-            if any(float(v) for v in self.markets[coin].fees.values()):outcome.update(accepted=False,reason='unverified_nonzero_fees')
-            self.selection[coin]={k:v for k,v in outcome.items() if k not in ('candidates','action')}
-            self.store.save(self.oms.state,'C4_DECISION',coin=coin,model=self.artifact['digest'],mode=self.cfg['c4_live_mode'],
-                            market_state=s,decision=outcome,ep=ep,exchange_fills_verified=False)
-            if not outcome['accepted']:continue
-            now=time.time_ns()//1000000
-            current=self.current_state(coin)
-            if (not current or not current.get('entry_fresh') or current['bids']!=s['bids'] or current['asks']!=s['asks']
-                    or now-s['t_ms']>self.c4cfg['book_max_age_ms'] or not self.connected or not self.private_connected
-                    or coin in self.foreign_assets or self.oms.campaigns or self.oms.active()
-                    or not 0<=time.time()-self.account_at<=5
-                    or self.stopping or not self.storage_ok or (self.directory/'PAUSE').exists()):
-                self.counts['c4_decision_expired']+=1;continue
-            fresh_decision=choose(current,self.c4cfg,self.cash(),self.oms.remaining_risk(),self.models['refined'][1],self.cfg['c4_live_mode'])
-            if (not fresh_decision['accepted'] or current.get('episode_id')!=ep or
-                    any(fresh_decision['action'][k]!=outcome['action'][k] for k in ('id','price','qty','stop','stop_limit'))):
-                self.counts['c4_decision_expired']+=1;continue
-            plan=plan_for(fresh_decision['action'],current,self.artifact['digest'],self.cfg['c4_live_mode'])
-            plan['c4_prediction']=fresh_decision['prediction']
-            plan['c4_probabilities']=self.models['refined'][0].survival(fresh_decision['action'])
-            entered=await asyncio.to_thread(self.oms.enter,coin,plan,current,self.markets[coin].contract['min_order_amount'])
-            if not entered:self.store.event('C4_ENTRY_REJECTED',coin=coin,episode_id=ep,reason='portfolio_admission_guard')
+            await self.evaluate_entry(coin,ep,s)
 
     def holding_decision(self,c,book):
         s=self.current_state(c['coin']);ref=(s or {}).get('reference',{})

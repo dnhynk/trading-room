@@ -29,6 +29,16 @@ class CoinoneError(RuntimeError):
         self.code = code
 
 
+class EntryExpired(CoinoneError):
+    """Local admission failure before any order bytes were transmitted."""
+
+
+def check_before_send(request):
+    guard = getattr(request, 'before_send', None)
+    if guard is not None:
+        guard()
+
+
 @dataclass(frozen=True)
 class Credentials:
     access_token: str = field(repr=False)
@@ -135,7 +145,7 @@ class CoinoneReadOnly:
             raise CoinoneError("endpoint is outside the read-only allowlist")
         return self._signed(path, {})
 
-    def _signed(self, path, fields):
+    def _signed(self, path, fields, *, before_send=None):
         if self._credentials is None:
             raise CoinoneError("Coinone credentials required")
         payload = dict(fields, access_token=self._credentials.access_token, nonce=str(uuid.uuid4()))
@@ -145,6 +155,9 @@ class CoinoneReadOnly:
             "Content-Type": "application/json", "Accept": "application/json",
             "X-COINONE-PAYLOAD": encoded.decode("ascii"), "X-COINONE-SIGNATURE": signature,
         })
+        if before_send is not None:
+            req.before_send = before_send
+            check_before_send(req)
         return self._transport(req, self._timeout)
 
     def _get(self, resource, coin):

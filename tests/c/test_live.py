@@ -16,6 +16,12 @@ class UnsupportedModel:
 
 
 class DecisionModeTests(unittest.TestCase):
+    def test_direct_exit_comparison_model_cannot_be_used_by_live_owner(self):
+        from unittest.mock import patch
+        with patch('track_c.live.read_model',return_value=({},research_cfg(exit_protocol='direct'),{})):
+            with self.assertRaisesRegex(ValueError,'protection-aware'):
+                LiveRunner(dict(c4_live_mode='structural_sampling',c4_model_path='unused'))
+
     def test_unavailable_reference_cannot_disconnect_the_public_feed(self):
         from track_c.ops.observations import Observations
         with tempfile.TemporaryDirectory() as folder:
@@ -106,7 +112,7 @@ class LiveOMSTests(unittest.TestCase):
         r=LiveRunner.__new__(LiveRunner);r.sample_fairs=lambda:None
         r.c4cfg=research_cfg();r.c4markets={'BTC':None}
         r.cfg=dict(self.config,c4_live_mode='structural_sampling')
-        r.c4pending={'BTC':'decision-ep'};s.update(episode_id='decision-ep',t_ms=time.time_ns()//1000000)
+        r.c4pending={'BTC':'decision-ep'};s.update(episode_id='decision-ep',t_ms=time.time_ns()//1000000,book_ms=time.time_ns()//1000000)
         r.c4states={'BTC':s};r.current_state=lambda coin:s;r.last_decided={}
         r.directory=self.store.directory;r.oms=self.p;r.store=self.store
         r.models={'refined':(SimpleNamespace(survival=lambda a:[]),UnsupportedModel())}
@@ -134,6 +140,99 @@ class LiveOMSTests(unittest.TestCase):
         self.assertEqual(intent['plan']['model'],'c4-test')
         self.assertFalse(intent['plan']['c4_prediction']['ready'])
         self.assertEqual(intent['plan']['c4_mode'],'structural_sampling')
+
+    def test_expired_second_prediction_survival_and_worker_wait_never_submit(self):
+        import asyncio
+        from unittest.mock import patch
+        from track_c import live
+        for phase in ('second_choose','survival','worker_queue'):
+            with self.subTest(phase=phase):
+                r=self.live_runner(state());elapsed=[0.];calls=[0]
+                start=r.c4states['BTC']['t_ms'];r.account_at=start/1000
+                original_choose=live.choose;original_thread=asyncio.to_thread
+                def choose_later(*args):
+                    calls[0]+=1;answer=original_choose(*args)
+                    if phase=='second_choose' and calls[0]==2:elapsed[0]+=2
+                    return answer
+                def survival_later(action):
+                    if phase=='survival':elapsed[0]+=2
+                    return []
+                async def delayed_worker(fn,*args,**kwargs):
+                    if phase=='worker_queue' and fn.__name__=='enter':elapsed[0]+=2
+                    return await original_thread(fn,*args,**kwargs)
+                r.models['refined'][0].survival=survival_later
+                with patch('track_c.live.time.time_ns',side_effect=lambda:int(start+elapsed[0]*1000)*1000000), \
+                     patch('track_c.live.time.time',side_effect=lambda:start/1000+elapsed[0]), \
+                     patch('track_c.live.time.monotonic',side_effect=lambda:elapsed[0]), \
+                     patch('track_c.live.choose',side_effect=choose_later), \
+                     patch('track_c.live.asyncio.to_thread',side_effect=delayed_worker):
+                    asyncio.run(r.decisions())
+                self.assertFalse(self.client.submissions)
+                self.assertFalse(self.p.campaigns)
+                self.assertEqual(r.counts['c4_decision_expired'],1)
+
+    def test_market_updates_continue_during_prediction_and_invalidate_admission(self):
+        import asyncio,threading
+        from unittest.mock import patch
+        from track_c import live
+        r=self.live_runner(state());started=threading.Event();received=threading.Event()
+        original=live.choose
+        def slow_prediction(*args):
+            started.set()
+            self.assertTrue(received.wait(2),'market reception was blocked by inference')
+            return original(*args)
+        async def market_receiver():
+            while not started.is_set():await asyncio.sleep(0)
+            r.private_connected=False;received.set()
+        async def run():await asyncio.gather(r.decisions(),market_receiver())
+        with patch('track_c.live.choose',side_effect=slow_prediction):asyncio.run(run())
+        self.assertFalse(self.client.submissions)
+        self.assertEqual(r.counts['c4_decision_expired'],1)
+
+    def test_market_change_while_queued_is_checked_by_the_submission_worker(self):
+        import asyncio
+        from unittest.mock import patch
+        r=self.live_runner(state());original=asyncio.to_thread
+        async def queued(fn,*args,**kwargs):
+            if fn.__name__=='enter':r.c4states['BTC']['reference']['m10']=-10.
+            return await original(fn,*args,**kwargs)
+        with patch('track_c.live.asyncio.to_thread',side_effect=queued):asyncio.run(r.decisions())
+        self.assertFalse(self.client.submissions)
+        self.assertEqual(r.counts['c4_decision_expired'],1)
+
+    def test_submission_uses_book_timestamp_and_rechecks_latest_market(self):
+        import asyncio,time
+        from unittest.mock import patch
+        for change in ('book_age','common_fall','disconnect','pause'):
+            with self.subTest(change=change):
+                r=self.live_runner(state());s=r.c4states['BTC']
+                def survival(action):
+                    if change=='book_age':s['book_ms']=time.time_ns()//1000000-1501
+                    elif change=='common_fall':s['reference']['m10']=-10
+                    elif change=='disconnect':r.private_connected=False
+                    else:(r.directory/'PAUSE').write_text('test')
+                    return []
+                r.models['refined'][0].survival=survival
+                asyncio.run(r.decisions())
+                (r.directory/'PAUSE').unlink(missing_ok=True)
+                self.assertFalse(self.client.submissions)
+                self.assertEqual(r.counts['c4_decision_expired'],1)
+
+    def test_local_expiry_after_durable_intent_is_terminal_and_releases_reservation(self):
+        from track_c.execution.coinone import EntryExpired
+        calls=[]
+        def guard():
+            calls.append(1)
+            if len(calls)>1:raise EntryExpired('decision_age')
+        with self.assertRaises(EntryExpired):
+            self.p.enter('BTC',deepcopy(self.plan),{},'5000',before_send=guard)
+        self.assertFalse(self.client.submissions)
+        self.assertFalse(self.p.campaigns);self.assertFalse(self.p.active())
+        self.assertEqual(self.p.reserved_cash(),0)
+        self.assertEqual(self.p.state['halt'],None)
+        report=self.evidence()
+        self.assertTrue(report['outcomes'][0]['entry_not_sent'])
+        self.assertEqual(report['predictions']['fill_brier']['episodes'],0)
 
     def test_fill_establishes_native_stop_not_resting_take(self):
         cid=self.enter();self.client.fill(cid,'10','1000');book=self.p.book('BTC')
@@ -220,8 +319,40 @@ class LiveOMSTests(unittest.TestCase):
         self.assertEqual(r['remaining_inventory_cost_krw'],0)
         self.assertEqual(r['cash_change_krw'],r['realized_pnl_krw'])
         self.assertIn('entry_submit_roundtrip_ms',r['latency'])
+        for name in ('protect_cancel_and_reconcile_ms','exit_request_to_ack_ms','exit_request_to_fill_seen_ms'):
+            self.assertEqual(r['latency'][name]['n'],1)
+            self.assertEqual(r['latency'][name]['campaigns_or_episodes'],1)
+            self.assertIn('p95_ms',r['latency'][name])
         self.assertEqual(r['unknown_attempts'],0)
         self.assertFalse(r['predictions']['probability_calibration_fitted'])
+
+    def test_unsettled_protection_is_reported_without_inventing_exit_ack_latency(self):
+        cid=self.enter();self.client.fill(cid,'10','1000');book=self.p.book('BTC')
+        book.drive(bid=1000,fresh=True)
+        self.client.cancel=lambda *args:dict(result='success')
+        book.drive(bid=1001,fresh=True,quantitative_decision=dict(hold=True,take_profit=True))
+        r=self.evidence()
+        self.assertEqual(r['exit_procedure']['protect_cancel_unresolved'],1)
+        self.assertNotIn('exit_request_to_ack_ms',r['latency'])
+        self.assertEqual(r['unknown_attempts'],1)
+        self.assertEqual(r['execution_calibration']['status'],'UNVERIFIED')
+
+    def test_exit_fill_timings_keep_protective_race_and_independent_campaign_count(self):
+        cid=self.enter();self.client.fill(cid,'10','1000');book=self.p.book('BTC')
+        book.drive(bid=1000,fresh=True)
+        original=self.client.cancel
+        def cancel(coin,cid):
+            self.now[0]+=.2
+            self.client.fill(cid,'4','999','CANCELED')
+            return original(coin,cid)
+        self.client.cancel=cancel
+        book.drive(bid=1001,fresh=True,quantitative_decision=dict(hold=True,take_profit=True))
+        book.drive(bid=1001,fresh=True)
+        r=self.evidence()
+        self.assertEqual(r['exit_procedure']['protective_fill_after_request_campaigns'],1)
+        self.assertAlmostEqual(r['latency']['exit_request_to_ack_ms']['mean_ms'],200.,places=3)
+        self.assertEqual(r['latency']['exit_request_to_fill_seen_ms']['n'],2)
+        self.assertEqual(r['latency']['exit_request_to_fill_seen_ms']['campaigns_or_episodes'],1)
 
 
 if __name__=='__main__':unittest.main()

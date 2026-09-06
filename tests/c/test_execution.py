@@ -80,7 +80,8 @@ class FakeExchange:
         self.cancel_race = False
         self.inventory = D(0)
 
-    def submit(self, order):
+    def submit(self, order, *, before_send=None):
+        if before_send is not None: before_send()
         self.submissions.append(dict(order))
         if self.fail == "reject":
             raise CoinoneError("rejected", code=103)

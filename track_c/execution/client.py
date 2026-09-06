@@ -19,7 +19,7 @@ class CoinoneExecution(CoinoneReadOnly):
     def cancel(self, coin, cid):
         return self._signed("/v2.1/order/cancel", dict(quote_currency="KRW", target_currency=symbol(coin), user_order_id=own_id(cid)))
 
-    def submit(self, order):
+    def submit(self, order, *, before_send=None):
         """The durable intent must exist before this method is called."""
         payload = dict(quote_currency="KRW", target_currency=symbol(order["coin"]), user_order_id=own_id(order["cid"]),
                        side=order["side"], type=order["type"], qty=format(decimal(order["qty"], positive=True), "f"))
@@ -33,4 +33,4 @@ class CoinoneExecution(CoinoneReadOnly):
             payload["trigger_price"] = format(decimal(order["trigger_price"], positive=True), "f")
         if payload['type']=='MARKET' and order.get('limit_price'):
             payload['limit_price']=format(decimal(order['limit_price'],positive=True),'f')
-        return self._signed("/v2.1/order", payload)
+        return self._signed("/v2.1/order", payload, before_send=before_send)

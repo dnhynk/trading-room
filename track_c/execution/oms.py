@@ -8,7 +8,7 @@ import datetime as dt
 import time
 import uuid
 
-from track_c.execution.coinone import CoinoneError, decimal
+from track_c.execution.coinone import CoinoneError, EntryExpired, decimal
 from track_c.market.microstructure import liquidate
 from track_c.execution.accounting import marked_equity, residual_mark
 
@@ -92,7 +92,8 @@ class OMS:
     def active(self, role=None):
         return [o for o in self.state["orders"].values() if o["status"] not in TERMINAL and (role is None or o["role"] == role)]
 
-    def enter(self, coin, plan, feature, minimum):
+    def enter(self, coin, plan, feature, minimum, *, before_send=None):
+        if before_send is not None: before_send()
         if self.config["mode"] != "live" or not self.config["funding_confirmed"] or not self.state["capital_initialized"]:
             return False
         if not 0 <= self.clock()-self.state["capital_at"] <= 5:
@@ -121,10 +122,14 @@ class OMS:
                                       mark_at=residual.get('mark_at', 0) if residual else self.clock(), plan=plan, signal=feature,
                                       entry_deadline=self.clock()+(float(plan['entry_ttl_s']) if quantitative else self.config["signal"]["v_hl"]/2))
         self.save("CAMPAIGN_INTENT", coin=coin, plan=plan, residual=residual)
-        self.submit("entry", "BUY", "LIMIT", plan["qty"], price=plan["entry"])
+        order = self.submit("entry", "BUY", "LIMIT", plan["qty"], price=plan["entry"], before_send=before_send)
+        if order.get('not_sent'):
+            self.campaign.update(entry_not_sent=True, exit_reason='decision_expired')
+            self.carry_residual(no_fill=True)
+            raise EntryExpired(order['expiry_reason'])
         return True
 
-    def submit(self, role, side, kind, qty, **fields):
+    def submit(self, role, side, kind, qty, *, before_send=None, **fields):
         c = self.campaign
         if c is None or self.active(role):
             raise RuntimeError("duplicate role or absent campaign")
@@ -137,12 +142,16 @@ class OMS:
         self.save("ORDER_INTENT", order=order)
         started=time.perf_counter()
         try:
-            result = self.client.submit(order)
+            result = (self.client.submit(order, before_send=before_send) if before_send is not None
+                      else self.client.submit(order))
             order["exchange_id"] = result.get("order_id")
             order["status"] = "SUBMITTED"
             order['submit_rtt_ms']=(time.perf_counter()-started)*1000
             self.save("ORDER_SUBMITTED", cid=cid, rtt_ms=order['submit_rtt_ms'],
                       exit_request_to_ack_ms=(self.clock()-c['exit_requested_at'])*1000 if role=='exit' and c.get('exit_requested_at') is not None else None)
+        except EntryExpired as exc:
+            order.update(status='REJECTED', not_sent=True, expiry_reason=str(exc))
+            self.save('ORDER_REJECTED', cid=cid, status='REJECTED', transmitted=False, error=str(exc))
         except CoinoneError as exc:
             order["status"] = "REJECTED" if exc.code in REJECTED else "UNKNOWN"
             self.save("ORDER_REJECTED" if order["status"] == "REJECTED" else "ORDER_UNCERTAIN", cid=cid, error=str(exc))
