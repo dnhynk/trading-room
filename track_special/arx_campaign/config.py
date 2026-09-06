@@ -1,7 +1,7 @@
 """Strict, dependency-free configuration validation for the ARX campaign."""
 from __future__ import annotations
 
-import hashlib
+import hashlib, os
 import json
 from dataclasses import dataclass
 from decimal import Decimal
@@ -39,6 +39,7 @@ def validate(raw: dict[str, Any]) -> CampaignConfig:
     try: mode = OperatingMode(raw["mode"])
     except (KeyError, ValueError) as exc: raise ValueError("mode must be observe, paper, replay, or live") from exc
     if raw.get("schema_version") != 1 or raw.get("venue") != "bitget": raise ValueError("unsupported campaign configuration")
+    if raw.get("api_family") not in {"uta_v3", None}: raise ValueError("only Bitget UTA v3 is supported; Classic v2 is forbidden")
     i, a = raw.get("instrument", {}), raw.get("account", {})
     if (i.get("symbol"), i.get("category"), i.get("base_coin"), i.get("quote_coin"), i.get("settlement_coin"), i.get("contract_type"), i.get("linear_required")) != ("ARXUSDT", "USDT-FUTURES", "ARX", "USDT", "USDT", "perpetual", True):
         raise ValueError("instrument must be ARXUSDT USDT-FUTURES linear perpetual")
@@ -49,12 +50,33 @@ def validate(raw: dict[str, Any]) -> CampaignConfig:
         if raw.get("live_enabled") is not True: raise ValueError("live requires explicit live_enabled=true")
         missing = [k for k in LIVE_REQUIRED if raw.get(k) is None]
         approval = raw.get("approval") or {}
-        if missing or any(approval.get(k) is None for k in ("approved_by", "approved_at", "config_hash")):
-            raise ValueError("live configuration is incomplete: " + ", ".join(missing))
-    for key, value in raw.items():
-        if key.endswith(("_usdt", "_pct_of_E0", "_multiple_of_E0")) and value is not None: decimal(value)
-    digest = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    state = raw.get("state_directory") or "track-special-arx"
-    return CampaignConfig(raw, mode, digest, Path(state))
+        absent = missing + ["approval."+k for k in ("approved_by", "approved_at", "config_hash") if approval.get(k) is None]
+        if absent: raise ValueError("live configuration is incomplete (template remains unchanged): " + ", ".join(absent))
+    def numbers(value: Any, key: str=""):
+        if isinstance(value, dict):
+            for k,v in value.items(): numbers(v,k)
+        elif isinstance(value, list):
+            for v in value: numbers(v,key)
+        elif value is not None and (key.endswith(("_usdt", "_pct_of_E0", "_multiple_of_E0", "_fraction", "_rate", "_bps")) or key in {"base_leverage","leverage_cap"}):
+            d=decimal(value)
+            if d < 0: raise ValueError(f"{key} cannot be negative")
+            if "pct" in key and d > 100: raise ValueError(f"{key} exceeds 100")
+    numbers(raw)
+    stages=raw.get("stage_notional_cap_fractions")
+    if stages is not None:
+        vals=[decimal(x) for x in stages]
+        if not vals or any(x <= 0 or x > 1 for x in vals) or sum(vals) > 1: raise ValueError("stage_notional_cap_fractions must partition no more than 1")
+    profile=raw.get("research_profile")
+    if mode is OperatingMode.LIVE and (not isinstance(profile,str) or profile == "aggressive_bounded_research"): raise ValueError("live profile must be explicitly approved, never copied from research")
+    digest_raw=json.loads(json.dumps(raw))
+    if isinstance(digest_raw.get("approval"),dict): digest_raw["approval"]["config_hash"]=None
+    digest = hashlib.sha256(json.dumps(digest_raw, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if mode is OperatingMode.LIVE and raw["approval"]["config_hash"] != digest: raise ValueError("approval config_hash does not match configuration")
+    home=os.environ.get("TRADING_ROOM_HOME")
+    base=Path(home) if home else Path.cwd().resolve().parent / "trading-room-state"
+    if not base.is_absolute(): raise ValueError("external state directory must be absolute")
+    # Config templates cannot redirect state into the repository.
+    state=base / "track-special-arx"
+    return CampaignConfig(raw, mode, digest, state)
 
 def load(path: str | Path) -> CampaignConfig: return validate(_read(Path(path)))
