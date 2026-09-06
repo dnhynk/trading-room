@@ -7,3 +7,12 @@ STOP
 PAUSE
 RESUME
 data/
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+*.sqlite*
+*.jsonl*
+*.tmp

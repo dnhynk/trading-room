@@ -1,8 +1,8 @@
 import json
 import math
 from pathlib import Path
-from bot.signal import SIG
-from .coinone import decimal, symbol
+from common.signal import SIG
+from track_c.execution.coinone import decimal, symbol
 
 
 def load(path):
@@ -27,13 +27,8 @@ def load(path):
         symbol(coin)
     if set(cfg["signal"]) - set(SIG):
         raise ValueError("unknown signal parameter")
-    if cfg.get('policy')=='quantitative':
-        if type(cfg.get('learning_enabled')) is not bool or not cfg.get('model_path'):
-            raise ValueError('quantitative model/learning settings required')
-        if not .2<=cfg.get('decision_seconds',0)<=10 or not 600<=cfg.get('model_max_age_seconds',0)<=86400:
-            raise ValueError('invalid quantitative cadence/model age')
     if cfg.get('policy')=='rule':
-        from .exit_model import DEFAULTS, validate_exit_settings
+        from track_c.market.exit_settings import DEFAULTS, validate_exit_settings
         cfg = {**DEFAULTS, **cfg}
         validate_exit_settings(cfg)
         if not 1 <= float(cfg.get('http_timeout_s',3)) <= 10:

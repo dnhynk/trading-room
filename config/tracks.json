@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "active_focus": "C",
+  "updated_at": "2026-09-06T15:34:34.486000+09:00",
+  "tracks": {
+    "A": {
+      "status": "paused",
+      "restart_requires_user_instruction": true
+    },
+    "B": {
+      "status": "paused",
+      "restart_requires_user_instruction": true
+    },
+    "C": {
+      "status": "live",
+      "venue": "coinone",
+      "hosting": "aws-ap-northeast-2",
+      "instance_id": "i-0db0329527b7b3533",
+      "capital_mode": "account_equity",
+      "observed_equity_krw": "594457.7819",
+      "order_sizing": "c4_execution_sampling_nearest_safe_minimum_1_tick_max_config_20000_krw_with_original_liquidity_cash_risk_gates",
+      "policy": "c4-live-v2.4",
+      "state_schema": 3,
+      "evaluation_state": "actual_execution_collection_improvement_unconfirmed",
+      "evaluation_protocol": "track_c/evaluations/evaluation-c4-execution-v2.4.json",
+      "quant_audit": "track_c/README.md",
+      "active_release": "20260906-152844-4cad36be6d11",
+      "activation_ms": 1788676474486,
+      "entry_ticks": 1.0,
+      "notification_baseline_ms": 1788620790977,
+      "notification_coins": [
+        "BTC"
+      ],
+      "notification_entry_dev_min_ticks": 2.0,
+      "notification_trade_events": "exits_only",
+      "simultaneous_campaigns": false,
+      "trading_coins": [
+        "BTC"
+      ],
+      "record_coins": [
+        "ETH",
+        "XRP",
+        "SOL",
+        "ADA",
+        "DOGE",
+        "ENA",
+        "FIL",
+        "KAIA",
+        "ONDO",
+        "ONE",
+        "PENGU",
+        "RIVER",
+        "SKYAI",
+        "SUI",
+        "TRUMP",
+        "TRX",
+        "WLD",
+        "XLM",
+        "ZORA"
+      ],
+      "leaders": [
+        "upbit",
+        "bithumb"
+      ],
+      "funding_allocation": "entire_account_balance_compounding",
+      "installed_mode": "live",
+      "host_state": "running",
+      "notional_krw": 20000,
+      "stop_mode": "volatility_frozen_at_entry",
+      "value_exit": false,
+      "execution_version": "c4-live-v2.4",
+      "root_volume_gib": 32,
+      "public_storage_max_bytes": 17179869184,
+      "decision_mode": "execution_sampling",
+      "learning_values": "record_only",
+      "automatic_retraining": false,
+      "model_digest": "66d0ff7551b3be731708560275f0306114428a2d5bebc1275ec28ec8c0fd51fc",
+      "data_directory": "/home/ubuntu/trading-room-c/c4-live/data-v2.4-execution",
+      "configuration": "/home/ubuntu/trading-room-c/c4-live/config-v2.4-execution.json",
+      "frozen_c4_shadow": {
+        "model": "8183ccf23f65d8e424ecad987b6889e32f1dbddbafa56b56f5bd7741afb0f739",
+        "evaluation_protocol": "track_c/evaluations/evaluation-c4.json",
+        "unchanged": true
+      },
+      "model_entry_ticks": 2.0,
+      "minimum_size_only": true,
+      "reference_lower_bound_required": true
+    }
+  },
+  "suspension": {
+    "archive": "../trading-room-state/logs/suspensions/track-ab-20260905-162614",
+    "controls": [
+      "STOP",
+      "PAUSE"
+    ],
+    "engine_positions_at_verification": 0,
+    "engine_orders_at_verification": 0,
+    "pool_claims_at_verification": 0,
+    "last_close": {
+      "symbol": "DASHUSDT",
+      "side": "long",
+      "quantity": "0.43",
+      "price": "69.31",
+      "order_id": "1480033807485259779"
+    }
+  }
+}

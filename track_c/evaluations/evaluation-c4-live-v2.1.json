@@ -1,0 +1,21 @@
+{
+  "version": "c4-live-v2.1",
+  "model": "d80d4f330fd633ebcccd385dfc84706b43e50b0b3c4a6a617f36c05f23710197",
+  "mode": "structural_sampling",
+  "registered_ms": 1788654354458,
+  "start_ms": 1788654420000,
+  "end_ms": 1789518420000,
+  "ledger": "/home/ubuntu/trading-room-c/c4-live/data-v2.1/ledger.sqlite",
+  "release": "/home/ubuntu/trading-room-c/c4-live/releases/20260906-091726-5e15ce42923f",
+  "config_sha256": "1d37d9d840c51fcb57f40027ddb269528672bb6815d068e41b8d3097faf82f0e",
+  "inherited_through_seq": 42960,
+  "previous_orderless_registration": "159aae82f86a38a04b792c2351fe3fd409face6e487dfd5b8fee764dcac6db99",
+  "coins": [
+    "BTC"
+  ],
+  "max_notional_krw": 20000,
+  "learned_values_used_for_orders": false,
+  "automatic_retraining": false,
+  "purpose": "actual_execution_collection; profitability_and_calibration_unconfirmed",
+  "digest": "37ddb8afffe18f605989377642759e586947f3146e91f1b817ec1dd006888e36"
+}

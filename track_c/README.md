@@ -1,76 +1,42 @@
-# C3 — 코인원 선행거래소 공정가 규칙형 메이커 운영
+# Track C — 유동성 회복과 실체결 수집
 
-계약은 [bot/CONCEPT-C.md](../bot/CONCEPT-C.md), 현재 수리 기록은 [REPAIR-C3-20260906.md](REPAIR-C3-20260906.md), 최초 연구는 [AUDIT-20260905.md](AUDIT-20260905.md)다. C3 v4는 BTC만 실매매하며 ETH·XRP·SOL은 기록 전용이다. 신규 주문 시 공정가 편차≥2틱·공정가≥익절가·30/10초 하락 veto/브레이크·코인원 32초 순매수 비중≤0을 적용한다. 2틱은 사용자 지정 기본값이며 수익 최적값이 아니다. 운용자본은 계좌 원화 + C 캠페인·이월 잔량의 매수호가 평가액이다. A/B·S1·C2 worker는 재개하지 않는다. 수익성은 아직 미입증이다.
+Coinone에서 일시적으로 싸진 BTC의 회수 가치를 관측한다. 현재 실거래는 **`execution_sampling`**이다. 1틱 이상 할인 상태에서 양쪽 외부시장으로 계산한 더 낮은 참조가격 하한보다 싼 후보 중 시장에 가장 가까운 최소수량만 주문한다. 학습값은 기록용이며 자동 재학습·증액·모드 전환은 없다. 예측이나 수익성 개선은 아직 입증되지 않았다.
 
-BTC 단독 전환은 **2026-09-06 00:06:30.977 KST**, 진입 하한2틱 재개는 **00:57:27.869 KST**다. 이는 이전 v3 평가이며 현재 v4 통합 평가는 **2026-09-06T02:59:02.270+09:00부터10×24시간**이다. 사용자 후속 지시로 Slack은 기존 BTC 시작부터 **진입 주문 편차2틱 이상** 캠페인만 집계한다. `data/notifications/baseline.json`의 `coins:["BTC"]`·`entry_dev_min_ticks:2.0`은 날짜가 바뀌어도 유지한다. 해당 캠페인의 모든 부분체결·수수료를 포함하며 편차 미만/불명 캠페인은 손익·수익률 분자·횟수·승률에서 제외한다. 손익은 `+0.9원`처럼 소수점 첫째 자리까지 표시한다. 원본 장부·실제 자본·위험 예산은 변경하지 않으며 과거 Slack 메시지의 삭제/수정도 하지 않는다.
-
-## 구성
-
-2026-09-06 승인된 통합 변경은 [REPAIR-C3-20260906.md](REPAIR-C3-20260906.md), 손절·수량·가치 계산은 [EXIT-C3-20260906.md](EXIT-C3-20260906.md)를 따른다. v4는 기준금액2만원, 진입 시 변동성 손절가 고정, 최소 청산금액105% 수량 보정, 표본이 있을 때의 보유 가치 청산을 사용한다. 실제 전환 여부와 시각은 `bot/TRACKS.json` 및 서버 상태가 진실이다.
-
-| 파일 | 역할 |
+| 코드 | 역할 |
 |---|---|
-| `fair.py` | 선행거래소 잔량가중 중간가(설정 별칭 microprice) × 과거 300초 비율 중앙값의 가중 평균, 편차(틱) |
-| `rule.py` | 사전 등록 규칙: 진입/취소/익절/방어/손절/시간, 크기 |
-| `c3_runner.py` | 실행기. 코인원 공개·개인 WS, 선행거래소 녹화(`leaders.py` 내장), 포트폴리오 OMS 구동 |
-| `oms.py`·`portfolio.py` | 장부. `take` 역할(post-only 지정가 매도), `residuals` 잔량 이월 |
-| `leaders.py` | 업비트·빗썸 최상단 호가/체결 녹화(`data/leaders/YYYYMMDD-HH.jsonl.gz`). 엔진이 꺼진 동안만 서비스로 단독 실행 |
-| `c3_replay.py` | 녹화 재생(같은 코드 경로), 대조군 `--control flip|unconditional` |
-| `fairfit.py` | 축약 회귀 진단·AR(1) 근사 반감기. 공적분/정보지분/가중치 채택 출력 없음 |
-| `accounting.py` | 이월 잔량을 포함한 자본·평가손익 |
-| `c3_evidence.py` | 고정 미래 창의 일별 순자산·대조군 차이·블록 하한, 자동 증액 없음 |
-| `exit_model.py` | 과거300초 희소 변동성 손절과 완료된 과거 경로의 보유 가치 대용치 |
-| `http_pool.py`·`recovery.py` | 요청 무재시도 연결 풀, 비정상 종료 뒤 독점 writer로 주문 정합·거래소 보호 |
-| `c3_observations.py`·`c3_live_evidence.py` | 비결정 관측 기록과 실제 체결/미체결·수량별 매도 VWAP·원화 비용/지연 분석 |
-| `replay_stream.py`·`c3_identity.py` | 시간순 압축 임시 spool·제한된 호가 창·온라인 순자산 집계, 소스/설정 동일성 |
-| `c3_upgrade.py` | prepare / switch / resume. 현재 `execution`은 승인된 v4 설정과 실행 보호를 교체한다. 과거 v3는 설정 5개, `--profile btc-only`는 종목 설정 2개, `--profile entry-2`는 `entry_ticks`만 교체. 나머지 live 설정·최신 장부 보존 |
-| `deploy_c3.py` | `install`(관측 모드) / `go-live` / `status` |
+| `live.py`, `runtime.py` | 현재 결정 정책과 시장 수신·계좌 대사·실행 루프 |
+| `market/` | 현지 흐름·호가, 외부 공정가, 관측 신선도, 위험 척도 |
+| `learning/` | 상태·가격·수량을 반영하는 경험분포 추정과 비교 추정기 |
+| `execution/` | 주문 식별·취소·부분체결·보호 주문·재고·현금 장부 |
+| `replay/` | 동일 Attempt 라벨·재생, 시간순 학습, 확률·원화 손익 검증 |
+| `ops/` | 상태·체결 감사, 알림, 복구, 독립 릴리스 패키징 |
+| `evaluations/` | 아직 진행 중인 고정 평가 등록 원본 |
+| [research.md](research.md) | 사용자 연구 원문. 내용 변경 금지 |
 
-설정은 `config-c3.json`(체크인 값은 observe/funding false). 서버 `config.json`이 실제 모드다.
+입력은 잔차 할인, 현지 매도 충격, 외부 움직임·신선도, 스프레드·청산 깊이와 후보 가격·수량이다. 시장 상태를 만들고 안전 조건을 검사한 뒤 같은 에피소드에서 최대 6개 가격·수량 후보를 구성한다. 에피소드당 가까운 실제 표본 하나를 사용하는 경험분포가 주문당 원화 가치와 체결 통계, 체결 이후 회복·실패 확률 및 보유 대안을 추정한다.
 
-## 서비스 (AWS `i-0db0329527b7b3533`)
+주문당 손익에 미체결이 포함되므로 체결확률을 다시 곱하지 않는다. 원화 손익과 재고·시간 벌점은 구분한다. 손절·시간 만료·부분청산·잔량을 장부에 남기며 관측 중단은 검열로 기록한다. 공개 큐 재생의 적은 체결을 손익 하한이라고 해석하지 않는다. `learning/benchmark.py`는 같은 후보·실행 조건에서 학습값의 기여를 비교하기 위한 기존 추정기이며 별도 거래 봇은 아니다.
 
-| 서비스 | 역할 |
-|---|---|
-| trading-room-c.service | `track_c.c3_runner` (코인원 녹화 + 선행거래소 녹화 + 매매) |
-| trading-room-c-leaders.service | 엔진이 내려간 동안의 선행거래소 녹화. 엔진과 동시에 켜지 않는다 |
-| trading-room-c-notify.service | 읽기 전용 C Slack 릴레이, 진입 알림 없이 청산 체결 발송 |
-| trading-room-c-model.timer | C2 학습. disabled, 켜지 않는다 |
+`c4-live-v2.4`는 후보 평가와 확률 계산을 작업 스레드에서 실행한다. 계산 후와 주문 전송 직전에 결정 나이·원래 호가 시각·최신 시장·연결·계좌·소유권을 확인한다. 최신 상태에서 안전 단계와 후보를 다시 만들고 선택한 가격·수량·손절이 그대로 합법일 때만 전송한다. 주문에 영향 없는 심부 호가 갱신은 허용하지만 최우선 호가, 수량 한도, 참조가격, 위험 조건이 후보를 바꾸면 폐기한다. 작업 큐, API 제한, 연결 풀과 TLS 대기도 유효시간에 포함하며 새 호가가 들어와도 원래 결정의 시한을 늘리지 않는다. `C4_DECISION_TIMING`에 계산 단계와 대기 시간을 기록한다. 전송 전 만료된 INTENT는 불확실한 거래소 주문으로 취급하지 않고, 자금 예약을 해제하며 체결확률 검증에서 제외한다. 이런 로컬 폐기는 `transmitted=false`를 확인해 알림에서도 거래소 거부와 구분한다.
+
+`c4-state-value-v2.1`의 기본 재생은 보호 주문 예약 → 취소·대사 → 잔여 수량의 시장가 매도 순서를 반영한다. 취소 중 보호 주문의 전량·부분체결, 지정가 미체결과 잔량을 보존하며 즉시 청산·계속 보유 양쪽에 같은 절차를 적용한다. 기본 취소·대사 500ms와 이후 잔고 확인·제출 250ms는 **고정 시나리오 가정**이다. 보호 주문의 공개 체결가 기준 발동과 큐 체결 역시 실측 보정이 아니다. `exit_protocol=direct`는 이전의 단일 지연 절차를 비교하는 재생 옵션이다. [Coinone 주문 API](https://docs.coinone.co.kr/reference/place-order)의 보호 주문·시장가 가격 제한을 따른다.
+
+`expected_net_krw`와 회복·실패 확률은 공개 재생 가정하의 예측이며 실제 주문 기대수익으로 검증되지 않았다. `ops.live_evidence`는 기존 취소·대사, 청산 요청→응답·체결 관측의 분포와 미확정 취소를 요약하고 관측 수와 서로 다른 주문·캠페인 수를 구분한다. 이 시간은 거래소 매칭 지연과 다르며, 다른 청산 절차에서 모은 값을 현재 절차의 보정값으로 자동 적용하지 않는다.
+
+실거래 조건은 BTC만, 설정상 주문당 최대 20,000원, 탐색 승인 하한 1틱, 진입 TTL 8초, 보유 한도 180초다. `execution_sampling`은 최대금액 후보를 쓰지 않고 거래소 최소금액의 105% 청산 여유를 충족하는 최소수량만 선택한다. 현금·청산 유동성·거래소 최소금액·기존 위험 예산·외부시장 불일치 2틱 제한·참조가격 하한·진입 시 고정한 변동성 손절과 거래소 보호 주문을 유지한다. ETH/XRP/SOL 등은 기록 전용이다. 하루 거래횟수의 충분성이나 종목 확대의 이득은 미확인이다.
+
+현재 배포는 `c4-live-v2.4`, 릴리스 `20260906-152844-4cad36be6d11`, 고정 기록 모델 `66d0ff7551b3be731708560275f0306114428a2d5bebc1275ec28ec8c0fd51fc`이다. 새 평가창은 2026-09-06 15:34 KST에 시작했고 실제 진입은 15:34:34 KST에 활성화했으며, AWS 데이터는 `/home/ubuntu/trading-room-c/c4-live/data-v2.4-execution`에 있다. 직전 `v2.3`에서 처음 선택된 주문 한 건은 24.9ms 동안 호가 배열이 바뀌었다는 이유로 로컬 폐기됐고 거래소에는 전송되지 않았다. 등록 전 라이브 결정 91개에서는 기존 `0:minimum` 주문 가능 건이 0개였고, 2틱에서 가장 가까운 안전 최소수량은 2개, 1틱은 4개, 0.5틱은 4개였다. 이는 주문 전 후보 수이며 체결 수가 아니다. 이전 `v2.3`, `c4-live-v2.1` 장부와 원래 C4 shadow는 별도 릴리스·평가 창에서 유지한다.
 
 ```powershell
-python -m track_c.deploy_c3 status          # AWS 신원 확인 + 엔진/공정가/선택/캠페인/선행거래소/알림
-python -m track_c.c3_upgrade prepare --profile execution # 승인된 v4/2만원/실행 통합, 나머지 설정 보존
-python -m track_c.c3_upgrade switch         # 신규 진입 PAUSE → flat·실제 C 주문 확인 → 코드 전환, 설정 보존
-python -m track_c.c3_upgrade resume         # 공정가 약60초 + 변동성300초 워밍업 → 새 코드·연결 검증 → 자체 PAUSE만 제거
-python -m track_c.deploy_c3 install         # 플랫 확인 → C2·별도 녹화 정지 → 백업 → C3 관측 모드 기동
-python -m track_c.deploy_c3 go-live         # 건강 확인 → live/funding → PAUSE 제거 → 재시작
-python -m track_c.deploy_notify status
-python -m unittest track_c.test_c3 track_c.test_runtime track_c.test_portfolio track_c.test_notices track_c.test_coinone
-python -m track_c.c3_replay --config track_c/config-c3.json --contracts <contracts.json> --coinone <public files> --leaders <leaders files> --output out.json [--control flip|unconditional]
-python -m track_c.fairfit --coinone <public files> --leaders <leaders files> --coins BTC ETH XRP SOL
-python -m track_c.c3_live_evidence --data-dir <C data> --start-ms <evaluation start> --output <report.json>
+python -m track_c.ops.status
+python -m track_c.ops.live_evidence --help
+python -m track_c.replay.engine --help
+python -m track_c.replay.evidence --help
+python -m unittest discover -s tests -t .
 ```
 
-`data/PAUSE`는 신규 진입만 막는다. `data/STOP`/SIGTERM은 C 주문·재고를 정리한 뒤 종료한다. 디스크 여유 1GiB 미만이면 녹화를 멈추고 신규 진입을 막는다. 재기동 시 저장된 캠페인·주문(익절 대기 포함)을 조회해 이어간다.
+배포 소스는 `c4-live-v2.4` / `c4-state-value-v2.1`이다. 새 청산 절차 모델과 실체결 평가는 별도 경로와 새 창에 고정했다. 새 모델은 같은 입력·구간·설정으로 재현했고 이전 모델과 예측값·평가 시나리오가 동일하며 소스 식별자만 다르다. 모델은 공개 재생에서 청산 학습 체결 에피소드 2개, 진입가치 학습 체결 에피소드 1개뿐이므로 주문 승인에 사용하지 않는다. 이전 소스와 모델은 `../trading-room-archive/c4-layout1-before-execution-fix/`에 보존했다. 기존 모델의 소스 검증을 우회하거나 평가 등록을 고쳐 쓰지 않는다.
 
-`execution` 전환은 약60초 공정가 +300초 변동성 이력이 준비된 뒤 재개한다. 보유 가치 경로20개는 재개 조건이 아니며 부족하면 기존 보호 청산을 계속 쓴다. 주 루프의20초 watchdog과 `ExecStopPost` 복구는 프로세스 장애에 대응한다. 복구는 단일 writer를 인수해 고정 `stop/stop_limit` 주문을 남기거나 이미 손절/시간이 지났으면 소유 수량을 청산한다. 거래소/API/호스트 단절·갭에서도 손실 상한을 보장하는 장치는 아니다. 원래 C 익절은 post-only 대기이며 STOP_LIMIT과 동시에 수량을 예약하지 않는다.
+`config.json`은 관측 모드의 예시다. 실제 설정은 AWS 서비스의 `--config`가 기준이다. `ops.deploy`는 로컬 번들 또는 독립 staging까지만 수행한다. 운영 전환은 포지션·미확정 주문·잔량·보호 주문·장부·알림 커서를 확인하는 기존 flat 절차를 거친다. 정리를 이유로 재기동하지 않는다.
 
-녹화 public 한도16GiB, 루트32GiB, 실제 여유1GiB 보호선을 사용한다. 상태 `storage`가 public/leader/관측 파일의 완료 시간당 증가율과10일 공간 전망을 제공한다. 분석은 열린 gzip의 완전한 줄까지 읽되 불완전 꼬리를 품질 문제로 표시한다. 고정 전향 평가에는 완결·해시 고정된 입력을 사용한다.
-
-## 판정 절차
-
-1. v4 통합 전 관측과 스모크 테이프는 개발 표본이다. `evaluation-c3.json`의 새 설정 재개 시각부터 10×24시간 구간과 소스/설정을 지킨다. 이전 4종목 및 BTC 하한 0틱·v3 하한 2틱 평가는 `evaluations/`에 보존하고 합산하지 않는다. 서버의 현재 사본은 `data/evaluation/evaluation-c3.json`, 불변 사본은 같은 폴더의 `c3-v4-execution-<start_ms>.json`이다. 시작 전 워밍업과 끝의 청산 여유를 포함한 테이프·계약 캡처를 준비하고 재생에 `--start-ms <start_ms> --end-ms <end_ms>`를 전달한다. 시작 전에는 진입하지 않는다.
-2. 동일 입력으로 기본·flip·unconditional 재생을 수행한다. `marked_net_krw`, `max_drawdown_krw`, `stress_krw`, `residuals`, `quality`를 보고 실현손익만으로 판단하지 않는다. 대기열은 동일 가격의 잔량이며 더 좋은 가격의 호가를 중복 대기열로 합치지 않는다.
-3. `python -m track_c.c3_evidence --protocol track_c/evaluation-c3.json --base base.json --flip flip.json --unconditional unconditional.json --output evidence.json`. 재개 시각에 고정한 24시간 순자산 블록으로 전환 이전 손익을 제외한다. 평가 창 미완료·코드/설정 변화·대조군 시각 불일치는 HOLD다. 2블록 구간은 근사이며 통과도 REVIEW_ONLY, 자동 증액 없음. 별도로 1초 이상 지연·비용 스트레스와 실체결 대조를 확인한다. flip은 편차 부호만 반전하고 모멘텀/flow 게이트는 유지한다. unconditional은 A/B/C·편차 취소/방어·브레이크를 제거하되 기존 데이터 가용성·익절·손절·시간·실행 위험 규칙을 유지한다.
-
-## 알림
-
-사용자 지시(2026-09-05): **매수 진입 알림은 보내지 않고 체결 알림은 청산만 보낸다.** 재기동 전 큐에 남은 진입 알림도 suppressed로 보존하고 발송하지 않는다. 매수 체결은 장부·캠페인 통계에 계속 반영한다. 매도 없는 잔량 이월도 발송하지 않는다. `notifications/status.json`의 `trade_notifications: exits_only`로 적용 여부를 확인한다.
-
-2026-09-06 03:16 수정: 잔량은 실제로 팔릴 때까지 승패 미확정이며, 다음 거래와 함께 팔리면 원래 진입 캠페인까지 완료한다. 병합 매도는 잔여 수량 비례로 귀속하고 원래 종목·편차·시작일 필터를 유지한다. 총 진입/완료/진행/잔량 대기와 승·패·보합을 나눠 표시하며 상태 카드도 이월 재고를 포함한다. 같은 매도에 대한 FILL/CLOSE 알림은 합치고 이미 전송한 수량은 재전송하지 않는다. 알림 release `20260906-031638-9f5d6c3ad7a6`; 매매 엔진·평가 창·표시 기준선·원본 장부는 유지했다.
-
-기존 릴레이가 새 청산 사유(`take_profit`·`defend`·`stop`·`brake`·`dust`·`take_rejected`)와 `take` 체결 라벨을 읽으려면 `python -m track_c.deploy_notify install`로 릴레이를 갱신한다. 손익은 원화 소수점 첫째 자리, 잔고·가격은 정수로 표시하고 내부 Decimal은 유지한다.
-
-## 롤백
-
-현재 C3 갱신의 직전 config·unit·장부 사본은 `data/upgrade-c3/<release>/`에 있다. 롤백도 신규 진입 PAUSE 후 캠페인·실제 C 주문이 없는 상태를 같은 작업 안에서 확인하고, 현재 장부와 호환되는 C3 코드로만 전환한다. live 설정과 최신 장부를 보존한다. C3가 선행거래소를 녹화하므로 별도 leaders 서비스를 동시에 켜지 않는다. `data/migration-c3/`는 과거 C2→C3 이력이며 C2 자동 복원 지시가 아니다. 실거래 뒤 장부를 과거 사본으로 되돌리지 않는다.
+알림은 기존 독립 서비스 하나만 사용한다. BTC 진입 편차 2틱 이상, 기존 표시 시작점, 청산 알림만 발송, 원화 손익 소수점 첫째 자리 표시를 유지한다. 표시 창과 엔진의 UTC 위험 일자·평가 창을 혼동하지 않는다.

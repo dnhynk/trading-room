@@ -1,0 +1,54 @@
+{
+  "version": "c4-live-v2.3",
+  "model": "3e69f40ed9f3a816f2babdb08aaf0dd030b878a888bcb2e7cc83231d02fddaad",
+  "model_version": "c4-state-value-v2.1",
+  "mode": "execution_sampling",
+  "registered_ms": 1788671105645,
+  "start_ms": 1788671280000,
+  "end_ms": 1789535280000,
+  "ledger": "/home/ubuntu/trading-room-c/c4-live/data-v2.3-execution/ledger.sqlite",
+  "inherited_prefix_through_seq": 44230,
+  "release": "/home/ubuntu/trading-room-c/c4-live/releases/20260906-135647-33946a0e54d0",
+  "release_digest": "33946a0e54d0",
+  "config": "/home/ubuntu/trading-room-c/c4-live/config-v2.3-execution.json",
+  "config_sha256": "d10227c45294e49bb124a949405454b73772a9851292f2cba8fd361615fd780e",
+  "coins": [
+    "BTC"
+  ],
+  "admission_entry_ticks": 1.0,
+  "model_entry_ticks": 2.0,
+  "reference_disagreement_ticks": 2.0,
+  "reference_lower_bound_required": true,
+  "candidate_offsets": [
+    -1,
+    0,
+    1
+  ],
+  "order_selection": "nearest_safe_minimum",
+  "order_size": "exchange_minimum_with_1.05_exit_buffer",
+  "configured_max_notional_krw": 20000,
+  "learned_values_used_for_orders": false,
+  "automatic_retraining": false,
+  "automatic_size_change": false,
+  "actual_fill_and_latency_calibration": "unverified_at_registration",
+  "development_counterfactual": {
+    "source": "pre_registration_c4_live_v2.1_decision_ledger",
+    "episodes": 91,
+    "current_zero_tick_minimum_selectable": 0,
+    "two_tick_nearest_safe_minimum_selectable": 2,
+    "one_tick_nearest_safe_minimum_selectable": 4,
+    "half_tick_nearest_safe_minimum_selectable": 4,
+    "interpretation": "selectable_before_final_revalidation; not orders or fills"
+  },
+  "required_reporting": [
+    "recovery_and_failure_probabilities",
+    "expected_and_realized_net_krw_per_attempt",
+    "full_ledger_pnl_including_no_fill_partial_and_residual",
+    "candidates_rejections_orders_fills_turnover_drawdown"
+  ],
+  "minimum_complete_24h_blocks": 3,
+  "minimum_filled_episodes": 10,
+  "purpose": "minimum_lot_actual_execution_collection; profitability_and_calibration_unconfirmed",
+  "verdict": "IMPROVEMENT_UNCONFIRMED",
+  "digest": "c11177c02482a43ae8a89e0ccebff11d6087cdd6ec271594d11a2fd7d306837a"
+}

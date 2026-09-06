@@ -1,0 +1,57 @@
+{
+  "version": "c4-live-v2.4",
+  "model": "66d0ff7551b3be731708560275f0306114428a2d5bebc1275ec28ec8c0fd51fc",
+  "model_version": "c4-state-value-v2.1",
+  "mode": "execution_sampling",
+  "registered_ms": 1788676347793,
+  "start_ms": 1788676440000,
+  "end_ms": 1789540440000,
+  "ledger": "/home/ubuntu/trading-room-c/c4-live/data-v2.4-execution/ledger.sqlite",
+  "inherited_prefix_through_seq": 44682,
+  "release": "/home/ubuntu/trading-room-c/c4-live/releases/20260906-152844-4cad36be6d11",
+  "release_digest": "4cad36be6d11",
+  "config": "/home/ubuntu/trading-room-c/c4-live/config-v2.4-execution.json",
+  "config_sha256": "a179e4cd36aecdb749c7fca518f0d3783062bd9aab059cf0b91448b0d00559f9",
+  "coins": [
+    "BTC"
+  ],
+  "admission_entry_ticks": 1.0,
+  "model_entry_ticks": 2.0,
+  "reference_disagreement_ticks": 2.0,
+  "reference_lower_bound_required": true,
+  "candidate_offsets": [
+    -1,
+    0,
+    1
+  ],
+  "order_selection": "nearest_safe_minimum",
+  "order_size": "exchange_minimum_with_1.05_exit_buffer",
+  "configured_max_notional_krw": 20000,
+  "learned_values_used_for_orders": false,
+  "automatic_retraining": false,
+  "automatic_size_change": false,
+  "final_admission": "latest_state_recomputes_stage_and_candidate; order_fields_must_match",
+  "book_update_policy": "unrelated_depth_updates_allowed; changed_price_quantity_stop_or_safety_rejected",
+  "actual_fill_and_latency_calibration": "unverified_at_registration",
+  "predecessor": {
+    "protocol": "track_c/evaluations/evaluation-c4-execution-v2.3.json",
+    "digest": "c11177c02482a43ae8a89e0ccebff11d6087cdd6ec271594d11a2fd7d306837a",
+    "observed_local_expiry": {
+      "order_event_seq": 44602,
+      "transmitted": false,
+      "reason": "market_changed",
+      "decision_total_ms": 24.877
+    }
+  },
+  "required_reporting": [
+    "recovery_and_failure_probabilities",
+    "expected_and_realized_net_krw_per_attempt",
+    "full_ledger_pnl_including_no_fill_partial_and_residual",
+    "candidates_rejections_orders_fills_turnover_drawdown"
+  ],
+  "minimum_complete_24h_blocks": 3,
+  "minimum_filled_episodes": 10,
+  "purpose": "minimum_lot_actual_execution_collection_after_latest_action_revalidation_fix; profitability_and_calibration_unconfirmed",
+  "verdict": "IMPROVEMENT_UNCONFIRMED",
+  "digest": "738c3e06ff92d8d743a626ce215b831107d970497de6d103198223c6a45fb0fb"
+}
