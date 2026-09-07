@@ -210,6 +210,23 @@ class OMSTests(unittest.TestCase):
         self.assertNotIn(order["cid"], self.oms.state["orders"])
         self.assertEqual(self.oms.quantity("AAA"), 100)
 
+    def test_missing_terminal_detail_during_settlement_does_not_halt(self):
+        order = self.submit_buy()
+        self.clock.advance(self.config["reconcile_halt_s"] + 0.01)
+        self.client.fill(order["cid"], "100", "100", status="FILLED")
+        self.oms.reconcile(force=True)
+        del self.client.rows[order["cid"]]
+        self.oms.reconcile(force=True)
+        self.assertIsNone(self.oms.state["halt"])
+        self.assertIn(order["cid"], self.oms.state["orders"])
+
+    def test_missing_active_detail_still_halts_after_reconcile_deadline(self):
+        order = self.submit_buy()
+        del self.client.rows[order["cid"]]
+        self.clock.advance(self.config["reconcile_halt_s"] + 0.01)
+        self.oms.reconcile(force=True)
+        self.assertEqual(self.oms.state["halt"], "ORDER_RECONCILIATION")
+
     def test_missing_or_foreign_inventory_and_orders_halt_after_reconciliation(self):
         order = self.submit_buy()
         self.client.fill(order["cid"], "100", "100")
