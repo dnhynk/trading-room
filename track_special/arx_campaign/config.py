@@ -176,7 +176,7 @@ def validate(raw: dict[str, Any]) -> CampaignConfig:
             for key in ("approved_by", "approved_at", "config_hash")
             if approval.get(key) is None
         )
-        if raw.get("research_profile") == "aggressive_bounded_research":
+        if raw.get("research_profile") is not None:
             issues.append("RESEARCH_PROFILE_NOT_LIVE_APPROVED")
         stages = raw.get("stage_notional_cap_fractions")
         if stages is not None:

@@ -63,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     proposal.add_argument("--after", default="UNKNOWN")
     proposal.add_argument("--worst-loss", default="UNKNOWN")
     proposal.add_argument("--cooling-hours", type=int, default=48)
+    accumulation = subparsers.add_parser("accumulate")
+    accumulation.add_argument("--env-file", required=True, help="Classic read credentials; never printed")
+    accumulation.add_argument("--settings", help="adaptive accumulation paper configuration")
+    accumulation.add_argument("--samples", type=int, default=0, help="0: continuous public paper observations")
+    accumulation.add_argument("--notify-slack", action="store_true", help="labelled paper-fill cards through the existing Slack sender")
+    subparsers.add_parser("accumulation-status")
+    subparsers.add_parser("stop-accumulation")
     return parser
 
 
@@ -129,6 +136,22 @@ def _synthetic_replay(name: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command in {"accumulate", "accumulation-status", "stop-accumulation"}:
+        from .accumulation import DEFAULT_SETTINGS, outside_repository, run, status as accumulation_status
+
+        if not args.state_directory:
+            raise ValueError("accumulation requires --state-directory outside the repository")
+        directory = outside_repository(Path(args.state_directory))
+        if args.command == "accumulation-status":
+            print(_json(accumulation_status(directory)))
+        elif args.command == "stop-accumulation":
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "STOP").touch(exist_ok=True)
+            print(_json({"stop_requested": True, "exchange_writes": 0}))
+        else:
+            run(directory, Path(args.env_file),
+                Path(args.settings) if args.settings else DEFAULT_SETTINGS, args.samples, args.notify_slack)
+        return 0
     config = load(args.config)
 
     if args.command == "doctor":
