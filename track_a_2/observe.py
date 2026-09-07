@@ -13,6 +13,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import signal
+import threading
 import time
 
 from track_a_2.execution.client import CoinoneA2
@@ -31,6 +33,33 @@ PING_INTERVAL_S = 60.0
 PONG_TIMEOUT_S = 10.0
 FIRST_DATA_TIMEOUT_S = 60.0
 MAX_DATA_GAP_MS = 120_000
+
+
+class ArrivalClock:
+    """One process-local causal order shared by every recorded venue."""
+
+    def __init__(self):
+        self.sequence = 0
+
+    def stamp(self, *, received_ms=None, received_ns=None):
+        if received_ns is None:
+            received_ns = (
+                time.time_ns()
+                if received_ms is None
+                else int(received_ms) * 1_000_000
+            )
+        received_ns = int(received_ns)
+        if received_ms is None:
+            received_ms = received_ns // 1_000_000
+        elif int(received_ms) != received_ns // 1_000_000:
+            raise ValueError("inconsistent observation receive timestamp")
+        self.sequence += 1
+        return dict(
+            sequence=self.sequence,
+            received_ns=received_ns,
+            received_ms=int(received_ms),
+            monotonic_ns=time.monotonic_ns(),
+        )
 
 
 def coins(values):
@@ -52,6 +81,15 @@ def _file_sha256(path):
     return digest.hexdigest()
 
 
+def observation_storage_bytes(folder):
+    root = Path(folder)
+    return sum(
+        path.stat().st_size
+        for path in root.rglob("*.gz")
+        if path.is_file()
+    )
+
+
 def prepare_observation(config, selected, client, directory, *, now_ms=None, session=None):
     """Capture causal seed/contract inputs before websocket recording starts."""
     selected = coins(selected)
@@ -62,6 +100,8 @@ def prepare_observation(config, selected, client, directory, *, now_ms=None, ses
     folder = Path(directory).resolve() / "observations" / session
     if folder.exists():
         raise FileExistsError("observation session already exists")
+    if observation_storage_bytes(folder.parent) >= config["public_storage_max_bytes"]:
+        raise OSError("Track A-2 observation storage cap reached")
     contracts, tickers = client.universe()
     by_contract = {row.get("target_currency"): row for row in contracts}
     by_ticker = {row.get("target_currency"): row for row in tickers}
@@ -115,7 +155,7 @@ def prepare_observation(config, selected, client, directory, *, now_ms=None, ses
 
 
 class Capture:
-    def __init__(self, folder, config, selected):
+    def __init__(self, folder, config, selected, *, clock=None):
         self.folder = Path(folder)
         self.config = config
         self.coins = coins(selected)
@@ -124,10 +164,11 @@ class Capture:
         self.count = 0
         self.closed = False
         self.last_received_ms = 0
+        self.clock = clock or ArrivalClock()
 
-    def write(self, *, received_ms=None, raw=None, event=None, fields=None):
-        received_ms = time.time_ns() // 1_000_000 if received_ms is None else int(received_ms)
-        row = dict(received_ms=received_ms)
+    def write(self, *, received_ms=None, received_ns=None, raw=None, event=None, fields=None):
+        row = self.clock.stamp(received_ms=received_ms, received_ns=received_ns)
+        received_ms = row["received_ms"]
         self.last_received_ms = max(self.last_received_ms, received_ms)
         if raw is not None:
             row["raw"] = raw
@@ -137,7 +178,11 @@ class Capture:
         self.count += 1
         if self.count % 100 == 0:
             self.file.flush()
-        if self.path.stat().st_size > self.config["public_storage_max_bytes"]:
+        if (
+            self.count % 1000 == 0
+            and observation_storage_bytes(self.folder.parent)
+            > self.config["public_storage_max_bytes"]
+        ):
             raise OSError("Track A-2 observation storage cap reached")
 
     def close(self):
@@ -164,13 +209,18 @@ async def record_public(
     capture, seconds=None, *, connector=None,
     ping_interval_s=PING_INTERVAL_S, pong_timeout_s=PONG_TIMEOUT_S,
     first_data_timeout_s=FIRST_DATA_TIMEOUT_S,
+    stop_event=None,
 ):
     if connector is None:
         from websockets.asyncio.client import connect as connector
 
     started = time.monotonic()
     backoff = 1
-    while seconds is None or time.monotonic() - started < seconds:
+    running = lambda: (
+        (stop_event is None or not stop_event.is_set())
+        and (seconds is None or time.monotonic() - started < seconds)
+    )
+    while running():
         try:
             capture.write(event="CONNECTING")
             async with connector(
@@ -199,7 +249,7 @@ async def record_public(
                 opened = time.monotonic()
                 last_ping = opened
                 pong_deadline = None
-                while seconds is None or time.monotonic() - started < seconds:
+                while running():
                     now = time.monotonic()
                     if pong_deadline is not None and now >= pong_deadline:
                         raise TimeoutError("Coinone JSON PONG timeout")
@@ -256,9 +306,14 @@ async def record_public(
         except Exception as exc:
             capture.write(event="DISCONNECTED", fields={"error": type(exc).__name__})
         remaining = None if seconds is None else seconds - (time.monotonic() - started)
-        if remaining is not None and remaining <= 0:
+        if not running() or (remaining is not None and remaining <= 0):
             return
-        await asyncio.sleep(min(backoff, remaining) if remaining is not None else backoff)
+        delay = min(backoff, remaining) if remaining is not None else backoff
+        waited = 0.0
+        while running() and waited < delay:
+            step = min(0.5, delay - waited)
+            await asyncio.sleep(step)
+            waited += step
         backoff = min(30, backoff * 2)
 
 
@@ -268,6 +323,11 @@ def parser():
     result.add_argument("--coin", action="append", required=True, dest="coins")
     result.add_argument("--seconds", type=float)
     result.add_argument("--session")
+    result.add_argument(
+        "--external", action="append", default=[],
+        choices=("upbit", "bithumb"), dest="external_venues",
+        help="record a public KRW benchmark venue in the same causal session",
+    )
     return result
 
 
@@ -277,6 +337,9 @@ def main():
         raise SystemExit("--seconds must be positive")
     pool = None
     capture = None
+    external_capture = None
+    stop_event = threading.Event()
+    previous_handlers = {}
     try:
         config = load(args.config, root=ROOT)
         selected = coins(args.coins)
@@ -287,14 +350,52 @@ def main():
             config, selected, client, resolved_state_directory(config),
             session=args.session,
         )
-        capture = Capture(folder, config, selected)
-        asyncio.run(record_public(capture, args.seconds))
-        print(encoded(dict(track="A-2", observation=str(folder), messages=capture.count)))
+        clock = ArrivalClock()
+        capture = Capture(folder, config, selected, clock=clock)
+        if args.external_venues:
+            from track_a_2.external import ExternalCapture, record_external
+
+            if len(set(args.external_venues)) != len(args.external_venues):
+                raise ValueError("external benchmark venues must be unique")
+            external_capture = ExternalCapture(
+                folder, config, selected, args.external_venues, clock=clock,
+            )
+
+            async def record_all():
+                await asyncio.gather(
+                    record_public(
+                        capture, args.seconds, stop_event=stop_event,
+                    ),
+                    *(record_external(
+                        external_capture, venue, args.seconds,
+                        stop_event=stop_event,
+                    ) for venue in args.external_venues),
+                )
+
+            for name in ("SIGINT", "SIGTERM"):
+                sig = getattr(signal, name, None)
+                if sig is not None:
+                    previous_handlers[sig] = signal.getsignal(sig)
+                    signal.signal(sig, lambda *_: stop_event.set())
+            asyncio.run(record_all())
+        else:
+            asyncio.run(record_public(capture, args.seconds))
+        capture.close()
+        if external_capture:
+            external_capture.close()
+        print(encoded(dict(
+            track="A-2", observation=str(folder), messages=capture.count,
+            external_messages=(external_capture.count if external_capture else 0),
+        )))
     except (CoinoneError, OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from None
     finally:
         if capture:
             capture.close()
+        if external_capture:
+            external_capture.close()
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
         if pool:
             pool.close()
 
