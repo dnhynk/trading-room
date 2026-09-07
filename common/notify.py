@@ -181,6 +181,10 @@ def _engine_day(day):
 
 def summary_fields(day=None, balance=True, *, track="AB", data_dir=None):
     """이벤트 상세 아래에 붙는 공통 계기판 필드."""
+    if track == "SPECIAL-ARX":
+        # ARX cards carry their own immutable USDT campaign snapshot. Never
+        # append the A/B dashboard or the C KRW ledger to a special-track card.
+        return []
     if track == "C":
         from track_c.ops.notices import summary_fields as c_summary
         return c_summary(data_dir, day=day, balance=balance)

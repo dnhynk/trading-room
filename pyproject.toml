@@ -5,16 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trading-room"
 version = "0.1.0"
-description = "Track A/A-2 rotation, Track B campaign trading, and Track C liquidity recovery"
+description = "Trading Room strategies including an isolated ARX futures research campaign"
 requires-python = ">=3.12"
 dependencies = ["websockets==17.1", "python-dotenv>=1,<2"]
 
+[project.scripts]
+arx-campaign = "track_special.arx_campaign.cli:main"
+
 [project.optional-dependencies]
 charts = ["matplotlib>=3.9,<4"]
+dev = ["mypy==2.3.1"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["track_special/arx_campaign"]
+# Imported legacy tracks are outside this strict check's source scope.
+follow_imports = "silent"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["common*", "track_a*", "track_b*", "track_c*"]
+include = ["common*", "track_a*", "track_b*", "track_c*", "track_special*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]

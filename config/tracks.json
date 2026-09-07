@@ -99,6 +99,20 @@
       "model_entry_ticks": 2.0,
       "minimum_size_only": true,
       "reference_lower_bound_required": true
+    },
+    "SPECIAL-ARX": {
+      "status": "observe",
+      "venue": "bitget",
+      "market": "usdt-linear-perpetual",
+      "symbol": "ARXUSDT",
+      "sides": [
+        "long"
+      ],
+      "execution_enabled": false,
+      "live_enabled": false,
+      "research_profile_live_approved": false,
+      "state_namespace": "track-special-arx",
+      "restart_requires_user_instruction": true
     }
   },
   "suspension": {

@@ -8,12 +8,14 @@
 | [track_a_2](track_a_2/README.md) | Coinone 현물 롱온리 순환매: 독립 포트폴리오 실거래 실행기(기본 정지) |
 | [track_b](track_b/README.md) | Bitget 작전코인: 종목 탐색, 캠페인, 검증 |
 | [track_c](track_c/README.md) | Coinone 유동성 회복: 시장 상태, 학습, 재생, 실체결 |
+| [track_special](track_special/README.md) | Bitget ARXUSDT 선물 캠페인·적응형 모의 매집 연구(실거래 차단) |
 | `common/` | A/B 공유 주문 엔진·리스크·거래소 연결, 공통 알림 |
 | `tests/` | 트랙별 회귀 테스트와 고정 테스트 입력 |
 | `config/` | 운영 트랙 상태와 A/B 공유 계정 설정 |
 
 ```powershell
 python -m unittest discover -s tests -t .
+python -m track_special --help
 python -m track_c.ops.status
 python -m track_a_2.live --check
 python -m track_a_2.status
