@@ -270,6 +270,7 @@ def external_quality(path, metadata):
             gap_by_stream[":".join(pair)] is not None
             and gap_by_stream[":".join(pair)] <= max_gap
             for pair in venue_expected
+            if pair[2] == "ORDERBOOK"
         )
         heartbeat = duration <= ping_interval_ms or (
             pings[venue] > 0 and pongs[venue] >= pings[venue]

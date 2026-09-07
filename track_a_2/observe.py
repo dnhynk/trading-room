@@ -237,6 +237,9 @@ async def record_public(
                     for coin in capture.coins
                     for channel in ("ORDERBOOK", "TRADE")
                 }
+                required_data = {
+                    pair for pair in expected if pair[1] == "ORDERBOOK"
+                }
                 for coin in capture.coins:
                     for channel in ("ORDERBOOK", "TRADE"):
                         await websocket.send(encoded(dict(
@@ -258,12 +261,15 @@ async def record_public(
                         capture.write(event="PING_SENT")
                         last_ping = now
                         pong_deadline = now + pong_timeout_s
-                    if now - opened >= first_data_timeout_s and seen_data != expected:
+                    if (
+                        now - opened >= first_data_timeout_s
+                        and not required_data <= seen_data
+                    ):
                         raise CoinoneError("public initial data coverage unavailable")
                     deadlines = [now + 1.0, last_ping + ping_interval_s]
                     if pong_deadline is not None:
                         deadlines.append(pong_deadline)
-                    if seen_data != expected:
+                    if not required_data <= seen_data:
                         deadlines.append(opened + first_data_timeout_s)
                     if seconds is not None:
                         deadlines.append(started + seconds)
@@ -296,6 +302,7 @@ async def record_public(
                         "subscriptions": len(subscribed),
                         "data_streams": len(seen_data),
                         "expected_streams": len(expected),
+                        "required_state_streams": len(required_data),
                     },
                 )
                 return
