@@ -8,11 +8,19 @@ import re
 import sqlite3
 
 from track_a_2 import EXECUTION_VERSION
-from track_a_2.settings import APPROVAL, ROOT, resolved_state_directory
+from track_a_2.settings import (
+    EVALUATION_APPROVAL,
+    OWNER_APPROVAL,
+    ROOT,
+    account_access_approved,
+    resolved_state_directory,
+)
 
 
 OPERATIONAL_CONFIG = {
     "status", "mode", "execution_enabled", "portfolio_isolation_confirmed",
+    "shared_portfolio_approved", "credential_profile",
+    "repository_ab_controls_acknowledged", "owner_unvalidated_live_approved",
     "live_approval_id", "evaluation_manifest", "evaluation_sha256",
     "expected_egress_ip", "env_path", "state_directory",
 }
@@ -85,14 +93,14 @@ def _evaluation_reasons(config, root):
         reasons.append("evaluation_source_unavailable")
         return reasons
     identity = {
-        "schema": 1,
+        "schema": 2,
         "track": "A-2",
         "approval_id": config.get("live_approval_id"),
         "execution_version": EXECUTION_VERSION,
         "config_digest": evaluation_config_digest(config),
         "source_digest": source,
         "universe": config.get("universe"),
-        "result": "pass",
+        "result": "APPROVED",
     }
     if not isinstance(manifest, dict) or any(manifest.get(k) != v for k, v in identity.items()):
         reasons.append("evaluation_manifest_identity")
@@ -155,8 +163,10 @@ def block_reasons(config, *, root=ROOT, egress=None):
     try:
         registry = json.loads((root / "config" / "tracks.json").read_text(encoding="utf-8-sig"))
         registered = registry["tracks"]["A-2"]
+        c_registered = registry["tracks"].get("C", {})
     except (OSError, ValueError, KeyError, TypeError):
         registered = {}
+        c_registered = {}
         reasons.append("track_registry_unavailable")
     if registered.get("status") != "active":
         reasons.append("track_registry_not_active")
@@ -166,12 +176,25 @@ def block_reasons(config, *, root=ROOT, egress=None):
         reasons.append("config_not_active")
     if config.get("mode") != "live" or config.get("execution_enabled") is not True:
         reasons.append("config_execution_disabled")
-    if config.get("portfolio_isolation_confirmed") is not True:
-        reasons.append("portfolio_isolation_unconfirmed")
+    if not account_access_approved(config):
+        reasons.append(
+            "portfolio_isolation_unconfirmed"
+            if config.get("portfolio_isolation_required")
+            else "shared_portfolio_unapproved"
+        )
+    if not config.get("portfolio_isolation_required"):
+        reserved = set(config.get("shared_reserved_symbols") or ())
+        c_symbols = set(c_registered.get("trading_coins") or ())
+        if c_symbols and not c_symbols <= reserved:
+            reasons.append("shared_reserved_symbols_stale")
     approval = config.get("live_approval_id")
-    if not isinstance(approval, str) or not APPROVAL.fullmatch(approval):
-        reasons.append("evaluation_approval_missing")
-    reasons.extend(_evaluation_reasons(config, root))
+    if config.get("owner_unvalidated_live_approved"):
+        if not isinstance(approval, str) or not OWNER_APPROVAL.fullmatch(approval):
+            reasons.append("owner_live_approval_missing")
+    else:
+        if not isinstance(approval, str) or not EVALUATION_APPROVAL.fullmatch(approval):
+            reasons.append("evaluation_approval_missing")
+        reasons.extend(_evaluation_reasons(config, root))
     if not config.get("universe"):
         reasons.append("universe_empty")
     expected = config.get("expected_egress_ip")
@@ -187,10 +210,13 @@ def block_reasons(config, *, root=ROOT, egress=None):
     approved_parent = (root.parent / "trading-room-state").resolve()
     if state != approved_parent / "track-a-2":
         reasons.append("state_directory_boundary")
-    for directory, label in ((root, "repository"), (state, "runtime")):
+    if not config.get("repository_ab_controls_acknowledged"):
         for name in ("STOP", "PAUSE"):
-            if (directory / name).exists():
-                reasons.append(f"{label}_{name.lower()}")
+            if (root / name).exists():
+                reasons.append(f"repository_{name.lower()}")
+    for name in ("STOP", "PAUSE"):
+        if (state / name).exists():
+            reasons.append(f"runtime_{name.lower()}")
     return list(dict.fromkeys(reasons))
 
 
@@ -205,8 +231,12 @@ def recovery_reasons(config, *, root=ROOT, egress=None):
     """Gates for managing already-owned risk without authorizing new entries."""
     root = Path(root).resolve()
     reasons = []
-    if config.get("portfolio_isolation_confirmed") is not True:
-        reasons.append("portfolio_isolation_unconfirmed")
+    if not account_access_approved(config):
+        reasons.append(
+            "portfolio_isolation_unconfirmed"
+            if config.get("portfolio_isolation_required")
+            else "shared_portfolio_unapproved"
+        )
     expected = config.get("expected_egress_ip")
     try:
         valid_ip = ipaddress.ip_address(expected).version == 4

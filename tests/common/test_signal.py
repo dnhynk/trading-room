@@ -1,6 +1,46 @@
 """Invariants of common/signal.py (pure).  python -m unittest tests.common.test_signal -v"""
+from collections import deque
 import unittest
-from common.signal import Strategy, apply_fill, pos_stats, zigzag, sim_match, sim_book, book_params
+from common.signal import Features, Strategy, apply_fill, pos_stats, zigzag, sim_match, sim_book, book_params, effective_fast_velocity
+
+
+class DepthVelocityThreshold(unittest.TestCase):
+    def test_zero_knobs_preserve_the_historical_threshold(self):
+        p = dict(v_fast=1.0, dip_min_atr=3.0, v_fast_floor=0.0, v_depth_elasticity=0.0)
+        self.assertEqual(effective_fast_velocity(p, 3.0), 1.0)
+        self.assertEqual(effective_fast_velocity(p, 30.0), 1.0)
+
+    def test_threshold_relaxes_continuously_with_depth_and_has_a_floor(self):
+        p = dict(v_fast=1.0, dip_min_atr=3.0, v_fast_floor=0.75, v_depth_elasticity=0.5)
+        self.assertEqual(effective_fast_velocity(p, 3.0), 1.0)
+        self.assertAlmostEqual(effective_fast_velocity(p, 4.0), (3 / 4) ** 0.5)
+        self.assertEqual(effective_fast_velocity(p, 6.0), 0.75)
+        self.assertEqual(effective_fast_velocity(p, 30.0), 0.75)
+
+    @staticmethod
+    def detector(**overrides):
+        feat = Features(dict(vol_hl=1, v_hl=1, a_lag=1, hold_s=1, c1_on=0,
+                             s8_dip=0, s8_pop=0, **overrides))
+        feat.mid, feat.bid, feat.ask, feat.mark = 94.0, 93.9, 94.1, 94.0
+        feat.bids = [(93.9 - i / 10, 10.0) for i in range(5)]
+        feat.asks = [(94.1 + i / 10, 10.0) for i in range(5)]
+        feat.sec, feat.atr, feat.atr15 = 1000, 1.0, 2.0
+        feat.mids = deque([100.0] * 120 + [94.0], maxlen=feat.p["brk_lookback"])
+        feat.flow = deque([(1.0, 1.0)] * 60, maxlen=600)
+        feat.dbid = deque([50.0] * 60, maxlen=60)
+        feat.dask = deque([50.0] * 60, maxlen=60)
+        feat.var.v, feat.var.n = 1e-6, 1
+        feat.vraw.v, feat.vraw.n = 0.0, 1
+        feat.vh = deque([-1.0], maxlen=2)
+        feat.dip["minv"] = -0.8
+        return feat
+
+    def test_detector_uses_the_effective_threshold_and_records_it(self):
+        self.assertFalse(any(x.get("src") == "v" for x in self.detector()._close()))
+        out = [x for x in self.detector(v_fast_floor=0.75, v_depth_elasticity=0.5)._close()
+               if x["sig"] == "DIP_SLOWING" and x.get("src") == "v"]
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["v_fast_eff"], 0.75)
 
 class FillModel(unittest.TestCase):
     def test_cancellations_at_our_level_drain_the_queue_ahead_of_us(self):

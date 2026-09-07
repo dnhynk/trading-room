@@ -10,6 +10,7 @@ import time
 import uuid
 
 from track_c.execution.coinone import CoinoneError, EntryExpired, decimal
+from track_a_2.settings import account_access_approved
 
 
 TERMINAL = {
@@ -55,12 +56,14 @@ def new_book():
         mark_at=0,
         rejection_until=0,
         campaign_open=False,
+        campaign_id=None,
         campaign_realized="0",
         campaign_budget=None,
         campaign_full_budget=None,
         campaign_entry_cid=None,
         campaign_started_at=None,
         campaign_stop_counted=False,
+        inventory_phase="flat",
     )
 
 
@@ -87,6 +90,8 @@ class OMS:
             selection_reasons={},
             halt=None,
             mismatches={},
+            foreign_assets=[],
+            foreign_order_coins=[],
         )
         if self.state.get("version") != 1:
             raise RuntimeError("unsupported Track A-2 ledger version")
@@ -104,6 +109,8 @@ class OMS:
         defaults = new_book()
         self.state.setdefault("day_stops", 0)
         self.state.setdefault("day_external_flows", "0")
+        self.state.setdefault("foreign_assets", [])
+        self.state.setdefault("foreign_order_coins", [])
         for book in self.state["books"].values():
             for key, value in defaults.items():
                 book.setdefault(key, [] if key == "lots" else value)
@@ -166,8 +173,24 @@ class OMS:
             D(0),
         )
 
+    def reserved_asset(self, coin, *, exclude_order=None):
+        return sum(
+            (
+                self.remaining(order)
+                for order in self.active(coin)
+                if order["side"] == "SELL" and order is not exclude_order
+            ),
+            D(0),
+        )
+
+    def _account_cash_available(self):
+        available = D(self.state["balances"].get("KRW", {}).get("available", "0"))
+        if not self.config["portfolio_isolation_required"]:
+            available = max(D(0), available - decimal(self.config["cash_reserve_krw"]))
+        return available
+
     def free_cash(self):
-        account = D(self.state["balances"].get("KRW", {}).get("available", "0"))
+        account = self._account_cash_available()
         ledger = max(D(0), D(self.state["cash_krw"]) - self.reserved_cash())
         return min(account, ledger) if self.state["account_at"] else D(0)
 
@@ -277,7 +300,7 @@ class OMS:
             book["stop_limit"] = None
             book["exit_reason"] = None
 
-    def _add_lot(self, coin, qty, price, oid):
+    def _add_lot(self, coin, qty, price, oid, campaign_id):
         book = self.book(coin)
         book_qty = self.quantity(coin)
         old_average = D(book["avg"]) if book.get("avg") is not None else D(0)
@@ -289,13 +312,17 @@ class OMS:
             unit = D(str(params.get("unit_qty") or qty))
             scale = min(D(1), qty / max(unit, qty))
             book.update(
+                campaign_id=campaign_id,
                 campaign_realized="0",
                 campaign_budget=str(full_budget * scale),
                 campaign_full_budget=str(full_budget),
                 campaign_entry_cid=oid,
                 campaign_started_at=self.clock(),
                 campaign_stop_counted=False,
+                inventory_phase="sell_protection_required",
             )
+        elif book.get("campaign_id") != campaign_id:
+            raise CoinoneError("fill campaign identity mismatch")
         elif book.get("campaign_entry_cid") == oid:
             # The first resting order can fill more than once while its
             # remainder is being canceled. Risk scales only with the amount
@@ -343,12 +370,20 @@ class OMS:
             book["avg"] = str((self.cost(coin) + inventory_delta) / book_qty)
         return -(gross_delta - inventory_delta)
 
-    def _record_pnl(self, coin, pnl):
+    def _record_pnl(self, coin, campaign_id, pnl):
         self.state["realized"] = str(D(self.state["realized"]) + pnl)
         self.state["day_realized"] = str(D(self.state["day_realized"]) + pnl)
         book = self.book(coin)
-        if book["campaign_open"]:
+        if book["campaign_open"] and book.get("campaign_id") == campaign_id:
             book["campaign_realized"] = str(D(book["campaign_realized"]) + pnl)
+        elif pnl:
+            # A terminal order may receive a late fee/value correction after
+            # the book has gone flat or even opened a new campaign. Preserve
+            # its immutable ownership without contaminating the new budget.
+            self.save(
+                "CAMPAIGN_LATE_PNL", coin=coin, campaign_id=campaign_id,
+                pnl=str(pnl),
+            )
 
     @staticmethod
     def _risk_exit(order, reason):
@@ -429,6 +464,12 @@ class OMS:
         if self.active(coin, role) or any(order["side"] == side for order in active):
             raise RuntimeError("duplicate Track A-2 order side or role")
         cid = "ta2-" + role + "-" + uuid.uuid4().hex
+        book = self.book(coin)
+        campaign_id = book.get("campaign_id")
+        if campaign_id is None:
+            if role != "buy" or side != "BUY":
+                raise RuntimeError("Track A-2 sell order has no campaign identity")
+            campaign_id = "ta2-campaign-" + uuid.uuid4().hex
         order = dict(
             cid=cid,
             coin=coin,
@@ -442,6 +483,7 @@ class OMS:
             gross="0",
             fee="0",
             created=self.clock(),
+            campaign_id=campaign_id,
             **{key: str(value) if isinstance(value, D) else value for key, value in fields.items()},
         )
         self.state["orders"][cid] = order
@@ -498,7 +540,9 @@ class OMS:
             cash = D(self.state["cash_krw"]) + (dg if order["side"] == "SELL" else -dg) - df
             exit_reason = self.book(order["coin"]).get("exit_reason")
             if order["side"] == "BUY" and dq:
-                self._add_lot(order["coin"], dq, price, order["cid"])
+                self._add_lot(
+                    order["coin"], dq, price, order["cid"], order["campaign_id"],
+                )
                 pnl = -df
             elif order["side"] == "BUY":
                 pnl = self._adjust_buy_gross(order, qty, dg) - df
@@ -517,7 +561,7 @@ class OMS:
             else:
                 pnl = dg - df
             self.state["cash_krw"] = str(cash)
-            self._record_pnl(order["coin"], pnl)
+            self._record_pnl(order["coin"], order["campaign_id"], pnl)
             book = self.book(order["coin"])
             reason = order.get("reason") or exit_reason or book.get("exit_reason")
             if dq and self._risk_exit(order, reason) and not book["campaign_stop_counted"]:
@@ -529,6 +573,7 @@ class OMS:
                 gross_delta=str(dg), fee=str(df), pnl=str(pnl), cid=order["cid"],
                 accounting="fill" if dq else "correction",
                 reason=reason,
+                campaign_id=order["campaign_id"],
             )
         updates = dict(
             filled=str(qty),
@@ -561,18 +606,21 @@ class OMS:
         if reason and reason not in ("strategy_trim", "take_profit"):
             book["cooldown_until"] = self.clock() + float(self.config["strategy"]["stop_cooldown_s"])
         campaign = dict(
+            campaign_id=book.get("campaign_id"),
             realized=book.get("campaign_realized"),
             budget=book.get("campaign_budget"),
             started_at=book.get("campaign_started_at"),
         )
         book.update(
             campaign_open=False,
+            campaign_id=None,
             campaign_realized="0",
             campaign_budget=None,
             campaign_full_budget=None,
             campaign_entry_cid=None,
             campaign_started_at=None,
             campaign_stop_counted=False,
+            inventory_phase="flat",
             strategy_params=None,
             desired_stop=None,
             stop_limit=None,
@@ -604,7 +652,15 @@ class OMS:
                 order["checked"] = self.clock()
             except CoinoneError as exc:
                 self.store.event("RECONCILE_PENDING", coin=order["coin"], cid=order["cid"], error=str(exc))
-                if self.clock() - order["created"] > self.config["reconcile_halt_s"]:
+                # A terminal order is queried only for an optional late fee
+                # correction. Coinone may already have evicted its detail by
+                # then, which must not turn a confirmed terminal state into an
+                # order-ownership halt. Active/uncertain orders still halt on
+                # the original reconciliation deadline.
+                if (
+                    order["status"] not in TERMINAL
+                    and self.clock() - order["created"] > self.config["reconcile_halt_s"]
+                ):
                     self.halt("ORDER_RECONCILIATION", coin=order["coin"], cid=order["cid"])
         expired = [
             cid for cid, order in self.state["orders"].items()
@@ -661,6 +717,7 @@ class OMS:
 
     def sync_account(self, balances, exchange_orders, qty_steps):
         self.roll_day()
+        shared = not self.config["portfolio_isolation_required"]
         rows = {}
         for row in balances:
             coin = row.get("currency")
@@ -673,37 +730,79 @@ class OMS:
             return
         own_cids = set(self.state["orders"])
         own_exchange = {order.get("exchange_id") for order in self.state["orders"].values() if order.get("exchange_id")}
+        foreign_order_coins = set()
         for row in exchange_orders:
             cid, exchange_id = row.get("user_order_id"), row.get("order_id")
             if cid in own_cids or exchange_id in own_exchange:
                 continue
-            self.halt("UNJOURNALED_A2_ORDER" if str(cid or "").startswith("ta2-") else "FOREIGN_ORDER", coin=row.get("target_currency"))
+            coin = row.get("target_currency")
+            if str(cid or "").startswith("ta2-"):
+                self.halt("UNJOURNALED_A2_ORDER", coin=coin)
+            elif shared:
+                if coin:
+                    foreign_order_coins.add(coin)
+            else:
+                self.halt("FOREIGN_ORDER", coin=coin)
         expected_coins = {coin for coin in self.state["books"] if self.quantity(coin)}
+        foreign_assets = set()
         for coin in (set(rows) | expected_coins) - {"KRW"}:
             row = rows.get(coin, {"available": "0", "limit": "0"})
             actual = D(row["available"]) + D(row["limit"])
             expected = self.quantity(coin)
             tolerance = D(str(qty_steps.get(coin, "0"))) / 2
-            if coin not in expected_coins and actual > tolerance:
-                self.halt("FOREIGN_ASSET", coin=coin, quantity=str(actual))
-            elif actual + tolerance < expected:
+            if actual + tolerance < expected:
                 self._mismatch("inventory:" + coin, "INVENTORY_SHORTFALL", coin=coin, actual=str(actual), expected=str(expected))
-            elif actual > expected + tolerance:
+            elif not shared and coin not in expected_coins and actual > tolerance:
+                self.halt("FOREIGN_ASSET", coin=coin, quantity=str(actual))
+            elif not shared and actual > expected + tolerance:
                 self._mismatch("inventory:" + coin, "FOREIGN_ASSET", coin=coin, actual=str(actual), expected=str(expected))
+            elif shared and actual > expected + tolerance:
+                foreign_assets.add(coin)
+                if expected:
+                    self._mismatch(
+                        "inventory:" + coin, "SHARED_SYMBOL_ASSET_CONFLICT",
+                        coin=coin, actual=str(actual), expected=str(expected),
+                    )
+                else:
+                    self.state["mismatches"].pop("inventory:" + coin, None)
             else:
                 self.state["mismatches"].pop("inventory:" + coin, None)
+        self.state["foreign_assets"] = sorted(foreign_assets)
+        self.state["foreign_order_coins"] = sorted(foreign_order_coins)
         actual_cash = D(rows["KRW"]["available"]) + D(rows["KRW"]["limit"])
         exposed = bool(expected_coins or self.active())
         if not self.state["capital_initialized"]:
             if exposed:
                 self.halt("CAPITAL_UNINITIALIZED_WITH_EXPOSURE")
             else:
+                capital = actual_cash
+                if shared:
+                    capacity = max(
+                        D(0), actual_cash - decimal(self.config["cash_reserve_krw"]),
+                    )
+                    capital = min(
+                        decimal(self.config["capital_allocation_krw"], positive=True),
+                        capacity,
+                    )
+                if capital <= 0:
+                    self.halt("CAPITAL_ALLOCATION_UNAVAILABLE")
+                    self.state["balances"] = rows
+                    self.state["account_at"] = self.clock()
+                    return
                 self.state.update(
-                    capital_initialized=True, cash_krw=str(actual_cash),
-                    initial_equity=str(actual_cash), day_start=str(actual_cash),
+                    capital_initialized=True, cash_krw=str(capital),
+                    initial_equity=str(capital), day_start=str(capital),
                     day_external_flows="0",
                 )
-                self.save("CAPITAL_INITIALIZED", balance=str(actual_cash))
+                self.save(
+                    "CAPITAL_INITIALIZED", balance=str(capital),
+                    account_cash=str(actual_cash), shared=shared,
+                )
+        elif shared:
+            # Cash is fungible at the exchange, but this ledger owns only its
+            # fixed allocation. Foreign engine activity changes immediate
+            # availability, not A-2 P&L or its allocated capital.
+            self.state["mismatches"].pop("cash", None)
         elif not exposed:
             delta = actual_cash - D(self.state["cash_krw"])
             self.state["cash_krw"] = str(actual_cash)
@@ -730,7 +829,7 @@ class OMS:
         if (
             self.config["mode"] != "live"
             or not self.config["execution_enabled"]
-            or not self.config["portfolio_isolation_confirmed"]
+            or not account_access_approved(self.config)
             or self.state["halt"]
             or not self.state["capital_initialized"]
             or not 0 <= self.clock() - self.state["account_at"] <= self.config["account_fresh_s"]
@@ -742,6 +841,8 @@ class OMS:
             or self.state["day_stops"] >= self.config["strategy"]["max_stops_day"]
             or self.active(coin, "trim")
             or self.active(coin, "exit")
+            or coin in self.state.get("foreign_assets", ())
+            or coin in self.state.get("foreign_order_coins", ())
         ):
             return False
         if not qty or qty * price < minimum:
@@ -766,5 +867,11 @@ class OMS:
                 return False
         return True
 
-    def available_asset(self, coin):
-        return D(self.state["balances"].get(coin, {}).get("available", "0"))
+    def available_asset(self, coin, *, exclude_order=None):
+        account = D(self.state["balances"].get(coin, {}).get("available", "0"))
+        ledger = max(
+            D(0), self.quantity(coin) - self.reserved_asset(
+                coin, exclude_order=exclude_order,
+            ),
+        )
+        return min(account, ledger) if self.state["account_at"] else D(0)

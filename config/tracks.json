@@ -15,7 +15,7 @@
       ],
       "execution_enabled": false,
       "implementation": "live_engine",
-      "execution_version": "a2-live-v2",
+      "execution_version": "a2-live-v3",
       "activation": "manual_multi_lock",
       "universe": [],
       "restart_requires_user_instruction": true

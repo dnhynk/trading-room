@@ -24,7 +24,13 @@ from track_a_2.execution.private_stream import follow as private_follow
 from track_a_2.execution.store import Store, encoded
 from track_a_2.market.feed import Market
 from track_a_2.market.select import ranked, retain
-from track_a_2.market.units import floor_step, price_ceil, price_floor, stop_prices
+from track_a_2.market.units import (
+    floor_step,
+    price_ceil,
+    price_floor,
+    stop_prices,
+    stop_prices_for_limit_floor,
+)
 from track_a_2.settings import CONFIG, ROOT, load, resolved_env_path, resolved_state_directory
 from track_a_2.strategy.sizing import size
 from track_c.execution.coinone import CoinoneError, EntryExpired, decimal
@@ -33,12 +39,17 @@ from track_c.execution.rate_limit import Transport
 
 
 FEATURE_FIELDS = frozenset(("t", "mid", "bid", "ask", "v", "brk", "bko"))
+SIZING_POLICY_FIELDS = (
+    "capital_allocation_krw", "cash_reserve_krw", "cash_fraction",
+    "unit_fraction", "book_notional_fraction", "portfolio_notional_fraction",
+    "book_risk_fraction", "depth_fraction", "minimum_exit_multiple",
+)
 
 
 class Runtime:
     def __init__(
         self, config, *, config_path=CONFIG, root=ROOT, client=None, store=None,
-        clock=time.time, recovery_only=False,
+        clock=time.time, recovery_only=False, operational_checks=True,
     ):
         self.config = config
         self.config_path = Path(config_path)
@@ -47,7 +58,10 @@ class Runtime:
         self.directory = resolved_state_directory(config, self.root)
         self.http_pool = None
         if client is None:
-            credentials = read_credentials(resolved_env_path(config, self.root))
+            credentials = read_credentials(
+                resolved_env_path(config, self.root),
+                profile=config["credential_profile"],
+            )
             self.http_pool = HTTPSPool()
             transport = Transport(self.http_pool)
             client = CoinoneA2(
@@ -58,6 +72,14 @@ class Runtime:
         self.client = client
         self.store = store or Store(self.directory)
         self.oms = OMS(config, self.client, self.store, clock=clock)
+        sizing_policy = {
+            "execution_version": EXECUTION_VERSION,
+            "config": {name: config[name] for name in SIZING_POLICY_FIELDS},
+            "strategy": config["strategy"],
+        }
+        self.sizing_policy_digest = hashlib.sha256(
+            encoded(sizing_policy).encode()
+        ).hexdigest()
         self.markets = {}
         self.strategies = {}
         self.strategy_params = {}
@@ -78,6 +100,7 @@ class Runtime:
         self.loop = None
         self.egress = config.get("expected_egress_ip")
         self.recovery_only = bool(recovery_only)
+        self.operational_checks = bool(operational_checks)
 
     def controls(self):
         repository_stop = (self.root / "STOP").exists()
@@ -88,8 +111,15 @@ class Runtime:
             # An explicitly launched recovery owner may manage A-2 exposure
             # while the repository-wide A/B suspension remains in place. Its
             # own state-directory STOP still terminates it.
-            stop=runtime_stop or (repository_stop and not self.recovery_only),
-            pause=runtime_pause or repository_pause or self.recovery_only,
+            stop=runtime_stop or (
+                repository_stop
+                and not self.recovery_only
+                and not self.config["repository_ab_controls_acknowledged"]
+            ),
+            pause=runtime_pause or self.recovery_only or (
+                repository_pause
+                and not self.config["repository_ab_controls_acknowledged"]
+            ),
         )
 
     def activation_reasons(self):
@@ -373,6 +403,16 @@ class Runtime:
         market = self.markets[coin]
         book = self.oms.book(coin)
         params = book.get("strategy_params")
+        if (
+            params is not None
+            and not self.oms.quantity(coin)
+            and not self.oms.active(coin)
+            and params.get("sizing_policy_digest") != self.sizing_policy_digest
+        ):
+            # A flat book may inherit sizing from an older immutable release.
+            # Reprice it under the active policy before it can create another
+            # order. Positioned books and live orders remain pinned until flat.
+            params = None
         if params is None:
             if not market.book:
                 return None
@@ -406,6 +446,7 @@ class Runtime:
                 "cap_frac": 0.0,
                 "daily_loss_frac": 0.0,
                 "notional_frac": 0.0,
+                "sizing_policy_digest": self.sizing_policy_digest,
             }
             self.oms.set_strategy_params(coin, params)
             self.store.event(
@@ -527,7 +568,12 @@ class Runtime:
         raw_stop = decimal(output["stop"]) if output["stop"] is not None else None
         campaign_floor = self.oms.campaign_stop_floor(coin, market.fees["taker"])
         if campaign_floor and (raw_stop is None or campaign_floor > raw_stop):
-            raw_stop = campaign_floor
+            raw_stop, _ = stop_prices_for_limit_floor(
+                market.units,
+                campaign_floor,
+                self.config["stop_limit_buffer_ticks"],
+                self.config["stop_limit_buffer_bp"],
+            )
             self.counts["campaign_stop_floor"] += 1
         if raw_stop is not None:
             trigger, limit = stop_prices(
@@ -536,6 +582,13 @@ class Runtime:
                 self.config["stop_limit_buffer_ticks"],
                 self.config["stop_limit_buffer_bp"],
             )
+            if campaign_floor and limit < campaign_floor:
+                trigger, limit = stop_prices_for_limit_floor(
+                    market.units,
+                    campaign_floor,
+                    self.config["stop_limit_buffer_ticks"],
+                    self.config["stop_limit_buffer_bp"],
+                )
             normalized.update(trigger=trigger, limit=limit)
             normalized["no_stop"] = False
         return normalized
@@ -582,68 +635,139 @@ class Runtime:
             max(decimal(trim["price"], positive=True), gate_price, fee_break_even),
         )
 
-    def submission_guard(
-        self, coin, role, side, qty, *, price=None, minimum_price=None,
-        minimum_gross=None, deadline=None,
+    def validate_intent(
+        self, coin, role, side, qty, *, fee_rate=0, price=None,
+        minimum_price=None, minimum_gross=None, own_order=None,
+        require_intent=False, operational=True, resting_order=False, now_ms=None,
     ):
-        loop = self.loop
+        """Pure admission decision reused for planning, final send, and replay."""
         market = self.markets[coin]
-        deadline = deadline or (time.monotonic() + self.config["quote_max_age_ms"] / 1000)
-
-        async def validate():
-            now_ms = time.time_ns() // 1_000_000
-            if not 0 <= self.clock() - self.oms.state["account_at"] <= self.config["account_fresh_s"]:
-                return "account_age"
+        qty = decimal(qty, positive=True)
+        now_ms = time.time_ns() // 1_000_000 if now_ms is None else int(now_ms)
+        if not 0 <= self.clock() - self.oms.state["account_at"] <= self.config["account_fresh_s"]:
+            return "account_age"
+        if require_intent:
             active = [order for order in self.oms.active(coin) if order["side"] == side]
-            if len(active) != 1 or active[0]["role"] != role or active[0]["status"] != "INTENT":
+            if (
+                len(active) != 1
+                or active[0]["role"] != role
+                or active[0]["status"] != "INTENT"
+                or own_order is not active[0]
+            ):
                 return "order_ownership_changed"
-            if side == "BUY":
+        if side == "BUY":
+            if operational and self.operational_checks:
                 reasons = self.activation_reasons()
                 if reasons:
                     return reasons[0]
-                if self.stopping or not self.connected or not self.private_connected or not self.storage_ok:
-                    return "runtime_unavailable"
-                if not market.fresh(now_ms) or not market.book:
-                    return "market_age"
+            if self.stopping or not self.connected or not self.private_connected or not self.storage_ok:
+                return "runtime_unavailable"
+            # A new order needs a recent book.  An already accepted maker
+            # order may keep its queue position while a quiet book emits no
+            # update; websocket liveness, its original signal TTL, current
+            # shape/depth, and every account/risk check still apply.
+            if not market.book or (not resting_order and not market.fresh(now_ms)):
+                return "market_age"
+            price = decimal(price, positive=True) if price is not None else None
+            current_bid = decimal(market.book["bids"][0]["price"], positive=True)
+            if price is None or price > current_bid:
+                return "entry_price_changed"
+            book = self.oms.book(coin)
+            if (
+                self.oms.state["halt"]
+                or not book["selected"]
+                or book["wind_down"]
+                or coin in self.oms.state.get("foreign_assets", ())
+                or coin in self.oms.state.get("foreign_order_coins", ())
+            ):
+                return "entry_admission_changed"
+            if self.oms.daily_blocked(self.marks()):
+                return "daily_loss"
+            if self.oms.state["day_stops"] >= self.config["strategy"]["max_stops_day"]:
+                return "daily_stops"
+            minimum = decimal(market.contract["min_order_amount"], positive=True)
+            minimum_qty = decimal(market.contract["min_qty"], positive=True)
+            if qty < minimum_qty or qty * price < minimum:
+                return "entry_minimum_changed"
+            if qty > self._buy_cap(
+                coin, price, fee_rate, exclude_order=own_order,
+            ):
+                return "entry_size_changed"
+            projected_floor = self.oms.projected_campaign_stop(
+                coin, qty, price, fee_rate, market.fees["taker"],
+            )
+            if projected_floor > 0:
+                projected_trigger, _ = stop_prices_for_limit_floor(
+                    market.units,
+                    projected_floor,
+                    self.config["stop_limit_buffer_ticks"],
+                    self.config["stop_limit_buffer_bp"],
+                )
+                if projected_trigger >= current_bid:
+                    return "campaign_risk_changed"
+            open_books = sum(
+                bool(self.oms.quantity(name) or self.oms.active(name, "buy"))
+                for name in self.oms.state["books"]
+            )
+            if open_books > self.config["max_open_books"]:
+                return "open_book_limit_changed"
+        else:
+            if self.oms.quantity(coin) < qty:
+                return "inventory_changed"
+            if self.oms.available_asset(coin, exclude_order=own_order) < qty:
+                return "available_inventory_changed"
+            if role in ("trim", "exit") and (not market.book or not market.fresh(now_ms)):
+                return "market_age"
+            if role == "trim" and self.oms.book(coin).get("desired_stop"):
                 current_bid = decimal(market.book["bids"][0]["price"], positive=True)
-                if price is None or decimal(price, positive=True) > current_bid:
-                    return "entry_price_changed"
-                book = self.oms.book(coin)
-                if self.oms.state["halt"] or not book["selected"] or book["wind_down"]:
-                    return "entry_admission_changed"
-                if self.oms.daily_blocked(self.marks()):
-                    return "daily_loss"
-            else:
-                if self.oms.quantity(coin) < decimal(qty, positive=True):
-                    return "inventory_changed"
-                if self.oms.available_asset(coin) < decimal(qty, positive=True):
-                    return "available_inventory_changed"
-                if role in ("trim", "exit") and (not market.book or not market.fresh(now_ms)):
-                    return "market_age"
-                if role == "trim" and self.oms.book(coin).get("desired_stop"):
-                    current_bid = decimal(market.book["bids"][0]["price"], positive=True)
-                    if current_bid <= decimal(self.oms.book(coin)["desired_stop"]):
-                        return "stop_priority"
-                if role == "trim" and minimum_price is not None:
-                    quote = self._sell_quote(market, qty, minimum_price)
-                    if (
-                        quote is None
-                        or minimum_gross is not None
-                        and quote["gross"] < decimal(minimum_gross)
-                    ):
-                        return "profit_execution_changed"
-            return None
+                if current_bid <= decimal(self.oms.book(coin)["desired_stop"]):
+                    return "stop_priority"
+            if role == "trim" and minimum_price is not None:
+                quote = self._sell_quote(market, qty, minimum_price)
+                if (
+                    quote is None
+                    or minimum_gross is not None
+                    and quote["gross"] < decimal(minimum_gross)
+                ):
+                    return "profit_execution_changed"
+        return None
+
+    def submission_guard(
+        self, coin, role, side, qty, *, fee_rate=0, price=None,
+        minimum_price=None, minimum_gross=None, deadline=None,
+    ):
+        loop = self.loop
+        deadline = deadline or (time.monotonic() + self.config["quote_max_age_ms"] / 1000)
+
+        def decision():
+            active = [order for order in self.oms.active(coin) if order["side"] == side]
+            own_order = active[0] if len(active) == 1 else None
+            return self.validate_intent(
+                coin, role, side, qty, fee_rate=fee_rate, price=price,
+                minimum_price=minimum_price, minimum_gross=minimum_gross,
+                own_order=own_order, require_intent=True,
+                now_ms=(
+                    time.time_ns() // 1_000_000
+                    if self.operational_checks else int(self.clock() * 1000)
+                ),
+            )
+
+        async def validate():
+            return decision()
 
         def check():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise EntryExpired("decision_age")
-            future = asyncio.run_coroutine_threadsafe(validate(), loop)
-            try:
-                reason = future.result(timeout=remaining)
-            except FutureTimeout:
-                future.cancel()
-                raise EntryExpired("validation_wait_expired") from None
+            if loop is None:
+                reason = decision()
+            else:
+                future = asyncio.run_coroutine_threadsafe(validate(), loop)
+                try:
+                    reason = future.result(timeout=remaining)
+                except FutureTimeout:
+                    future.cancel()
+                    raise EntryExpired("validation_wait_expired") from None
             if reason:
                 raise EntryExpired(reason)
             if time.monotonic() > deadline:
@@ -678,12 +802,29 @@ class Runtime:
             and self._same(order, qty=qty, price=price, trigger=trigger)
         )
 
-    def _buy_cap(self, coin, price, fee_rate):
-        """Reapply mutable cash, portfolio, exchange, and two-sided depth caps."""
+    def _buy_cap(self, coin, price, fee_rate, *, exclude_order=None):
+        """Return capacity after excluding only the intent being revalidated."""
         market = self.markets[coin]
         price, fee_rate = decimal(price, positive=True), decimal(fee_rate)
         held = self.oms.quantity(coin)
         params = self.oms.book(coin).get("strategy_params") or {}
+        excluded_notional = D(0)
+        excluded_reservation = D(0)
+        if exclude_order is not None:
+            excluded_qty = self.oms.remaining(exclude_order)
+            excluded_price = decimal(exclude_order["price"], positive=True)
+            excluded_notional = excluded_qty * excluded_price
+            excluded_reservation = excluded_notional * (
+                D(1) + decimal(exclude_order["fee_rate"])
+            )
+        pending_same = sum(
+            (
+                self.oms.remaining(order)
+                for order in self.oms.active(coin, "buy")
+                if order is not exclude_order
+            ),
+            D(0),
+        )
         bid_depth = sum(
             (decimal(row["qty"]) for row in (market.book or {}).get("bids", [])[:5]),
             D(0),
@@ -693,14 +834,29 @@ class Runtime:
             D(0),
         ) * decimal(self.config["depth_fraction"])
         equity = self.oms.equity(self.marks())
+        portfolio_used = max(
+            D(0),
+            self.oms.portfolio_notional(self.marks()) - excluded_notional,
+        )
         portfolio_room = max(
             D(0),
             equity * decimal(self.config["portfolio_notional_fraction"])
-            - self.oms.portfolio_notional(self.marks()),
+            - portfolio_used,
         ) / price
-        book_room = max(D(0), D(str(params.get("max_notional") or 0)) / price - held)
-        cash_room = self.oms.free_cash() / (price * (D(1) + fee_rate))
-        exit_room = max(D(0), bid_depth - held)
+        book_room = max(
+            D(0),
+            D(str(params.get("max_notional") or 0)) / price - held - pending_same,
+        )
+        ledger_cash = max(
+            D(0),
+            D(self.oms.state["cash_krw"])
+            - (self.oms.reserved_cash() - excluded_reservation),
+        )
+        account_cash = self.oms._account_cash_available()
+        if exclude_order is not None and exclude_order.get("status") != "INTENT":
+            account_cash += excluded_reservation
+        cash_room = min(account_cash, ledger_cash) / (price * (D(1) + fee_rate))
+        exit_room = max(D(0), bid_depth - held - pending_same)
         cap = min(
             ask_depth, exit_room, portfolio_room, book_room, cash_room,
             decimal(market.contract["max_qty"]),
@@ -711,6 +867,7 @@ class Runtime:
     def _submit(self, coin, role, side, kind, qty, fee_rate, **fields):
         guard = self.submission_guard(
             coin, role, side, qty,
+            fee_rate=fee_rate,
             price=fields.get("price"),
             minimum_price=fields.get("required_price"),
             minimum_gross=fields.get("minimum_gross"),
@@ -798,50 +955,63 @@ class Runtime:
             return fills
 
         trim = desired.get("trim") if desired else None
+        trim_deferred = False
         if qty and trim and decimal(trim["qty"]) > 0:
             trim_qty = min(qty, decimal(trim["qty"]))
             if bid is None or trim_qty < minimum_qty or trim_qty * bid < minimum:
                 self.counts["trim_below_minimum"] += 1
-                return fills
-            if trigger is not None and bid <= trigger:
+                trim_deferred = True
+            elif trigger is not None and bid <= trigger:
                 book["exit_reason"] = "stop_during_trim"
                 self.oms.save("EXIT_REQUEST", coin=coin, reason=book["exit_reason"])
                 return fills
-            purpose = trim.get("purpose") or "profit"
-            required_price = None
-            if purpose == "profit":
-                required_price = self._profit_price(market, trim)
-                quote = self._sell_quote(market, trim_qty, required_price)
-                if quote is None or quote["gross"] < minimum:
-                    self.counts["profit_trim_not_executable"] += 1
+            if not trim_deferred:
+                purpose = trim.get("purpose") or "profit"
+                required_price = None
+                if purpose == "profit":
+                    required_price = self._profit_price(market, trim)
+                    quote = self._sell_quote(market, trim_qty, required_price)
+                    if quote is None or quote["gross"] < minimum:
+                        self.counts["profit_trim_not_executable"] += 1
+                        trim_deferred = True
+            if not trim_deferred:
+                if buy_orders:
+                    return self._cancel(buy_orders)
+                if protect:
+                    book["inventory_phase"] = "protection_canceling"
+                    self.oms.save("INVENTORY_PHASE", coin=coin, phase=book["inventory_phase"])
+                    return self._cancel([protect])
+                active_trim = next((order for order in sell_orders if order["role"] == "trim"), None)
+                if active_trim:
+                    book["inventory_phase"] = "selling"
                     return fills
-            if buy_orders:
-                return self._cancel(buy_orders)
-            if protect:
-                return self._cancel([protect])
-            active_trim = next((order for order in sell_orders if order["role"] == "trim"), None)
-            if active_trim:
-                return fills
-            if sell_orders:
-                return fills
-            if self.oms.available_asset(coin) < trim_qty:
-                self.oms.state["account_at"] = 0
-                self.last_account = 0
-                return fills
-            fields = dict(
-                lot=trim.get("lot"),
-                requested_scope=trim.get("requested_scope"),
-                reason="take_profit" if purpose == "profit" else "strategy_risk_trim",
-                purpose=purpose,
-            )
-            if required_price is not None:
-                fields["required_price"] = required_price
-                fields["limit_price"] = required_price
-                fields["minimum_gross"] = minimum
-            self._submit(coin, "trim", "SELL", "MARKET", trim_qty, taker, **fields)
-            return fills
+                if sell_orders:
+                    return fills
+                if self.oms.available_asset(coin) < trim_qty:
+                    self.oms.state["account_at"] = 0
+                    self.last_account = 0
+                    trim_deferred = True
+                else:
+                    fields = dict(
+                        lot=trim.get("lot"),
+                        requested_scope=trim.get("requested_scope"),
+                        reason="take_profit" if purpose == "profit" else "strategy_risk_trim",
+                        purpose=purpose,
+                    )
+                    if required_price is not None:
+                        fields["required_price"] = required_price
+                        fields["limit_price"] = required_price
+                        fields["minimum_gross"] = minimum
+                    book["inventory_phase"] = "selling"
+                    self.oms.save("INVENTORY_PHASE", coin=coin, phase=book["inventory_phase"])
+                    self._submit(coin, "trim", "SELL", "MARKET", trim_qty, taker, **fields)
+                    return fills
+            if trim_deferred:
+                book["inventory_phase"] = "reprotecting"
+                self.oms.save("TRIM_DEFERRED_REPROTECT", coin=coin, quantity=str(qty))
         active_trim = next((order for order in sell_orders if order["role"] == "trim"), None)
         if active_trim:
+            book["inventory_phase"] = "reprotecting"
             return self._cancel([active_trim])
 
         qty = self.oms.quantity(coin)
@@ -860,6 +1030,7 @@ class Runtime:
             if protect and not self._confirmed_protection(
                 protect, qty=qty, price=limit, trigger=trigger,
             ):
+                book["inventory_phase"] = "protection_canceling"
                 return self._cancel([protect])
             if protect is None:
                 if sell_orders:
@@ -872,32 +1043,92 @@ class Runtime:
                     self.oms.state["account_at"] = 0
                     self.last_account = 0
                     return fills
+                book["inventory_phase"] = "reprotecting"
+                self.oms.save("INVENTORY_PHASE", coin=coin, phase=book["inventory_phase"])
                 self._submit(
                     coin, "protect", "SELL", "STOP_LIMIT", qty, max(maker, taker),
                     price=limit, trigger_price=trigger,
                 )
                 return fills
+            book["inventory_phase"] = "protected"
 
-        wanted_buy = desired.get("buy") if desired else None
+        # A missing decision is not a strategy instruction to cancel.  The
+        # per-second feature closes only after the first message of the next
+        # exchange second, so it can briefly be unavailable while the order
+        # book itself is still current.  Keep an already admitted maker order
+        # through that gap, but re-run every execution/risk guard against its
+        # remaining quantity and the current book.  No new order can be born
+        # without a complete strategy decision.
+        if desired is None and not stopping and not self.recovery_only:
+            if not buy_orders:
+                return fills
+            order = buy_orders[0]
+            remaining = self.oms.remaining(order)
+            order_age = self.clock() - order["created"]
+            if not 0 <= order_age <= self.config["strategy"]["buy_ttl_s"]:
+                reason = "entry_signal_expired"
+            else:
+                reason = self.validate_intent(
+                    coin, "buy", "BUY", remaining,
+                    fee_rate=maker, price=order["price"], own_order=order,
+                    resting_order=True,
+                )
+            if reason:
+                self.counts["resting_buy_rejected_" + reason] += 1
+                self.store.event(
+                    "RESTING_BUY_CANCEL", coin=coin, cid=order["cid"],
+                    reason=reason, decision="unavailable",
+                )
+                return self._cancel(buy_orders)
+            self.counts["resting_buy_held_without_decision"] += 1
+            return fills
+
+        wanted_buy = None if trim_deferred else desired.get("buy") if desired else None
         if wanted_buy is None or stopping or self.recovery_only:
             if buy_orders:
                 return self._cancel(buy_orders)
             return fills
-        price, buy_qty = wanted_buy
-        buy_qty = min(decimal(buy_qty), self._buy_cap(coin, price, maker))
-        if buy_qty < minimum_qty or buy_qty * price < minimum:
-            if buy_orders:
+        price, wanted_qty = wanted_buy
+        wanted_qty = decimal(wanted_qty)
+        if buy_orders:
+            order = buy_orders[0]
+            maintained_qty = min(
+                wanted_qty,
+                self._buy_cap(coin, price, maker, exclude_order=order),
+            )
+            maintenance_reason = None
+            if maintained_qty < minimum_qty or maintained_qty * price < minimum:
+                maintenance_reason = "entry_minimum_changed"
+            elif not self._same(order, qty=maintained_qty, price=price):
+                maintenance_reason = "entry_shape_changed"
+            if maintenance_reason:
+                self.counts["resting_buy_rejected_" + maintenance_reason] += 1
+                self.store.event(
+                    "RESTING_BUY_CANCEL", coin=coin, cid=order["cid"],
+                    reason=maintenance_reason, decision="available",
+                    order_qty=order["qty"], wanted_qty=str(maintained_qty),
+                    order_price=order.get("price"), wanted_price=str(price),
+                )
                 return self._cancel(buy_orders)
+            reason = self.validate_intent(
+                coin, "buy", "BUY", maintained_qty,
+                fee_rate=maker, price=price, own_order=order,
+            )
+            if reason:
+                self.counts["resting_buy_rejected_" + reason] += 1
+                self.store.event(
+                    "RESTING_BUY_CANCEL", coin=coin, cid=order["cid"],
+                    reason=reason, decision="available",
+                )
+                return self._cancel(buy_orders)
+            return fills
+        buy_qty = min(wanted_qty, self._buy_cap(coin, price, maker))
+        if buy_qty < minimum_qty or buy_qty * price < minimum:
             return fills
         if qty and not self._confirmed_protection(
             protect, qty=qty, price=limit, trigger=trigger,
         ):
             return fills
-        if buy_orders:
-            order = buy_orders[0]
-            if self._same(order, qty=buy_qty, price=price):
-                return fills
-            return self._cancel(buy_orders)
         if self.oms.can_buy(
             coin, buy_qty, price, maker, minimum, self.marks(),
             exit_fee_rate=taker, current_bid=bid,
@@ -948,6 +1179,8 @@ class Runtime:
                 desired_stop=book.get("desired_stop"),
                 stop_limit=book.get("stop_limit"),
                 exit_reason=book.get("exit_reason"),
+                campaign_id=book.get("campaign_id"),
+                inventory_phase=book.get("inventory_phase"),
                 campaign_realized_krw=book.get("campaign_realized"),
                 campaign_budget_krw=book.get("campaign_budget"),
             )
@@ -959,6 +1192,17 @@ class Runtime:
             track="A-2",
             execution_version=EXECUTION_VERSION,
             mode=self.config["mode"],
+            account_mode=(
+                "isolated" if self.config["portfolio_isolation_required"]
+                else "shared_owner_approved"
+            ),
+            capital_allocation_krw=self.config["capital_allocation_krw"],
+            cash_reserve_krw=self.config["cash_reserve_krw"],
+            shared_reserved_symbols=self.config["shared_reserved_symbols"],
+            approval_mode=(
+                "owner_unvalidated"
+                if self.config["owner_unvalidated_live_approved"] else "evaluated"
+            ),
             recovery_only=self.recovery_only,
             connected=self.connected,
             private_connected=self.private_connected,
@@ -967,6 +1211,8 @@ class Runtime:
             selected=self.oms.state["selected"],
             coverage_reasons=self.coverage_reasons,
             sizing_reasons=self.sizing_reasons,
+            foreign_assets=self.oms.state.get("foreign_assets", []),
+            foreign_order_coins=self.oms.state.get("foreign_order_coins", []),
             positions=positions,
             active_orders=[
                 dict(

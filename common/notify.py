@@ -25,7 +25,8 @@ payload = {"kind": "진입", "head": "MUBARAK 롱 · 09-04 00:18 KST",
 규약: 원본 JSON·로그 줄·oid·내부 경로·`.env` 값(webhook 포함)은 절대 본문에 넣지 않는다.
 이벤트를 한두 줄로 가공해 보내고, 루틴 `SIZING`·변화 없는 `PARAMS` 는 보내지 않는다.
 
-C 알림은 track="C", data_dir=<C data>, env_path=<기존 서버 .env>를 명시한다.
+C 알림은 track="C", A-2 알림은 track="A2", data_dir=<해당 트랙 data>,
+env_path=<기존 서버 .env>를 명시한다.
 C 계기판은 해당 SQLite 장부와 status.json만 읽고 KST 당일 손익·전액 복리 자본을
 원화로 표시한다. C 데이터가 없으면 확인 불가로 표시하며 A/B 장부를 대신 읽지 않는다."""
 from common.paths import runtime_root
@@ -187,6 +188,9 @@ def summary_fields(day=None, balance=True, *, track="AB", data_dir=None):
     if track == "C":
         from track_c.ops.notices import summary_fields as c_summary
         return c_summary(data_dir, day=day, balance=balance)
+    if track in ("A2", "A-2"):
+        from track_a_2.ops.notices import summary_fields as a2_summary
+        return a2_summary(data_dir, balance=balance)
     if track not in ("AB", "A", "B"):
         raise ValueError("notify: unknown track")
     day = day or time.strftime("%Y-%m-%d")

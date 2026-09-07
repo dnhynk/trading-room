@@ -63,6 +63,15 @@ def price_down(units, value, ticks=1):
     return value
 
 
+def price_up(units, value, ticks=1):
+    if type(ticks) is not int or ticks < 1:
+        raise ValueError("ticks must be a positive integer")
+    value = price_ceil(units, value)
+    for _ in range(ticks):
+        value = price_ceil(units, value + price_unit(units, value))
+    return value
+
+
 def stop_prices(units, raw_trigger, buffer_ticks, buffer_bp):
     trigger = price_floor(units, raw_trigger)
     by_ticks = price_down(units, trigger, buffer_ticks)
@@ -71,3 +80,18 @@ def stop_prices(units, raw_trigger, buffer_ticks, buffer_bp):
     if not 0 < limit < trigger:
         raise CoinoneError("invalid stop-limit ladder")
     return trigger, limit
+
+
+def stop_prices_for_limit_floor(units, execution_floor, buffer_ticks, buffer_bp):
+    """Return the lowest stop pair whose known limit is not below the budget floor."""
+    execution_floor = decimal(execution_floor, positive=True)
+    ratio = D(1) - decimal(buffer_bp) / D(10000)
+    if ratio <= 0:
+        raise CoinoneError("invalid stop-limit buffer")
+    candidate = price_ceil(units, execution_floor / ratio)
+    for _ in range(int(buffer_ticks) + 1024):
+        trigger, limit = stop_prices(units, candidate, buffer_ticks, buffer_bp)
+        if limit >= execution_floor:
+            return trigger, limit
+        candidate = price_up(units, trigger)
+    raise CoinoneError("stop-limit budget floor unresolved")

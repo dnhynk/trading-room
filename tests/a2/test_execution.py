@@ -1,4 +1,5 @@
 import base64
+import copy
 from decimal import Decimal as D
 import json
 from pathlib import Path
@@ -26,6 +27,19 @@ class ClientTests(unittest.TestCase):
             "COINONE_A2_SECRET_KEY": "a2-secret",
         })
         self.assertEqual(credentials.access_token, "a2-token")
+
+    def test_shared_credential_profile_is_explicit_and_never_a_fallback(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / ".env"
+        path.write_text(
+            "COINONE_ACCESS_TOKEN=c-token\nCOINONE_SECRET_KEY=c-secret\n",
+            encoding="utf-8",
+        )
+        credentials = read_credentials(path, environ={}, profile="coinone_default")
+        self.assertEqual(credentials.access_token, "c-token")
+        with self.assertRaisesRegex(CoinoneError, "dedicated"):
+            read_credentials(path, environ={}, profile="a2")
 
     def test_order_allowlist_and_post_only_payload(self):
         requests = []
@@ -144,6 +158,39 @@ class OMSTests(unittest.TestCase):
         self.assertEqual(D(self.oms.state["cash_krw"]), before_cash - 1)
         self.assertEqual(D(self.oms.state["realized"]), before_pnl - 1)
 
+    def test_late_fee_correction_stays_with_original_campaign(self):
+        first = self.submit_buy()
+        self.client.fill(first["cid"], "100", "100")
+        self.oms.reconcile(force=True)
+        old_campaign = first["campaign_id"]
+        sale = self.oms.submit(
+            "AAA", "trim", "SELL", "MARKET", "100", fee_rate="0",
+            reason="take_profit",
+        )
+        self.client.fill(sale["cid"], "100", "100", fee="0")
+        self.oms.reconcile(force=True)
+        self.assertTrue(self.oms.finish_flat("AAA"))
+        self.oms.set_strategy_params("AAA", dict(
+            max_notional=50000, qstep=0.1, unit_qty=100,
+            campaign_loss_budget_krw=500,
+        ))
+        second = self.submit_buy()
+        self.client.fill(second["cid"], "100", "90")
+        self.oms.reconcile(force=True)
+        self.assertNotEqual(second["campaign_id"], old_campaign)
+        before = D(self.oms.book("AAA")["campaign_realized"])
+        self.client.fill(sale["cid"], "100", "100", fee="1")
+        self.oms.reconcile(force=True)
+        self.assertEqual(D(self.oms.book("AAA")["campaign_realized"]), before)
+        late = [
+            json.loads(body)
+            for kind, body in self.store.db.execute(
+                "SELECT kind,body FROM events WHERE kind='CAMPAIGN_LATE_PNL'"
+            )
+        ]
+        self.assertEqual(late[-1]["campaign_id"], old_campaign)
+        self.assertEqual(late[-1]["pnl"], "-1")
+
     def test_terminal_order_is_rechecked_for_late_fee_correction(self):
         order = self.submit_buy()
         self.client.fill(order["cid"], "100", "100", fee="5", status="FILLED")
@@ -163,6 +210,23 @@ class OMSTests(unittest.TestCase):
         self.assertNotIn(order["cid"], self.oms.state["orders"])
         self.assertEqual(self.oms.quantity("AAA"), 100)
 
+    def test_missing_terminal_detail_during_settlement_does_not_halt(self):
+        order = self.submit_buy()
+        self.clock.advance(self.config["reconcile_halt_s"] + 0.01)
+        self.client.fill(order["cid"], "100", "100", status="FILLED")
+        self.oms.reconcile(force=True)
+        del self.client.rows[order["cid"]]
+        self.oms.reconcile(force=True)
+        self.assertIsNone(self.oms.state["halt"])
+        self.assertIn(order["cid"], self.oms.state["orders"])
+
+    def test_missing_active_detail_still_halts_after_reconcile_deadline(self):
+        order = self.submit_buy()
+        del self.client.rows[order["cid"]]
+        self.clock.advance(self.config["reconcile_halt_s"] + 0.01)
+        self.oms.reconcile(force=True)
+        self.assertEqual(self.oms.state["halt"], "ORDER_RECONCILIATION")
+
     def test_missing_or_foreign_inventory_and_orders_halt_after_reconciliation(self):
         order = self.submit_buy()
         self.client.fill(order["cid"], "100", "100")
@@ -171,6 +235,49 @@ class OMSTests(unittest.TestCase):
         self.clock.advance(self.config["account_mismatch_grace_s"] + 1)
         self.oms.sync_account([dict(currency="KRW", available="90000", limit="0")], [], {"AAA": "0.1"})
         self.assertEqual(self.oms.state["halt"], "INVENTORY_SHORTFALL")
+
+    def test_shared_account_owns_fixed_capital_and_ignores_reserved_track_c_symbol(self):
+        config = copy.deepcopy(load())
+        config.update(
+            status="active", mode="live", execution_enabled=True,
+            portfolio_isolation_required=False,
+            portfolio_isolation_confirmed=False,
+            shared_portfolio_approved=True,
+            credential_profile="coinone_default",
+            capital_allocation_krw=300000,
+            cash_reserve_krw=20000,
+            shared_reserved_symbols=["BTC"],
+            universe=["ETH"],
+        )
+        client = Client()
+        client.balance_rows = [
+            dict(currency="KRW", available="320457", limit="0"),
+            dict(currency="BTC", available="0.01", limit="0"),
+        ]
+        store = Store(Path(self.folder.name) / "shared")
+        self.addCleanup(store.close)
+        oms = OMS(config, client, store, clock=self.clock)
+        foreign = [dict(
+            user_order_id="tc-entry-12345678", order_id="c-order",
+            target_currency="BTC",
+        )]
+        oms.sync_account(client.balances(), foreign, {"BTC": "0.00000001"})
+        self.assertIsNone(oms.state["halt"])
+        self.assertEqual(D(oms.state["cash_krw"]), D("300000"))
+        self.assertEqual(oms.free_cash(), D("300000"))
+        self.assertEqual(oms.state["foreign_order_coins"], ["BTC"])
+        self.assertEqual(oms.state["foreign_assets"], ["BTC"])
+
+    def test_available_inventory_is_bounded_by_owned_unreserved_quantity(self):
+        order = self.submit_buy()
+        self.client.fill(order["cid"], "100", "100")
+        self.oms.reconcile(force=True)
+        self.client.balance_rows = [
+            dict(currency="KRW", available="90000", limit="0"),
+            dict(currency="AAA", available="150", limit="0"),
+        ]
+        self.oms.sync_account(self.client.balances(), [], {"AAA": "0.1"})
+        self.assertEqual(self.oms.available_asset("AAA"), D("100"))
 
     def test_reduction_keeps_campaign_average_while_lots_remain(self):
         first = self.submit_buy()
@@ -238,6 +345,7 @@ class OMSTests(unittest.TestCase):
         )
 
     def test_daily_limit_uses_day_open_equity_not_purchase_cost(self):
+        self.config["daily_loss_fraction"] = 0.02
         buy = self.oms.submit(
             "AAA", "buy", "BUY", "LIMIT", "100", fee_rate="0", price="80"
         )

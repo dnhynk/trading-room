@@ -2,7 +2,7 @@
 desired order set. The same code runs live (common/cycle.py) and offline (track_a/replay.py). Thresholds: params.json["sig"] / ["strat"].
 
 Signals (side-agnostic; Strategy maps them to add/trim by side):
-  DIP_SLOWING  price fell >= dip_min_atr from the swing high (swing_s window), was falling fast (min v <= -v_fast) and has now
+  DIP_SLOWING  price fell >= dip_min_atr from the swing high (swing_s window), was falling fast (min v <= -v_fast_eff) and has now
                nearly stopped (v >= -v_slow, accelerating up) for hold_s consecutive seconds.
   POP_STALLING mirror image around the swing low. (BREAKDOWN/BREAKOUT veto nothing: Strategy reads them only as de-risk evidence
                against a position it already held when the break fired.)
@@ -15,6 +15,9 @@ from collections import deque
 from common.risk import floor_qty
 
 SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0, v_slow=0.3, hold_s=3,
+           # optional continuous depth/velocity coupling: a move exactly dip_min_atr deep still needs v_fast. Beyond it the required
+           # fast phase decays by (dip_min_atr/depth)^v_depth_elasticity, never below v_fast_floor. Both zero = the historical rule.
+           v_fast_floor=0.0, v_depth_elasticity=0.0,
            brk_lookback=1800, brk_atr=0.3, brk_vol=2.0, brk_cooldown=300, cooldown=60, refire_atr=1.0, depth_levels=5,
            # regime block (per closed 1m candle, rg_window candles): efficiency ratio, drift in ATR, zigzag swings >= rg_theta %
            rg_window=90, rg_theta=0.7, rg_drift=6.0, rg_counter_max=1, rg_confirm=3, rg_dead_sw=2,
@@ -41,6 +44,22 @@ SIG = dict(vol_hl=300, v_hl=8, a_lag=5, swing_s=600, dip_min_atr=3.0, v_fast=1.0
            # has since fallen to <= vd_decay x its peak and is still falling. vd_gate=1 makes it a requirement (DIP needs selling to
            # fade, POP needs buying to fade); 0 = logged only
            vd_spike=2.0, vd_decay=0.5, vd_gate=0)
+
+
+def effective_fast_velocity(p, depth):
+    """Continuous fast-phase threshold for a leg ``depth`` ATR from its swing.
+
+    The neutral zero-valued knobs return ``v_fast`` exactly. When enabled, a
+    deeper displacement supplies more evidence, so the required historical
+    velocity falls smoothly rather than at an arbitrary second threshold.
+    """
+    base = p["v_fast"]
+    floor = p.get("v_fast_floor", 0.0)
+    elasticity = p.get("v_depth_elasticity", 0.0)
+    minimum = p["dip_min_atr"]
+    if not floor or not elasticity or depth <= minimum:
+        return base
+    return max(floor, base * (minimum / depth) ** elasticity)
 STRAT = dict(side="long", unit_qty=70, max_units=4, max_notional=1000, step_add_pct=0.5, step_add_atr=0.7, gap_rebuy_pct=0.3,
              step_add_max_pct=0.0,   # > 0: the ladder step never exceeds this % (post-crash ATR15 inflation widened it to 1.24% for hours; NEXT 1); 0 = no cap
              lever=10,               # the leverage the engine sets on its symbol at start / when flat (live; 0 = leave the exchange's setting). Not a size: the margin locked per unit, so the margin gate brakes every book alike
@@ -507,12 +526,14 @@ class Features:
             vd_pop = not p["vd_gate"] or (buy_spike >= p["vd_spike"] and buy_decay)
             dip_ok = lambda: vd_dip and (d["last"] is None or sec - d["last"][0] >= p["cooldown"] or mid <= d["last"][1] - p["refire_atr"] * atr)
             pop_ok = lambda: vd_pop and (u["last"] is None or sec - u["last"][0] >= p["cooldown"] or mid >= u["last"][1] + p["refire_atr"] * atr)
-            cond = D >= p["dip_min_atr"] and d["minv"] <= -p["v_fast"] and v >= -p["v_slow"] and a > 0
+            dip_fast = effective_fast_velocity(p, D)
+            pop_fast = effective_fast_velocity(p, U)
+            cond = D >= p["dip_min_atr"] and d["minv"] <= -dip_fast and v >= -p["v_slow"] and a > 0
             d["hold"] = d["hold"] + 1 if cond else 0
-            if d["hold"] >= p["hold_s"] and dip_ok(): d["last"] = (sec, mid); d["last_base"] = sec; d["minv"] = ve; out.append(dict(sig="DIP_SLOWING", src="v"))
-            cond = U >= p["dip_min_atr"] and u["maxv"] >= p["v_fast"] and v <= p["v_slow"] and a < 0
+            if d["hold"] >= p["hold_s"] and dip_ok(): d["last"] = (sec, mid); d["last_base"] = sec; d["minv"] = ve; out.append(dict(sig="DIP_SLOWING", src="v", v_fast_eff=dip_fast))
+            cond = U >= p["dip_min_atr"] and u["maxv"] >= pop_fast and v <= p["v_slow"] and a < 0
             u["hold"] = u["hold"] + 1 if cond else 0
-            if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["last_base"] = sec; u["maxv"] = ve; out.append(dict(sig="POP_STALLING", src="v"))
+            if u["hold"] >= p["hold_s"] and pop_ok(): u["last"] = (sec, mid); u["last_base"] = sec; u["maxv"] = ve; out.append(dict(sig="POP_STALLING", src="v", v_fast_eff=pop_fast))
             for name in self.pending:   # 1m-candle rule, same cooldown and veto as the velocity rule
                 if name == "DIP_SLOWING" and dip_ok(): d["last"] = (sec, mid); d["last_base"] = sec; out.append(dict(sig=name, src="1m"))
                 if name == "POP_STALLING" and pop_ok(): u["last"] = (sec, mid); u["last_base"] = sec; out.append(dict(sig=name, src="1m"))
