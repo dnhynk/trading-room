@@ -328,6 +328,7 @@ class OMSTests(unittest.TestCase):
         )
 
     def test_daily_limit_uses_day_open_equity_not_purchase_cost(self):
+        self.config["daily_loss_fraction"] = 0.02
         buy = self.oms.submit(
             "AAA", "buy", "BUY", "LIMIT", "100", fee_rate="0", price="80"
         )
