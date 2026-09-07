@@ -248,8 +248,8 @@ def _validate(config, *, root=ROOT):
         or strategy.get("cap_per_unit") != 0
     ):
         raise ValueError("Track A-2 Coinone execution requires immediate trims and one campaign cap")
-    if owner_override and strategy["max_units"] != 1:
-        raise ValueError("Track A-2 unvalidated owner override is restricted to one unit")
+    if owner_override and strategy["max_units"] > 4:
+        raise ValueError("Track A-2 unvalidated owner override is restricted to four units")
     return config
 
 

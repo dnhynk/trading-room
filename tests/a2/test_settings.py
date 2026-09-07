@@ -33,6 +33,18 @@ class TrackA2SettingsTests(unittest.TestCase):
         self.assertFalse(config["execution_enabled"])
         self.assertFalse(config["portfolio_isolation_confirmed"])
         self.assertEqual(config["universe"], [])
+        self.assertEqual(
+            (
+                config["unit_fraction"],
+                config["book_notional_fraction"],
+                config["portfolio_notional_fraction"],
+                config["book_risk_fraction"],
+                config["daily_loss_fraction"],
+                config["strategy"]["max_units"],
+                config["strategy"]["max_stops_day"],
+            ),
+            (0.15, 0.60, 0.90, 0.02, 0.06, 4, 4),
+        )
 
     def test_shared_portfolio_requires_explicit_budget_credentials_and_reserved_symbols(self):
         shared = {
@@ -147,7 +159,7 @@ class TrackA2PreflightTests(unittest.TestCase):
         self.assertEqual(block_reasons(config, root=self.root, egress="203.0.113.7"), [])
         self.assertTrue(require_live(config, root=self.root, egress="203.0.113.7"))
 
-    def test_explicit_owner_override_is_transparent_and_one_unit_only(self):
+    def test_explicit_owner_override_is_transparent_and_capped_at_four_units(self):
         config = copy.deepcopy(load(CONFIG))
         config.update(
             status="active", mode="live", execution_enabled=True,
@@ -157,14 +169,14 @@ class TrackA2PreflightTests(unittest.TestCase):
             expected_egress_ip="203.0.113.7",
             universe=["ETH"], basket_size=1, max_open_books=1,
         )
-        config["strategy"]["max_units"] = 1
+        config["strategy"]["max_units"] = 4
         path = self.root / "track_a_2" / "owner.json"
         path.write_text(json.dumps(config), encoding="utf-8")
         loaded = load(path, root=self.root)
         self.assertEqual(block_reasons(loaded, root=self.root, egress="203.0.113.7"), [])
-        config["strategy"]["max_units"] = 2
+        config["strategy"]["max_units"] = 5
         path.write_text(json.dumps(config), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "one unit"):
+        with self.assertRaisesRegex(ValueError, "four units"):
             load(path, root=self.root)
 
     def test_controls_and_egress_fail_closed(self):
