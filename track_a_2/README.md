@@ -79,7 +79,13 @@ v_fast_eff(D) = max(v_fast_floor,
 
 ```powershell
 python -m track_a_2.observe --coin BTC --coin ETH --seconds 3600 --session a2-research-01
+
+# 같은 프로세스 수신 순서로 Coinone + Upbit + Bithumb 공개 원문을 함께 기록
+python -m track_a_2.observe --coin ETH --coin SOL --coin XRP `
+  --external upbit --external bithumb --session a2-crossvenue-01
 ```
+
+외부 기준가격 녹화는 주문·계좌 인증을 전혀 사용하지 않는다. Coinone 원문은 `public.jsonl.gz`, 외부 원문은 같은 세션의 `external.jsonl.gz`에 저장된다. 두 파일의 모든 행은 하나의 전역 `sequence`와 로컬 `received_ns`·`monotonic_ns`를 공유하고, 거래소 시각은 별도 `exchange_ms`로 색인한다. 따라서 연구 시점에는 현재 행보다 작은 수신 순번만 사용할 수 있으며, 거래소 표시시각으로 사후 정렬해 아직 도착하지 않은 외부가격을 끼워 넣으면 안 된다. 외부 품질은 거래소·종목·호가/체결별 최초 데이터와 최대 공백, 재접속, 서버 오류, WebSocket control PING/PONG을 각각 판정한다. 이 보조 자료가 생겼다는 사실만으로 A-2 알파나 실거래가 승인되지는 않는다.
 
 재생기는 seed·manifest 해시와 수신 순서를 검증한 뒤 실제 `Market → Strategy → Runtime → OMS`를 사용한다. 250ms 의사결정 틱, 이벤트 깨우기, post-only 대기열, 부분체결, 전송·취소 지연과 경합, 보호 트리거, 상위 5호가 시장매도 및 `limit_price` 잔량취소를 모의한다. 결과의 중심값은 남은 재고를 보수적인 bid 깊이로 즉시 청산한 평가액이다.
 
@@ -155,7 +161,7 @@ python -m track_a_2.ops.notify `
 | `strategy/` | 자본·양방향 호가깊이·거래소 한도를 적용한 현물 수량 산정 |
 | `execution/` | 전용 인증·주문 허용목록, 승인 사전점검, 장부와 부분체결·재시작 대사 |
 | `runtime.py` | 공개·개인 스트림, 전략/OMS 조정, 위험 우선 실행과 안전 종료 |
-| `observe.py` | 인증 없는 공개 seed·원시 메시지 녹화 |
+| `observe.py`, `external.py` | 인증 없는 Coinone·외부 KRW 공개 seed·원시 메시지 녹화 |
 | `replay/` | 검증된 테이프 로더, 거래소 모의 경계, 실제 Runtime 재생과 평가 산출물 |
 | `ops/` | A-2 장부 전용 읽기 모델, 내구성 Slack 큐와 카드 생성 |
 

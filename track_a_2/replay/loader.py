@@ -1,6 +1,7 @@
 """Validated reader for credential-free Track A-2 observations."""
 import gzip
 import hashlib
+import heapq
 import json
 from pathlib import Path
 import re
@@ -62,6 +63,36 @@ class Observation:
                 raise ValueError("Track A-2 observation public feed digest mismatch")
         except OSError:
             raise ValueError("Track A-2 observation public feed unavailable") from None
+        self.external = None
+        external = self.manifest.get("external_capture")
+        if external is not None:
+            try:
+                filename = external["file"]
+                external_path = self.folder / filename
+                valid = (
+                    isinstance(external, dict)
+                    and external.get("schema") == 1
+                    and external.get("format") == "a2-external-public-v1"
+                    and Path(filename).name == filename
+                    and external.get("venues")
+                    and len(external["venues"]) == len(set(external["venues"]))
+                    and set(external["venues"]) <= {"upbit", "bithumb"}
+                    and external.get("coins") == coins
+                    and set(external.get("markets") or {}) == set(external["venues"])
+                    and set(external.get("channels") or ()) == {"ORDERBOOK", "TRADE"}
+                    and isinstance(external.get("message_count"), int)
+                    and external["message_count"] >= 0
+                    and isinstance(external.get("completed_ms"), int)
+                    and external["completed_ms"] >= captured
+                    and re.fullmatch(r"[0-9a-f]{64}", str(external.get("sha256") or ""))
+                    and external_path.is_file()
+                    and _file_sha256(external_path) == external["sha256"]
+                )
+            except (KeyError, OSError, TypeError, ValueError):
+                valid = False
+            if not valid:
+                raise ValueError("Track A-2 external observation identity mismatch")
+            self.external = external_path
 
     def envelopes(self):
         previous = -1
@@ -202,6 +233,75 @@ class Observation:
             contiguous=contiguous,
         )
 
+    def external_envelopes(self):
+        if self.external is None:
+            return iter(())
+        from track_a_2.external import external_envelopes
+        return external_envelopes(
+            self.external,
+            self.manifest["external_capture"]["message_count"],
+        )
+
+    def external_quality(self):
+        if self.external is None:
+            return None
+        from track_a_2.external import external_quality
+        return external_quality(self.external, self.manifest["external_capture"])
+
+    def multivenue_quality(self):
+        external = self.external_quality()
+        if external is None:
+            return None
+        invalid_arrivals = 0
+        arrival_count = 0
+        previous_monotonic_ns = -1
+        causal_order = True
+        for _venue, row in self.causal_envelopes():
+            arrival_count += 1
+            try:
+                sequence = row["sequence"]
+                received_ns = row["received_ns"]
+                monotonic_ns = row["monotonic_ns"]
+                if (
+                    isinstance(sequence, bool) or not isinstance(sequence, int)
+                    or isinstance(received_ns, bool) or not isinstance(received_ns, int)
+                    or isinstance(monotonic_ns, bool) or not isinstance(monotonic_ns, int)
+                    or min(sequence, received_ns, monotonic_ns) < 0
+                    or row["received_ms"] != received_ns // 1_000_000
+                    or sequence != arrival_count
+                    or monotonic_ns < previous_monotonic_ns
+                ):
+                    raise ValueError
+                previous_monotonic_ns = monotonic_ns
+            except (KeyError, TypeError, ValueError):
+                invalid_arrivals += 1
+                causal_order = False
+        causal_order = causal_order and invalid_arrivals == 0
+        coinone = self.connection_quality()
+        return dict(
+            coinone=coinone,
+            external=external,
+            causal_order=causal_order,
+            invalid_arrivals=invalid_arrivals,
+            contiguous=bool(
+                coinone["contiguous"]
+                and external["contiguous"]
+                and causal_order
+            ),
+        )
+
+    def causal_envelopes(self):
+        """Yield only the process-local receive order; never exchange-time order."""
+        if self.external is None:
+            for row in self.envelopes():
+                yield "coinone", row
+            return
+        sources = (
+            (("coinone", row) for row in self.envelopes()),
+            ((row["venue"], row) for row in self.external_envelopes()),
+        )
+        yield from heapq.merge(*sources, key=lambda item: item[1]["sequence"])
+
     def data_digest(self):
         digest = hashlib.sha256()
         digest.update(len(self.manifest_raw).to_bytes(8, "big"))
@@ -213,6 +313,11 @@ class Observation:
                 for line in source:
                     digest.update(len(line).to_bytes(8, "big"))
                     digest.update(line)
+            if self.external is not None:
+                with gzip.open(self.external, "rb") as source:
+                    for line in source:
+                        digest.update(len(line).to_bytes(8, "big"))
+                        digest.update(line)
         except OSError:
             raise ValueError("invalid Track A-2 observation feed") from None
         return digest.hexdigest()
