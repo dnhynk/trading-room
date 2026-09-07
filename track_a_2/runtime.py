@@ -39,6 +39,11 @@ from track_c.execution.rate_limit import Transport
 
 
 FEATURE_FIELDS = frozenset(("t", "mid", "bid", "ask", "v", "brk", "bko"))
+SIZING_POLICY_FIELDS = (
+    "capital_allocation_krw", "cash_reserve_krw", "cash_fraction",
+    "unit_fraction", "book_notional_fraction", "portfolio_notional_fraction",
+    "book_risk_fraction", "depth_fraction", "minimum_exit_multiple",
+)
 
 
 class Runtime:
@@ -67,6 +72,14 @@ class Runtime:
         self.client = client
         self.store = store or Store(self.directory)
         self.oms = OMS(config, self.client, self.store, clock=clock)
+        sizing_policy = {
+            "execution_version": EXECUTION_VERSION,
+            "config": {name: config[name] for name in SIZING_POLICY_FIELDS},
+            "strategy": config["strategy"],
+        }
+        self.sizing_policy_digest = hashlib.sha256(
+            encoded(sizing_policy).encode()
+        ).hexdigest()
         self.markets = {}
         self.strategies = {}
         self.strategy_params = {}
@@ -390,6 +403,16 @@ class Runtime:
         market = self.markets[coin]
         book = self.oms.book(coin)
         params = book.get("strategy_params")
+        if (
+            params is not None
+            and not self.oms.quantity(coin)
+            and not self.oms.active(coin)
+            and params.get("sizing_policy_digest") != self.sizing_policy_digest
+        ):
+            # A flat book may inherit sizing from an older immutable release.
+            # Reprice it under the active policy before it can create another
+            # order. Positioned books and live orders remain pinned until flat.
+            params = None
         if params is None:
             if not market.book:
                 return None
@@ -423,6 +446,7 @@ class Runtime:
                 "cap_frac": 0.0,
                 "daily_loss_frac": 0.0,
                 "notional_frac": 0.0,
+                "sizing_policy_digest": self.sizing_policy_digest,
             }
             self.oms.set_strategy_params(coin, params)
             self.store.event(

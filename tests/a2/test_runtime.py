@@ -420,6 +420,7 @@ class RuntimeCase(unittest.TestCase):
             "lever": 0, "margin_mode": None, "wallet_frac": 1.0,
             "wind_down": False, "unit_frac": 0, "cap_frac": 0,
             "daily_loss_frac": 0, "notional_frac": 0,
+            "sizing_policy_digest": self.runtime.sizing_policy_digest,
         }
         self.runtime.oms.set_strategy_params("AAA", params)
         strategy = self.runtime._strategy("AAA")
@@ -427,6 +428,29 @@ class RuntimeCase(unittest.TestCase):
         self.assertGreaterEqual(strategy.p["pop_min_pct"], 0.2)
         self.assertGreaterEqual(strategy.p["unit_min_pct"], 0.2)
         self.assertGreaterEqual(strategy.p["gate_floor_unit_pct"], 0.2)
+
+    def test_flat_book_recomputes_sizing_from_the_active_release_policy(self):
+        stale = dict(self.runtime.oms.book("AAA")["strategy_params"])
+        self.assertEqual(stale["unit_qty"], 100)
+        self.assertNotIn("sizing_policy_digest", stale)
+
+        strategy = self.runtime._strategy("AAA")
+        params = self.runtime.oms.book("AAA")["strategy_params"]
+
+        self.assertEqual(params["sizing_policy_digest"], self.runtime.sizing_policy_digest)
+        self.assertEqual(params["max_units"], 4)
+        self.assertEqual(params["campaign_loss_budget_krw"], 2000.0)
+        self.assertEqual(params["max_notional"], 60000.0)
+        self.assertEqual(strategy.p["unit_qty"], params["unit_qty"])
+
+    def test_positioned_book_keeps_campaign_sizing_across_release_change(self):
+        self.buy_and_fill()
+        before = dict(self.runtime.oms.book("AAA")["strategy_params"])
+
+        strategy = self.runtime._strategy("AAA")
+
+        self.assertEqual(self.runtime.oms.book("AAA")["strategy_params"], before)
+        self.assertEqual(strategy.p["unit_qty"], before["unit_qty"])
 
     def test_expired_signal_is_not_paired_with_current_features(self):
         now_ms = time.time_ns() // 1_000_000
