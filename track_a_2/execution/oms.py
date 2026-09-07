@@ -652,7 +652,15 @@ class OMS:
                 order["checked"] = self.clock()
             except CoinoneError as exc:
                 self.store.event("RECONCILE_PENDING", coin=order["coin"], cid=order["cid"], error=str(exc))
-                if self.clock() - order["created"] > self.config["reconcile_halt_s"]:
+                # A terminal order is queried only for an optional late fee
+                # correction. Coinone may already have evicted its detail by
+                # then, which must not turn a confirmed terminal state into an
+                # order-ownership halt. Active/uncertain orders still halt on
+                # the original reconciliation deadline.
+                if (
+                    order["status"] not in TERMINAL
+                    and self.clock() - order["created"] > self.config["reconcile_halt_s"]
+                ):
                     self.halt("ORDER_RECONCILIATION", coin=order["coin"], cid=order["cid"])
         expired = [
             cid for cid, order in self.state["orders"].items()
