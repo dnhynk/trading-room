@@ -176,6 +176,53 @@ class ObserveTests(unittest.TestCase):
         self.assertTrue(any(row.get("event") == "PING_SENT" for row in envelopes))
         self.assertTrue(any('"PONG"' in row.get("raw", "") for row in envelopes))
 
+    def test_acknowledged_trade_silence_is_not_a_connection_gap(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path, _ = prepare_observation(
+            load(), ["AAA"], PublicClient(), folder.name,
+            now_ms=time.time_ns() // 1_000_000, session="quiet-trade-test",
+        )
+        capture = Capture(path, load(), ["AAA"])
+
+        class Socket:
+            def __init__(self):
+                self.messages = [
+                    {"response_type": "CONNECTED", "data": {}},
+                    {"response_type": "SUBSCRIBED", "channel": "ORDERBOOK", "data": {"target_currency": "AAA"}},
+                    {"response_type": "SUBSCRIBED", "channel": "TRADE", "data": {"target_currency": "AAA"}},
+                    {"response_type": "DATA", "channel": "ORDERBOOK", "data": {"target_currency": "AAA"}},
+                ]
+
+            async def send(self, _value):
+                return None
+
+            async def recv(self):
+                if self.messages:
+                    return json.dumps(self.messages.pop(0))
+                await asyncio.sleep(1)
+
+        socket = Socket()
+
+        class Connection:
+            async def __aenter__(self):
+                return socket
+
+            async def __aexit__(self, *_):
+                return False
+
+        asyncio.run(record_public(
+            capture, 0.06, connector=lambda *_args, **_kwargs: Connection(),
+            ping_interval_s=1, first_data_timeout_s=0.02,
+        ))
+        capture.close()
+        quality = Observation(path).connection_quality()
+        self.assertTrue(quality["contiguous"], quality)
+        self.assertFalse(quality["coverage_complete"])
+        self.assertTrue(quality["state_coverage_complete"])
+        self.assertEqual(quality["event_streams_without_data"], ["AAA:TRADE"])
+        self.assertEqual(quality["disconnected"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

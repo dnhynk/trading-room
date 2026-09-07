@@ -143,6 +143,7 @@ class Observation:
         expected = {
             (coin, channel) for coin in self.manifest["coins"] for channel in channels
         }
+        required_state = {pair for pair in expected if pair[1] == "ORDERBOOK"}
         for envelope in envelopes:
             raw = envelope.get("raw")
             if raw is None:
@@ -193,9 +194,12 @@ class Observation:
             gaps.extend(max(0, right - left) for left, right in zip(times, times[1:]))
             gap_by_stream[":".join(pair)] = max(gaps)
         coverage_complete = set(received) == expected
+        state_coverage_complete = required_state <= set(received)
         subscriptions_complete = subscribed == expected
-        gaps_ok = coverage_complete and all(
-            gap is not None and gap <= max_allowed for gap in gap_by_stream.values()
+        gaps_ok = state_coverage_complete and all(
+            gap_by_stream[":".join(pair)] is not None
+            and gap_by_stream[":".join(pair)] <= max_allowed
+            for pair in required_state
         )
         duration_ms = max(0, completed - start)
         ping_interval_ms = int(
@@ -209,7 +213,7 @@ class Observation:
             and disconnected == 0
             and errors == 0
             and subscriptions_complete
-            and coverage_complete
+            and state_coverage_complete
             and gaps_ok
             and heartbeat_ok
         )
@@ -223,6 +227,12 @@ class Observation:
             data_streams=len(received),
             data_messages=sum(len(rows) for rows in received.values()),
             coverage_complete=coverage_complete,
+            state_coverage_complete=state_coverage_complete,
+            event_streams_without_data=sorted(
+                ":".join(pair)
+                for pair in expected - set(received)
+                if pair[1] == "TRADE"
+            ),
             subscriptions_complete=subscriptions_complete,
             max_data_gap_ms=gap_by_stream,
             gap_limit_ms=max_allowed,

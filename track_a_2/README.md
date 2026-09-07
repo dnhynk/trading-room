@@ -75,7 +75,7 @@ v_fast_eff(D) = max(v_fast_floor,
 
 ## 공개 녹화와 실행 재생
 
-인증 없이 공개 REST seed와 원시 웹소켓 메시지, 연결 사건을 전용 상태 경로에 녹화한다. `.env`를 읽지 않으며 레포 안에 테이프를 만들지 않는다. 장기 연결은 Coinone JSON `PING`을 주기적으로 보내고 제한시간 안의 `PONG`을 확인한다. 구독 오류, 종목·채널별 최초 실제 데이터, 수신 공백, 재접속과 heartbeat는 서로 다른 품질 항목으로 기록한다.
+인증 없이 공개 REST seed와 원시 웹소켓 메시지, 연결 사건을 전용 상태 경로에 녹화한다. `.env`를 읽지 않으며 레포 안에 테이프를 만들지 않는다. 장기 연결은 Coinone JSON `PING`을 주기적으로 보내고 제한시간 안의 `PONG`을 확인한다. 구독 오류, 종목별 상태 채널의 최초 실제 데이터, 이벤트 채널의 구독 확인과 실제 발생 여부, 수신 공백, 재접속과 heartbeat는 서로 다른 품질 항목으로 기록한다. 체결이 없어서 `TRADE` 이벤트가 오지 않은 시간은 데이터 손실로 분류하지 않는다.
 
 ```powershell
 python -m track_a_2.observe --coin BTC --coin ETH --seconds 3600 --session a2-research-01
