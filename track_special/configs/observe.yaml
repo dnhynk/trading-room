@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "mode": "observe",
+  "live_enabled": false,
+  "venue": "bitget",
+  "api_family": "uta_v3",
+  "instrument": {
+    "symbol": "ARXUSDT",
+    "category": "USDT-FUTURES",
+    "base_coin": "ARX",
+    "quote_coin": "USDT",
+    "settlement_coin": "USDT",
+    "contract_type": "perpetual",
+    "linear_required": true
+  },
+  "account": {
+    "margin_mode_required": "isolated",
+    "position_mode_required": "one_way",
+    "margin_coin_required": "USDT",
+    "auto_margin_top_up_allowed": false,
+    "multi_asset_collateral_allowed": false,
+    "borrowing_allowed": false,
+    "transfers_allowed": false
+  },
+  "research_profile": "aggressive_bounded_research",
+  "capital_budget_usdt": null,
+  "strategy_parameters": {
+    "box_lookback_completed_bars": null,
+    "pivot_left_bars": null,
+    "pivot_right_bars": null,
+    "volatility_lookback_completed_bars": null,
+    "contraction_ratio_max": null,
+    "relative_strength_lookback_completed_bars": null,
+    "relative_strength_min": null,
+    "probe_max_holding_hours": null,
+    "campaign_max_holding_hours": null,
+    "max_funding_cost_pct_of_E0": null,
+    "liquidation_buffer_policy": null,
+    "emergency_exit_policy": null,
+    "campaign_end_at": null
+  },
+  "state_directory": null
+}

@@ -29,6 +29,20 @@
       "venue": "coinone",
       "decision_mode": "structural_sampling",
       "automatic_retraining": false
+    },
+    "SPECIAL-ARX": {
+      "status": "observe",
+      "venue": "bitget",
+      "market": "usdt-linear-perpetual",
+      "symbol": "ARXUSDT",
+      "sides": [
+        "long"
+      ],
+      "execution_enabled": false,
+      "live_enabled": false,
+      "research_profile_live_approved": false,
+      "state_namespace": "track-special-arx",
+      "restart_requires_user_instruction": true
     }
   }
 }
