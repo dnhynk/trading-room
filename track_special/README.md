@@ -1,6 +1,6 @@
 # Special Track — ARX Futures Campaign
 
-ARX의 독립 USDT 선형 무기한 선물 long-only 연구 트랙이다. 현재 사용자 목표는 **본격 상승 전에 Bitget 전체 가용 USDT를 기준으로 약 10배 롱 노출을 분할 매집하며, 해당 시드 전액 손실을 감수하는 것**이다. 평균가 아래 추가 매수를 허용하되 최초 시드와 10배 상한을 늘리지 않는다. 현재 구현은 Classic v2 계좌 조회, 공개 시세에 따른 적응형 분할 매집의 모의 운전과 Slack 모의 체결 보고다. 자본 정의와 구현 범위는 [선행 보유 목표](docs/preposition_objective.md)에 기록한다.
+ARX의 독립 USDT 선형 무기한 선물 long-only 연구 트랙이다. 설계 목표는 **계좌 가용 USDT로 정한 증거금 예산(E0) 안에서 명목 10배 이내의 롱 노출을 분할 매집하는 것**이며, 최대 손실은 이 증거금 예산으로 한정된다. 평균가 아래 추가 매수를 허용하되 증거금 예산과 10배 상한은 늘리지 않는다. 현재 구현은 Classic v2 계좌 조회, 공개 시세에 따른 적응형 분할 매집의 모의 운전과 Slack 모의 체결 보고다. 자본 정의와 구현 범위는 [선행 보유 목표](docs/preposition_objective.md)에 기록한다.
 
 기존 `aggressive_bounded_research`와 작은 `PROBE` 이후 수익 중 `BUILD`하는 UTA 전략은 비교 기준으로 보존한다. 단일 전액 주문인 `full_seed_10x_preposition_research`도 비교 설정이며 현재 매집기에 사용하지 않는다. 기본 실행 설정은 기존 관측 모드를 유지한다.
 
