@@ -129,7 +129,7 @@ class LiveOMSTests(unittest.TestCase):
         r=LiveRunner.__new__(LiveRunner);r.sample_fairs=lambda:None
         r.c4cfg=research_cfg();r.entry_cfg=dict(r.c4cfg);r.c4markets={'BTC':None}
         r.cfg=dict(self.config,c4_live_mode='structural_sampling')
-        r.c4pending={'BTC':'decision-ep'};s.update(episode_id='decision-ep',t_ms=time.time_ns()//1000000,book_ms=time.time_ns()//1000000)
+        r.c4pending={'BTC':'decision-ep'};stamp=time.time_ns()//1000000-5;s.update(episode_id='decision-ep',t_ms=stamp,book_ms=stamp)
         r.c4states={'BTC':s};r.current_state=lambda coin:s;r.last_decided={}
         r.directory=self.store.directory;r.oms=self.p;r.store=self.store
         r.models={'refined':(SimpleNamespace(survival=lambda a:[]),UnsupportedModel())}

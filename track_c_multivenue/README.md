@@ -34,9 +34,11 @@ Individual candidates are overlapping counterfactual orders, so their summed P&L
 ```bash
 python -m track_c_multivenue --session <finalized-session>
 python -m track_c_multivenue --session <session-1> --session <session-2> --output ../trading-room-state/track-c-multivenue/study-001
-python -m track_c_multivenue --register-output ../trading-room-state/track-c-multivenue/registrations/future-001.json --start-ms 1789000000000 --end-ms 1789600000000
+python -m track_c_multivenue --register-output ../trading-room-state/track-c-multivenue/registrations/future-001.json --start-ms <future-start-ms> --end-ms <future-end-ms>
 python -m track_c_multivenue --session <future-session> --output ../trading-room-state/track-c-multivenue/future-001 --registration ../trading-room-state/track-c-multivenue/registrations/future-001.json
 ```
+
+Both times are epoch milliseconds, and `--start-ms` must be later than the moment you register.
 
 A receipt written just before an evaluation proves only that the run's inputs were frozen. `REGISTERED_BEFORE_WINDOW` requires the source, contract, period, primary metric, censoring and exclusion rules to be written to a separate file before the window starts, and accepts only sessions that fall entirely inside that window. This local file is not an external timestamp and does not prove that no session was left out, and the report states that limit.
 
