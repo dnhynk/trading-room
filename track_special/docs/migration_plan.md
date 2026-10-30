@@ -2,7 +2,7 @@
 
 ## Existing state assessment
 
-Trading Room already contains paused Bitget Tracks A/B, a paused Coinone spot Track A-2, and an independently operating Coinone Track C. No existing `ARX Spot Guardian` source, configuration, position, order, or ledger was found in the repository. The local source checkout also contains unrelated uncommitted Track C public-export work; the ARX implementation is developed in a clean Orca worktree so those files are not copied, staged, or overwritten.
+Trading Room already contains paused Bitget Tracks A/B, a paused Coinone spot Track A-2, and an independently operating Coinone Track C. No existing `ARX Spot Guardian` source, configuration, position, order, or ledger was found in the repository.
 
 The deployed C process remains owned by its existing operational session. This project does not restart, redeploy, pause, or edit it. A/B stop controls remain untouched.
 
