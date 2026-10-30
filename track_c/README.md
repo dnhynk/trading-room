@@ -1,43 +1,52 @@
-# Track C — 유동성 회복과 실체결 관측
+# Track C: liquidity recovery and real-fill observation
 
-Coinone에서 일시적으로 싸진 BTC의 회수 가치를 추정한다. `structural_sampling`은 안전 조건을 통과한 `0:minimum` 후보를 사용한다. `execution_sampling`은 별도로 등록한 할인 하한에서 참조가격 하한보다 싼 가장 가까운 최소수량 후보를 사용한다. 두 모드 모두 학습값은 기록만 한다. 공개 설정은 **observe**이며 실거래를 시작하지 않는다. 자동 재학습·증액·모드 전환은 없고 예측이나 수익성 개선은 아직 입증되지 않았다.
+Track C estimates what BTC that turned briefly cheap on Coinone is worth to buy and sell again. In `structural_sampling` mode it uses the minimum-size candidate at the base offset (`0:minimum`) that passes the safety checks. In `execution_sampling` mode it uses the nearest minimum-size candidate below the reference-price floor, at a discount floor registered separately. Both modes only record the learned values. The published configuration is `observe` and starts no live trading. There is no automatic retraining, size increase or mode switch, and better prediction or profitability has not been shown.
 
-| 코드 | 역할 |
+| Path | Role |
 |---|---|
-| `live.py`, `runtime.py` | 결정 정책과 시장 수신·계좌 대사·실행 루프 |
-| `market/` | 현지 흐름·호가, 외부 공정가, 관측 신선도, 위험 척도 |
-| `learning/` | 상태·가격·수량을 반영하는 경험분포 추정과 비교 추정기 |
-| `execution/` | 주문 식별·취소·부분체결·보호 주문·재고·현금 장부 |
-| `replay/` | 동일 Attempt 라벨·재생, 시간순 학습, 확률·원화 손익 검증 |
-| `ops/` | 상태·체결 감사, 알림, 복구, 독립 릴리스 패키징 |
-| [`../track_c_multivenue/`](../track_c_multivenue/) | A-2 원본 세션을 수신순서대로 읽는 별도 C 다종목 연구 편입부. 기존 BTC 소스 해시 밖에 있음 |
-| [research.md](research.md) | 연구 원문. 문서의 제안과 구현 여부는 별도로 확인 |
+| `live.py`, `runtime.py` | Decision policy, market intake, account reconciliation and the execution loop |
+| `market/` | Local flow and order book, external fair price, data freshness, risk measures |
+| `learning/` | Empirical estimates conditioned on state, price and size, plus comparison estimators |
+| `execution/` | Order IDs, cancels, partial fills, protective orders, inventory and cash ledger |
+| `replay/` | Attempt labels and replay, chronological training, probability and KRW P&L checks |
+| `ops/` | Status and fill audits, notifications, recovery, release packaging |
+| [`../track_c_multivenue/`](../track_c_multivenue/) | Separate multi-venue study that reads raw Track A-2 sessions in receive order; outside the Track C source hash |
 
-입력은 잔차 할인, 현지 매도 충격, 외부 움직임·신선도, 스프레드·청산 깊이와 후보 가격·수량이다. 시장 상태를 만들고 안전 조건을 검사한 뒤 같은 에피소드에서 최대 6개 가격·수량 후보를 구성한다. 에피소드당 가까운 실제 표본 하나를 사용하는 경험분포가 주문당 원화 가치와 체결 통계, 체결 이후 회복·실패 확률 및 보유 대안을 추정한다.
+## Decision inputs
 
-주문당 손익에 미체결이 포함되므로 체결확률을 다시 곱하지 않는다. 원화 손익과 재고·시간 벌점은 구분한다. 손절·시간 만료·부분청산·잔량을 장부에 남기며 관측 중단은 검열로 기록한다. 공개 큐 재생의 적은 체결을 손익 하한이라고 해석하지 않는다. `learning/benchmark.py`는 같은 후보·실행 조건에서 학습값의 기여를 비교하기 위한 기존 추정기다.
+Inputs are the residual discount, the local sell shock, external price moves and their freshness, spread and exit depth, and each candidate's price and size. The policy builds a market state, applies the safety checks and then builds up to six price and size candidates per episode. An empirical distribution that uses one nearby real sample per episode estimates the KRW value per order, fill statistics, the probability of recovery or failure after a fill, and the value of holding instead.
 
-`c4-live-v2.4`는 후보 평가와 확률 계산을 작업 스레드에서 실행한다. 계산 후와 주문 전송 직전에 결정 나이·원래 호가 시각·최신 시장·연결·계좌·소유권을 확인한다. 최신 상태에서 안전 단계와 후보를 다시 만들고 선택한 가격·수량·손절이 그대로 합법일 때만 전송한다. 주문에 영향 없는 심부 호가 갱신은 허용하지만 후보나 안전 조건이 바뀌면 폐기한다. 작업 큐, API 제한, 연결 풀과 TLS 대기도 유효시간에 포함하며 새 호가가 들어와도 원래 결정의 시한을 늘리지 않는다. `C4_DECISION_TIMING`에 계산 단계와 대기 시간을 기록한다. 전송 전 만료된 INTENT는 불확실한 거래소 주문으로 취급하지 않고, 자금 예약을 해제하며 체결확률 검증에서 제외한다. 알림도 `transmitted=false`인 로컬 폐기와 거래소 거부를 구분한다.
+Per-order P&L already includes unfilled orders, so the fill probability is not applied a second time. KRW P&L is kept apart from inventory and time penalties. Stops, timeouts, partial exits and leftovers stay in the ledger, and gaps in observation are recorded as censored. The few fills in a public-queue replay are not a P&L floor. `learning/benchmark.py` is the earlier estimator, kept to measure what the learned values add under the same candidates and execution.
 
-`c4-state-value-v2.1`의 기본 재생은 보호 주문 예약 → 취소·대사 → 잔여 수량의 시장가 매도 순서를 반영한다. 취소 중 보호 주문의 전량·부분체결, 지정가 미체결과 잔량을 보존하며 즉시 청산·계속 보유 양쪽에 같은 절차를 적용한다. 기본 취소·대사 500ms와 이후 잔고 확인·제출 250ms는 **고정 시나리오 가정**이다. 보호 주문의 공개 체결가 기준 발동과 큐 체결 역시 실측 보정이 아니다. `exit_protocol=direct`는 이전의 단일 지연 절차를 비교하는 재생 옵션이다. [Coinone 주문 API](https://docs.coinone.co.kr/reference/place-order)의 보호 주문·시장가 가격 제한을 따른다.
+## Pre-send recheck
 
-`expected_net_krw`와 회복·실패 확률은 공개 재생 가정하의 예측이며 실제 주문 기대수익으로 검증되지 않았다. `ops.live_evidence`는 기존 취소·대사, 청산 요청→응답·체결 관측의 분포와 미확정 취소를 요약하고 관측 수와 서로 다른 주문·캠페인 수를 구분한다. 이 시간은 거래소 매칭 지연과 다르며, 다른 청산 절차에서 모은 값을 현재 절차의 보정값으로 자동 적용하지 않는다.
+The live policy (`VERSION = 'c4-live-v2.4'` in `live.py`) runs candidate scoring and probability work on a worker thread. After that work, and again right before transmission, it checks the decision's age, the original book time, the latest market, the connections, the account and order ownership. It rebuilds the safety stage and the candidates from the latest state and sends only if the chosen price, size and stop are still allowed. A deep-book update that does not affect the order is accepted; a change in the candidate or the safety checks drops the decision. Time spent in the work queue, the API rate limiter, the connection pool and the TLS handshake counts against the decision's lifetime, and a new book does not extend it. `C4_DECISION_TIMING` events record each step and wait. An intent that expires before sending is not treated as an uncertain exchange order: its cash reservation is released and it is left out of fill-probability checks. Notifications show a local drop (`transmitted=false`) apart from an exchange rejection.
 
-예시 설정은 BTC만 주문 대상으로 하며 주문당 최대 20,000원, 할인 하한 2틱, 진입 TTL 8초, 보유 한도 180초다. 현금·청산 유동성·거래소 최소금액·위험 예산·진입 시 고정한 변동성 손절과 거래소 보호 주문을 검사한다. ETH/XRP/SOL 등은 기록 대상이다. 하루 거래횟수의 충분성이나 종목 확대의 이득은 미확인이다.
+## Exit replay
 
-`execution_sampling`은 런타임 설정에 모델 하한보다 낮고 1틱 이상인 `c4_sampling_entry_ticks`를 명시해야 한다. 외부시장 합의·참조가격 하한·신선도·스프레드·유동성·현금·위험·손절 조건은 유지하며 수량은 최소 주문 단위로 제한한다. 이 수집 정책 자체는 수익성 근거가 아니다.
+The default replay (`VERSION = 'c4-state-value-v2.1'` in `learning/__init__.py`) follows the live exit order: reserve the protective order, cancel and reconcile it, then sell the remainder at market. It keeps full and partial fills of the protective order during cancellation, unfilled limit orders and leftovers, and applies the same procedure to an immediate exit and to continued holding. The default 500 ms for cancel and reconcile and 250 ms for the following balance check and submit are fixed scenario assumptions. Protective triggers on public trade prices and queue fills are not calibrated against real fills either. `exit_protocol=direct` replays the earlier single-delay procedure for comparison. Protective orders and market-order price limits follow the [Coinone order API](https://docs.coinone.co.kr/reference/place-order).
 
-```powershell
+`expected_net_krw` and the recovery and failure probabilities are predictions under public-replay assumptions and have not been checked against real expected returns. `ops.live_evidence` summarizes cancel-and-reconcile times, exit request to response and fill times, and unresolved cancels, and separates the number of observations from the number of distinct orders and campaigns. These times differ from exchange matching latency, and values measured under another exit procedure are not applied as calibration for the current one.
+
+## Example configuration
+
+The example trades BTC only, with at most 20,000 KRW per order, a 2-tick discount floor, an 8-second entry time-to-live and a 180-second holding limit. It checks cash, exit liquidity, the exchange minimum, the risk budget, a volatility stop fixed at entry and an exchange protective order. ETH, XRP, SOL and others are recorded only. Whether the daily trade count is enough, and whether more symbols would help, is unconfirmed.
+
+`execution_sampling` needs an explicit `c4_sampling_entry_ticks` in the runtime configuration, at least 1 tick and below the model floor. External consensus, the reference-price floor, freshness, spread, liquidity, cash, risk and stop checks all stay on, and size is limited to the minimum order unit. This sampling policy is not evidence of profitability.
+
+```bash
 python -m track_c.replay.engine --help
 python -m track_c.replay.evidence --help
 python -m track_c.ops.live_evidence --help
 python -m unittest discover -s tests -t .
 ```
 
-학습 모델·시장 녹화·실계좌 장부·평가 등록은 별도 입력이다. 소스가 달라지면 모델의 소스 해시 검증을 우회하지 않고 해당 소스에서 독립 모델을 만든다. 평가 결과를 보고 수정한 모델은 새 평가 창을 사용하며 기존 모델·장부·평가와 섞지 않는다.
+## Models, credentials and operations
 
-`config.json`의 `.env`, 모델 경로와 `127.0.0.1` 송신 IP는 예시다. Coinone 자격 증명은 `COINONE_ACCESS_TOKEN`과 `COINONE_SECRET_KEY`로 전달한다. 송신 IP·자금 확인·모델·위험 검사를 해제해서 실행하지 않는다.
+The trained model, market recordings, real ledgers and evaluation registrations are separate inputs. When the source changes, build a new model from that source; the model's source-hash check stays on. A model revised after looking at evaluation results gets a new evaluation window and is not mixed with existing models, ledgers or evaluations.
 
-원격 운영 도구는 `TRADING_ROOM_AWS_INSTANCE`, `TRADING_ROOM_SSH_HOST`, `TRADING_ROOM_SSH_KEY`를 별도로 설정한 경우에 사용한다. `TRADING_ROOM_REMOTE_ROOT`의 기본값은 `/opt/trading-room-c`, SSH 사용자는 `ubuntu`, AWS 리전은 `ap-northeast-2`다. AWS CLI 경로는 `TRADING_ROOM_AWS_CLI` 또는 PATH에서 찾는다. `ops.deploy`는 로컬 번들 또는 독립 staging까지 수행하며 서비스 전환은 별도 운영 절차다.
+The `.env` path, model path and `127.0.0.1` egress IP in `config.json` are examples. Coinone credentials come from `COINONE_ACCESS_TOKEN` and `COINONE_SECRET_KEY`. Do not run with the egress IP, funding, model or risk checks switched off.
 
-알림은 독립 릴레이 하나로 구성한다. 표시 창, 엔진의 UTC 위험 일자와 평가 창을 구분하고 원화 손익은 소수점 첫째 자리까지 표시한다.
+The remote operations tools work only when `TRADING_ROOM_AWS_INSTANCE`, `TRADING_ROOM_SSH_HOST` and `TRADING_ROOM_SSH_KEY` are set. `TRADING_ROOM_REMOTE_ROOT` defaults to `/opt/trading-room-c`, the SSH user is `ubuntu` and the AWS region is `ap-northeast-2`. The AWS CLI comes from `TRADING_ROOM_AWS_CLI` or `PATH`. `ops.deploy` builds a local bundle or stages a separate release; switching the service over is a separate operating step.
+
+Notifications go through one relay. The display window, the engine's UTC risk day and the evaluation window are kept apart, and KRW P&L is shown to one decimal place.

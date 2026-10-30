@@ -12,7 +12,7 @@ Every normalized market record has `venue`, `api_family`, `category`, `symbol`, 
 
 Collectors are append-only and duplicate-aware. They retain repeated source identities
 as observations while marking duplicates within a response; order and ledger event
-application—not observation recording—is idempotent. Receipts report first/last
+application (not observation recording) is idempotent. Receipts report first/last
 receive time, written and read-back counts, completed-candle coverage, longest source
 gap, latency, and endpoint errors. Unavailable liquidation or wallet data is stored as
 unavailable rather than synthesized.
