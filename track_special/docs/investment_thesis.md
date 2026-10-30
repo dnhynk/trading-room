@@ -8,7 +8,7 @@ liquidity, performance, or a trading recommendation.
 The current [official tokenomics page](https://www.arcium.com/tokenomics) states
 a fixed one-billion supply, 20.88% unlocked at launch, and allocation-specific
 cliffs/linear vesting for most of the remainder. It also says compute fees are paid
-in a chain-native asset such as SOL—not directly in ARX—while ARX is used for
+in a chain-native asset such as SOL (not directly in ARX), while ARX is used for
 staking and governance. Those are dated official statements. The inference that
 product use creates exchange demand for ARX is indirect and must not be promoted to
 an order signal. Exact unlock events must be materialized with `event_at`,

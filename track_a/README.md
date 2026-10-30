@@ -1,19 +1,25 @@
-# Track A — 순환매
+# Track A: basket rotation on Bitget futures
 
-공개 설정은 정지·dry 모드다. `config/tracks.json`의 A 상태와 운영자가 설정한 `STOP`·`PAUSE`를 임의로 해제하지 않는다. 설정은 `config/bitget.json`이며 A는 `hunt.on=0` 경로다. A/B는 계정과 공통 실행 엔진을 공유하므로 둘을 동시에 재개하지 않는다.
+The published configuration is paused and in dry-run mode. Leave Track A's state in `config/tracks.json` and any operator `STOP` or `PAUSE` file as they are; only the operator lifts them. Settings live in `config/bitget.json`, and Track A is the `hunt.on=0` path. Tracks A and B share one account and the common execution engine, so do not resume both at once.
 
-반대 방향 움직임의 감속에 담고, 유리한 움직임의 정체에 덜어 평단과 실현손익을 순환시킨다. 롱·숏은 대칭이다. 추가는 직전 매수보다 유리한 사다리 위치의 감속에서만 하고, 덜기는 새 로트의 원가 및 왕복 비용 조건을 지킨다. 마지막 물량도 정체에서 정리할 수 있다. 감속 없는 추가는 하지 않는다.
+## Strategy contract
 
-종목은 통행료를 감당하고 충분한 사이클을 만드는 바구니다. 순위는 빈자리를 채우는 데 사용하며 이미 보유한 책의 교체 사유가 아니다. 자격을 잃으면 담기를 멈추고 기존 청산 규칙으로 비운 뒤 뺀다. 균등 비중이 기본이며 비중 변경에는 같은 시각의 실거래 비교가 필요하다.
+The track adds as an adverse move slows and trims as a favorable move stalls, cycling the average price and realized P&L. Long and short sides are symmetric. An add happens only on a slowdown at a ladder step better than the previous buy. A trim respects the new lot's cost and the round-trip trading cost. The last lot can also be closed on a stall. Every add needs a slowdown.
 
-거래소의 자본 비례 돈 한도 스탑과 일일 손실 상한을 유지한다. 미결 주문·보유·다른 책의 상태를 확인할 수 없으면 새 위험을 열지 않는다. 실현손익·수수료·부분체결·자본 이동을 구분한다. 손실 중 약반등에서 노출을 줄이는 실험 기능은 예시 설정에서 꺼져 있다.
+The traded symbols form a basket chosen to cover trading costs and produce enough cycles. Rank only decides which empty slot to fill; it does not replace a held book. When a symbol loses eligibility, the track stops adding, closes the book with the normal exit rules and then drops it. Weights are equal by default, and a weight change needs a same-period live comparison.
 
-| 코드 | 역할 |
+The track keeps the exchange-side money stop sized to equity and a daily loss cap. It opens no new risk while open orders, holdings or another book's state cannot be confirmed. Realized P&L, fees, partial fills and capital transfers are kept apart. An experimental feature that cuts exposure on a weak rebound during a loss is off in the example configuration.
+
+## Code
+
+| Path | Role |
 |---|---|
-| `select.py`, `scan.py` | 바구니 자격·선정·wind_down |
-| `cycles.py` | 실제 체결로 재구성한 사이클 통계 |
-| `backtest.py`, `replay.py`, `tune.py` | 재생·시간순 비교·명시적 수치 실험 |
-| `capture.py`, `recon.py`, `legs.py`, `pair.py`, `slip.py`, `sweeps.py` | 체결·가격 경로 분석 |
-| `common/signal.py`, `common/cycle.py` | A/B 공통 신호·주문·보유 실행 |
+| `select.py`, `scan.py` | Basket eligibility, selection and wind-down |
+| `cycles.py` | Cycle statistics rebuilt from real fills |
+| `backtest.py`, `replay.py`, `tune.py` | Replay, chronological comparison and explicit parameter experiments |
+| `capture.py`, `recon.py`, `legs.py`, `pair.py`, `slip.py`, `sweeps.py` | Fill and price-path analysis |
+| `common/signal.py`, `common/cycle.py` | Signals, orders and position handling shared with Track B |
 
-`python -m unittest tests.common.test_signal tests.common.test_cycle tests.a.test_select`로 핵심 회귀를 실행한다. 별도로 보유한 테이프는 `python -m track_a.backtest <테이프 경로>`로 재생한다. 이미 본 테이프의 결과는 개발 검증이다. 공개본에는 실제 녹화 자료를 포함하지 않는다.
+## Checks
+
+`python -m unittest tests.common.test_signal tests.common.test_cycle tests.a.test_select` runs the core regressions. A tape you hold separately replays with `python -m track_a.backtest <tape path>`. A result on a tape that was already looked at counts as a development check only. The public copy contains no real recordings.

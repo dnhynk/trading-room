@@ -1,172 +1,167 @@
-# Track A-2 — 코인원 현물 롱온리 순환매
+# Track A-2: long-only rotation on Coinone spot
 
-A-2의 실거래 실행기와 공개 시세 녹화·실행 재생 경계는 구현되어 있다. 다만 저장소의 운영값은 **paused / observe / execution disabled / universe=[]**이고 승인 평가도 비어 있다. 코드가 실행 가능하다는 사실과 실거래 승인은 별개다. 기본 상태에서 `python -m track_a_2.live`는 인증정보를 읽거나 상태 디렉터리를 만들기 전에 중단된다.
+The live executor for Track A-2 is implemented, and so are the boundaries for public recording and execution replay. The repository's operating values are paused, observe, execution disabled and `universe=[]`, and no approved evaluation is set. Code that can run is a separate matter from approval to trade live. With the defaults, `python -m track_a_2.live` stops before it reads credentials or creates its state directory.
 
-## C 다종목 연구 편입 상태
+## Relation to the multivenue study
 
-A-2의 독립 감속 실거래 알파는 동결했다. 실행·복구 코드는 과거 주문의 감사와 비교 근거로 보존하지만 자동 재개하지 않는다. 인증 없는 Coinone·Upbit·Bithumb 동시 수집과 A-2 감속 전제는 [`track_c_multivenue`](../track_c_multivenue/)가 C의 외부할인 전제와 같은 최소수량·비용·지연·청산 조건에서 P0~P3 비교군으로 읽는다. 이 편입은 C-BTC 고정 모델이나 장부를 바꾸지 않으며, 다종목 연구 결과도 실거래 승격으로 사용하지 않는다.
+The track's own slowdown alpha is frozen. The execution and recovery code stays for auditing past orders and for comparison, and it does not restart by itself. [`track_c_multivenue`](../track_c_multivenue/) reads the unauthenticated Coinone, Upbit and Bithumb recordings and the Track A-2 slowdown condition as comparison groups P0 to P3, under the same minimum size, cost, latency and exit conditions as Track C's external-discount condition. This does not change the frozen Track C BTC model or ledger, and multivenue results are not used to promote anything to live trading.
 
-## 전략 계약과 현재 알파 상태
+## Strategy contract and alpha status
 
-A에서 순수 피처와 롱 순환 상태 전이만 이어받는다.
+Track A-2 takes only the pure features and the long rotation state machine from Track A.
 
-- 코인원 KRW 현물에서 롱만 운용한다. 숏·레버리지·마진·펀딩 규칙은 없다.
-- 하락 감속에서 지정가 매수를 시도하고, 추가 물량은 직전 매수보다 낮은 사다리 간격을 지킨다.
-- 반등 정체에서 물량을 회수하며 영구 코어는 두지 않는다.
-- 자격 순위가 내려갔다는 이유만으로 보유 종목을 교체하지 않는다. 보유 종목과 활성 주문 종목은 선정 여부와 무관하게 항상 감시한다.
+- Long only, on Coinone KRW spot. There are no shorts, borrowing, margin or funding rules.
+- It tries limit buys as a decline slows. Each further buy keeps a ladder step below the previous buy.
+- It takes quantity back as a rebound stalls. There is no permanent core position.
+- A falling eligibility rank alone does not replace a held symbol. Held symbols and symbols with active orders are always watched, selected or not.
 
-속도 신호는 선택적으로 하락 깊이와 연속 결합할 수 있다. `v_fast_floor`와 `v_depth_elasticity`가 모두 0이면 과거 규칙과 완전히 같고, 둘을 켜면 요구 속도는 다음과 같다.
+The speed signal can optionally scale with dip depth. With `v_fast_floor` and `v_depth_elasticity` both at 0 it matches the earlier rule exactly. With both on, the required speed is:
 
 ```text
 v_fast_eff(D) = max(v_fast_floor,
                     v_fast × (dip_min_atr / D) ^ v_depth_elasticity)
 ```
 
-`D=dip_min_atr`에서는 원래 `v_fast`를 그대로 요구하고, 더 깊은 이탈만 점진적으로 추가 증거로 인정한다. 모든 `v` 신호에는 실제 적용된 `v_fast_eff`가 기록된다. 설정 검증은 바닥이 원래 문턱보다 높거나 한쪽 매개변수만 켜진 조합을 거부한다. 체결 빈도 증가는 경제적 레버리지로 취급하므로, 이 완화가 유닛 크기·동시 종목 수·종목/포트폴리오 명목·손실예산을 자동 확대하지는 않는다.
+At `D=dip_min_atr` the original `v_fast` is required, and only deeper dips count gradually as extra evidence. Every `v` signal records the `v_fast_eff` actually applied. Config validation rejects a floor above the original threshold and a setup with only one of the two parameters on. More frequent fills count as added economic exposure, so this relaxation does not raise unit size, the number of concurrent symbols, symbol or portfolio notional, or the loss budget by itself.
 
-기본 `max_units=4`, 진입 흐름·감쇠 확인 비활성값은 아직 연구 후보다. 보존된 코인원 테이프의 체결 후 순손익 근거가 없으므로 `entry_flow`, `entry_decay`, `add_confirm` 같은 선택 규칙은 임의로 바꾸지 않았다. 평가 산출물 없이 소유자가 명시적으로 시작하는 실거래는 알파 승인으로 위장하지 않고 `owner_unvalidated_live_approved=true`로 표시한다. 소유자 override도 현물 롱온리와 최대 4유닛의 계약을 유지하며, 수익성 검증으로 표기하지 않는다. 대신 경제적으로 잘못될 수 없도록 다음 실행 게이트를 강화했다.
+The default `max_units=4` and the disabled entry-flow and decay confirmations are still research candidates. Preserved Coinone tapes give no post-fill net P&L evidence, so optional rules such as `entry_flow`, `entry_decay` and `add_confirm` were left unchanged. Live trading that the owner starts without an evaluation is marked `owner_unvalidated_live_approved=true` and is not presented as an alpha approval. The owner override keeps the long-only spot contract and the 4-unit maximum, and it is not labelled as a profitability check. These execution gates were tightened to block economically wrong orders:
 
-- 현재 메이커+테이커 비용이 모든 이익 문턱의 진짜 하한이다. 기본 문턱이 비용보다 낮을 때 완화식이 역전되지 않는다.
-- 이익 회수는 중간가격이 아니라 현재 상위 5단계 매수호가의 보수적 체결량과 순매도 가격으로 판단한다.
-- 이익 회수용 시장가 매도의 `limit_price`에는 손절가가 아니라 원가·목표수익·왕복비용을 모두 넘는 최저 이익가격을 넣는다.
-- 손절·복구·구조 훼손 축소는 이익 조건과 분리하며 필요하면 가격 하한 없이 위험을 줄인다.
+- Current maker plus taker cost is the floor for every profit threshold. When the base threshold is below cost, the relaxation formula does not invert.
+- Profit-taking is judged on the conservative fill size and net sale price across the current top five bid levels. The mid price is not used.
+- The `limit_price` of a profit-taking market sell is the lowest price that clears cost, target profit and round-trip cost. The stop price is not used there.
+- Stops, recovery and cuts after structural damage are separate from the profit conditions, and they reduce risk without a price floor when needed.
 
-이 변경은 알파가 검증됐다는 뜻이 아니다. “감속 신호가 단순 하락 매수나 1유닛 기준선보다 실제 주문당 순가치를 높이는가”는 녹화 테이프로 따로 입증해야 한다.
+None of this validates the alpha. Whether the slowdown signal raises real net value per order above a plain dip buy or a one-unit baseline has to be shown separately on recorded tapes.
 
-## 종목과 수량
+## Symbols and sizing
 
-`config.json`의 명시적 `universe`만 후보가 된다. 거래 가능·점검 상태, 지정가·시장가·예약가 지원, 24시간 원화 거래대금, 변동폭과 스프레드를 통과한 종목을 거래대금×변동폭으로 정렬한다. 이미 선정된 적격 종목은 유지하고 빈 자리만 채운다. 탈락하거나 바구니 밖인 보유 종목은 `wind_down`으로 두어 신규·추가 매수만 차단한다.
+Only symbols in the explicit `universe` in `config.json` are candidates. Symbols that pass trading and maintenance status, limit, market and stop order support, 24-hour KRW traded value, range and spread are ranked by traded value times range. Eligible symbols already selected stay; only empty slots are filled. A held symbol that drops out or sits outside the basket moves to `wind_down`, which blocks new buys and adds only.
 
-소유자가 지정한 고위험 운영 기본 상한은 평가액 대비 유닛 15%, 종목 명목 60%, 전체 명목 90%, 종목 캠페인 손실예산 2%, 일 손실 6%다. 현물이므로 강제청산은 없지만 원금 손실·갭·유동성 소실·장기 재고 위험은 그대로다. 주문 직전에는 다시 다음 최솟값으로 제한한다.
-
-```text
-전략 기준 수량
-→ 가용 원화와 종목·포트폴리오 잔여 명목
-→ 현재 ask 상위 5호가의 보수적 진입량
-→ 현재 bid 상위 5호가의 보수적 청산량
-→ 거래소 수량·금액 최소/최대와 수량 단위
-→ 캠페인 손실예산을 즉시 침범하지 않는 수량
-```
-
-처음 실제로 체결된 수량이 반 유닛이면 캠페인 현금 손실예산도 반으로 시작한다. 첫 주문의 후속 부분체결만 그 예산을 실제 체결량만큼 늘리며, 추가 매수 때문에 캠페인 예산을 새로 키우지는 않는다.
-
-## 주문·회계·복구 계약
-
-- 주문 식별자는 `ta2-...`만 사용한다. 전송 전에 SQLite에 의도를 완전 동기화하고, 응답을 잃은 주문은 같은 식별자로 조회하며 중복 주문하지 않는다.
-- 주문 모양은 `BUY LIMIT post_only`, `SELL MARKET`, `SELL STOP_LIMIT`뿐이다. 출금·이체 API는 없다.
-- 누적 체결수량·평균가·수수료는 단조롭게 한 번만 반영한다. 여러 주문의 여러 부분체결에서도 전체 평균원가와 주문별 로트를 분리한다.
-- 보고 수수료가 예상 상한을 넘더라도 신뢰할 수 있는 실제 체결은 먼저 현금·재고·손익에 기록한다. 그 다음 `FEE_MISMATCH`로 신규 진입을 멈추고 실제 재고를 보호한다. 종료 주문도 정산 창 동안 다시 조회해 수수료 정정을 반영한다.
-- 주문과 그 체결·정산 정정에는 생성 시의 불변 `campaign_id`를 붙인다. 이전 캠페인의 늦은 수수료 정정은 계좌 총손익에는 반영하되 새 캠페인의 손익·손실예산에는 귀속하지 않는다.
-- 취소 의도와 취소 확정을 구분한다. 응답을 잃은 취소는 제한된 간격과 횟수로 재시도한다. 취소 요청이 이미 나간 보호주문은 유효 보호로 세지 않는다.
-- 초 단위 피처가 다음 거래소 초의 첫 메시지를 기다리는 짧은 공백이나, 호가가 실제로 바뀌지 않아 새 ORDERBOOK 메시지가 없는 구간은 전략의 취소 의도로 해석하지 않는다. 이미 승인된 메이커 매수는 웹소켓 연결과 현재 호가 모양·깊이·현금·명목·캠페인 위험을 다시 통과하는 동안 원래 신호의 `buy_ttl_s`까지만 대기열을 유지한다. 피처 결정 없이 새 주문을 만들지는 않으며, 명시적 전략 해제·연결 단절·신호 TTL·운영 정지는 취소한다. 신규 제출에는 기존의 엄격한 호가 시각 제한을 그대로 적용한다.
-- 보유수량의 보호 완료는 거래소 상세가 정확한 수량·가격·트리거의 `NOT_TRIGGERED` 상태임을 확인한 경우뿐이다. 미확인 보호는 추가 매수와 정상 종료를 허용하지 않으며, 제한시간 후 취소·대사해 복구 청산으로 전환한다.
-- 재고 상태는 `protected → protection_canceling → selling → reprotecting`으로 기록한다. 작은 trim이 최소 매도금액을 충족하지 않으면 기존 보호주문을 먼저 취소하지 않으며, 보호 취소 뒤 매도가 중단되거나 일부만 체결되는 모든 경로는 잔여 재고 재보호 또는 복구 청산으로 귀결된다.
-- 보호 지정가 아래 갭이나 발동 후 잔량은 보호를 취소·대사한 뒤 가격 제한 없는 시장가로 정리한다. STOP_LIMIT은 갭에서 손실 상한을 보장하지 않는다.
-
-캠페인 장부는 이미 실현한 순손익, 남은 평균원가, 앞으로의 청산비용을 함께 사용한다.
+The owner-set high-risk defaults are: unit 15% of equity, symbol notional 60%, total notional 90%, per-symbol campaign loss budget 2% and daily loss 6%. Spot has no forced liquidation, but principal loss, gaps, vanishing liquidity and long inventory risk all remain. Right before an order, the size is capped again by the smallest of:
 
 ```text
-캠페인 실현 순손익
-+ 잔여 수량의 손절 청산 순손익
->= -고정된 캠페인 손실예산
+strategy base size
+→ available KRW and remaining symbol and portfolio notional
+→ conservative entry size across the current top five ask levels
+→ conservative exit size across the current top five bid levels
+→ exchange minimum and maximum quantity and amount, and quantity step
+→ a size that does not breach the campaign loss budget at once
 ```
 
-보호주문 가격을 만들 때 알려진 호가단위 반올림, 지정가 완충 틱과 bp를 역산해 **실제 STOP_LIMIT 지정가**가 이 회계 바닥보다 낮아지지 않게 한다. 이는 미리 정한 완충을 예산에 포함한다는 뜻이지, 갭·호가 소실·부분체결까지 시장 손실을 보장한다는 뜻은 아니다.
+If the first real fill is half a unit, the campaign cash loss budget also starts at half. Only later partial fills of that first order raise the budget, by the size actually filled. Adds do not enlarge the campaign budget.
 
-일 손실 차단은 UTC 하루 시작 평가액 대비 평가손익에서 같은 날 외부 입출금을 제거해 계산한다. 보호 체결뿐 아니라 stop-gap·복구 시장가 위험청산도 캠페인당 한 번의 손절 사건으로 집계한다. 이는 신규 진입 차단 기준이며, 갭·유동성 소실 때문에 실제 최대손실을 보장하는 표현은 아니다.
+## Orders, accounting and recovery
 
-활성 주문 상태는 정산 창이 끝나면 append-only 이벤트 이력만 남기고 상태 JSON에서 제거한다. 종목 검색과 메타데이터 REST 수집은 초기 부팅 이후 주문·보호·대사 임계경로 밖에서 수행하고, 완성된 스냅샷만 단일 소유 루프가 적용한다.
+- Order IDs use the `ta2-...` prefix only. The intent is synced to SQLite before sending. An order whose response was lost is queried by the same ID and is not submitted again.
+- The runtime sends three order shapes: `BUY LIMIT` (post-only), `SELL MARKET` and `SELL STOP_LIMIT`. The client has no withdrawal or transfer methods.
+- Cumulative filled quantity, average price and fees are applied once and only move forward. Across several partial fills of several orders, the overall average cost and the per-order lots are kept apart.
+- When a reported fee exceeds the expected cap, a trustworthy real fill is still booked to cash, inventory and P&L first. Then `FEE_MISMATCH` stops new entries and the real inventory stays protected. Finished orders are queried again during the settlement window to pick up fee corrections.
+- Each order, its fills and its settlement corrections carry the immutable `campaign_id` set at creation. A late fee correction from an earlier campaign counts toward total account P&L and stays out of the new campaign's P&L and loss budget.
+- Cancel intent and cancel confirmation are separate. A cancel whose response was lost is retried at a limited interval and count. A protective order with a cancel request already sent does not count as valid protection.
+- A short gap while a per-second feature waits for the next exchange second, or a stretch with no new ORDERBOOK message because the book did not change, is not read as the strategy's intent to cancel. An approved maker buy keeps its queue place until the original signal's `buy_ttl_s`, as long as it passes the websocket connection, current book shape and depth, cash, notional and campaign risk checks again. No new order is created without a feature decision. An explicit strategy release, a disconnect, the signal's time-to-live or an operating stop cancels the order. New submissions keep the strict book-age limit.
+- Protection of held quantity counts as complete only when the exchange detail shows `NOT_TRIGGERED` with the exact quantity, price and trigger. Unconfirmed protection blocks adds and normal exits; after a time limit it is cancelled, reconciled and turned into a recovery exit.
+- Inventory moves through `protected → protection_canceling → selling → reprotecting`. If a small trim is below the minimum sell amount, the existing protective order is not cancelled first. Every path in which a sale stops or fills partly after a protection cancel ends in re-protecting the rest or in a recovery exit.
+- After a gap below the protective limit, or with quantity left after a trigger, the protection is cancelled and reconciled and the rest is sold at market without a price limit. `STOP_LIMIT` does not bound the loss in a gap.
 
-## 공개 녹화와 실행 재생
+The campaign ledger combines realized net P&L, the remaining average cost and future exit costs:
 
-인증 없이 공개 REST seed와 원시 웹소켓 메시지, 연결 사건을 전용 상태 경로에 녹화한다. `.env`를 읽지 않으며 레포 안에 테이프를 만들지 않는다. 장기 연결은 Coinone JSON `PING`을 주기적으로 보내고 제한시간 안의 `PONG`을 확인한다. 구독 오류, 종목별 상태 채널의 최초 실제 데이터, 이벤트 채널의 구독 확인과 실제 발생 여부, 수신 공백, 재접속과 heartbeat는 서로 다른 품질 항목으로 기록한다. 체결이 없어서 `TRADE` 이벤트가 오지 않은 시간은 데이터 손실로 분류하지 않는다.
+```text
+campaign realized net P&L
++ net P&L of stopping out the remaining quantity
+>= -fixed campaign loss budget
+```
 
-```powershell
+The protective price is built by working back from known tick rounding and the limit buffer in ticks and basis points, so that the real `STOP_LIMIT` limit price stays at or above this accounting floor. The preset buffer is part of the budget. Market loss through gaps, vanished bids or partial fills is still possible.
+
+The daily loss block compares mark-to-market P&L with equity at the start of the UTC day, after removing same-day external deposits and withdrawals. Protective fills, stop-gap exits and recovery market exits each count as one stop event per campaign. This rule blocks new entries; gaps and lost liquidity can still push the real loss further.
+
+When the settlement window ends, active order state leaves the state JSON and only the append-only event history remains. After boot, symbol search and metadata REST calls run outside the order, protection and reconciliation path, and only finished snapshots are applied by the single owning loop.
+
+## Public recording and execution replay
+
+The recorder writes public REST seeds, raw websocket messages and connection events to a dedicated state path without authentication. It does not read `.env` and creates no tapes inside the repository. Long connections send Coinone JSON `PING` messages and expect a `PONG` within a time limit. Subscription errors, the first real data on each per-symbol state channel, subscription confirmations and real events on event channels, receive gaps, reconnects and heartbeats are recorded as separate quality items. A quiet period with no `TRADE` events because nothing traded is not counted as data loss.
+
+```bash
 python -m track_a_2.observe --coin BTC --coin ETH --seconds 3600 --session a2-research-01
 
-# 같은 프로세스 수신 순서로 Coinone + Upbit + Bithumb 공개 원문을 함께 기록
-python -m track_a_2.observe --coin ETH --coin SOL --coin XRP `
-  --external upbit --external bithumb --session a2-crossvenue-01
+# Record Coinone, Upbit and Bithumb public messages together, in one process's receive order
+python -m track_a_2.observe --coin ETH --coin SOL --coin XRP --external upbit --external bithumb --session a2-crossvenue-01
 ```
 
-외부 기준가격 녹화는 주문·계좌 인증을 전혀 사용하지 않는다. Coinone 원문은 `public.jsonl.gz`, 외부 원문은 같은 세션의 `external.jsonl.gz`에 저장된다. 두 파일의 모든 행은 하나의 전역 `sequence`와 로컬 `received_ns`·`monotonic_ns`를 공유하고, 거래소 시각은 별도 `exchange_ms`로 색인한다. 따라서 연구 시점에는 현재 행보다 작은 수신 순번만 사용할 수 있으며, 거래소 표시시각으로 사후 정렬해 아직 도착하지 않은 외부가격을 끼워 넣으면 안 된다. 외부 품질은 거래소·종목·호가/체결별 최초 데이터와 최대 공백, 재접속, 서버 오류, WebSocket control PING/PONG을 각각 판정한다. 이 보조 자료가 생겼다는 사실만으로 A-2 알파나 실거래가 승인되지는 않는다.
+External reference recording uses no order or account authentication. Coinone messages go to `public.jsonl.gz` and external ones to `external.jsonl.gz` in the same session. Every row in both files shares one global `sequence` and the local `received_ns` and `monotonic_ns`, and the exchange time is indexed separately as `exchange_ms`. Research code may only use receive sequence numbers below the current row. Re-sorting by exchange time to slip in an external price that had not arrived yet is not allowed. External quality covers first data, longest gap, reconnects, server errors and WebSocket control PING and PONG for each venue, symbol and book or trade stream. Having this extra data does not approve the Track A-2 alpha or live trading.
 
-재생기는 seed·manifest 해시와 수신 순서를 검증한 뒤 실제 `Market → Strategy → Runtime → OMS`를 사용한다. 250ms 의사결정 틱, 이벤트 깨우기, post-only 대기열, 부분체결, 전송·취소 지연과 경합, 보호 트리거, 상위 5호가 시장매도 및 `limit_price` 잔량취소를 모의한다. 결과의 중심값은 남은 재고를 보수적인 bid 깊이로 즉시 청산한 평가액이다.
+The replayer checks the seed and manifest hashes and the receive order, then runs the real `Market → Strategy → Runtime → OMS` chain. It simulates a 250 ms decision tick, event wake-ups, the post-only queue, partial fills, send and cancel latency and races, protective triggers, market sells across the top five bids and cancellation of `limit_price` leftovers. The headline value assumes leftover inventory is sold at once into conservative bid depth.
 
-```powershell
-# 연구 결과만 기록한다. 실거래 승인이 아니다.
-python -m track_a_2.replay ..\trading-room-state\track-a-2\observations\a2-research-01 `
-  --config track_a_2\config.json --approval-id a2-eval-research-01 --holdout
+```bash
+# Records research results only. This is not a live approval.
+python -m track_a_2.replay ../trading-room-state/track-a-2/observations/a2-research-01 --config track_a_2/config.json --approval-id a2-eval-research-01 --holdout
 
-# 사용자가 결과를 검토하고 승인할 때만 --approve를 명시한다.
-python -m track_a_2.replay <observation> --config <evaluated-config> `
-  --approval-id a2-eval-approved-01 --holdout --approve
+# Pass --approve only after the owner has reviewed and accepted the result.
+python -m track_a_2.replay <observation> --config <evaluated-config> --approval-id a2-eval-approved-01 --holdout --approve
 ```
 
-모든 실행은 이익뿐 아니라 음수 손익도 유한한 부호 있는 Decimal 연구 결과로 보존한다. `--approve`가 없으면 `RESEARCH_ONLY`, 승인 요청이 문턱을 통과하지 못하면 보고서를 먼저 쓴 뒤 `REJECTED`, 연속 피드·미사용 구간·기본/1유닛/비용·지연·깊이 스트레스·동일 universe·실제 캠페인·양수 청산손익과 무중단 조건을 모두 통과한 경우에만 `APPROVED`다. 사용자가 그 경로와 SHA-256을 설정에 명시해야 한다. 승인 산출물은 A-2 코드, 공용 전략과 코인원 전송 코드, 의존성 선언, 비운영 설정, 원시 데이터, 비용·지연·깊이 모형에 결합된다. 어느 하나가 바뀌면 평가 기반 실거래 사전점검이 실패한다.
+Every run keeps losses as well as profits as finite signed `Decimal` research results. Without `--approve` the result is `RESEARCH_ONLY`. An approval request that misses a threshold writes its report first and is then marked `REJECTED`. `APPROVED` requires a continuous feed, an unused period, the base, one-unit and cost, latency and depth stress runs, the same universe, real campaigns, positive exit P&L and no halt. The owner then has to enter the artifact's path and SHA-256 in the config. The approved artifact is bound to the Track A-2 code, the shared strategy and Coinone transport code, the dependency declarations, the non-operational config, the raw data and the cost, latency and depth models. If any of these changes, the evaluation-based live preflight fails.
 
-공개 테이프만으로 실제 개인 주문의 앞선 대기량, 숨은 유동성, 시장충격을 완전히 알 수는 없다. 재접속으로 빈 구간이 있는 테이프는 연구에는 쓸 수 있지만 승인에는 쓸 수 없다. 재생의 종목 선정은 seed 시점에 고정되므로 장기 운용의 동적 종목 변경은 별도 관찰 비교가 필요하다.
+Public tapes cannot fully show the queue ahead of a real private order, hidden liquidity or market impact. A tape with reconnect gaps can be used for research and cannot be used for approval. Replay fixes the symbol selection at seed time, so dynamic symbol changes over a long run need a separate observational comparison.
 
-## 자본과 활성화 잠금
+## Capital and activation locks
 
-기본 계약은 C와 다른 코인원 포트폴리오와 A-2 전용 키(`credential_profile=a2`)다. 다만 계좌 소유자가 명시적으로 승인한 경우에만 같은 포트폴리오를 쓰는 두 번째 계약을 사용할 수 있다. 공유 모드는 격리됐다고 표시할 수 없고 다음 값을 모두 요구한다.
+The default contract is a Coinone portfolio separate from Track C's and keys dedicated to Track A-2 (`credential_profile=a2`). A second contract that shares the portfolio is available only with the account owner's explicit approval. Shared mode cannot be marked as isolated and needs all of the following:
 
-- `shared_portfolio_approved=true`와 명시적 공유 키 프로필(`coinone_default` 또는 `coinone_aws`)
-- A-2가 소유하는 고정 `capital_allocation_krw`와 다른 트랙에 남길 `cash_reserve_krw`
-- 다른 트랙의 거래 종목을 포함하는 `shared_reserved_symbols`; A-2 universe와 겹치면 설정을 거부한다.
+- `shared_portfolio_approved=true` and an explicit shared key profile (`coinone_default` or `coinone_aws`)
+- a fixed `capital_allocation_krw` owned by Track A-2 and a `cash_reserve_krw` left for the other tracks
+- `shared_reserved_symbols` covering the other tracks' traded symbols; the config is rejected if it overlaps the Track A-2 universe
 
-공유 계좌의 원화는 거래소에서 가분적이지만 A-2 장부는 자기 고정 할당액, `ta2-...` 주문, 자기 체결 재고와 손익만 소유한다. 다른 엔진의 현금 변화는 A-2 손익을 바꾸지 않으며, 다른 자산·주문이 발견된 종목에는 진입하지 않는다. 출금·포트폴리오 이체 기능은 없다.
+KRW in a shared account is fungible at the exchange, but the Track A-2 ledger owns only its fixed allocation, its `ta2-...` orders and its own filled inventory and P&L. Cash changes from other engines do not change Track A-2 P&L, and the track does not enter symbols where other assets or orders are found. There are no withdrawal or portfolio transfer functions.
 
-정상 신규 진입에는 다음이 모두 필요하다.
+A normal new entry needs all of these:
 
-1. 분리 포트폴리오와 A-2 전용 키를 준비하거나, 위 공유 자본·종목 계약을 명시적으로 설정하고 고정 IPv4를 준비한다.
-2. 원칙적으로 검토·승인한 평가의 ID, 외부 manifest 경로와 SHA-256, 정확히 같은 universe를 설정한다. 소유자 미검증 실거래 예외는 `a2-owner-...` ID와 명시적 override를 사용하며 최대 4유닛까지만 가능하고 평가 승인으로 취급하지 않는다.
-3. `track_a_2/config.json`을 `status=active / mode=live / execution_enabled=true`로 함께 바꾸고 선택한 계좌 계약의 필수값을 모두 채운다.
-4. `config/tracks.json`의 A-2도 별도로 활성화한다.
-5. 레포와 A-2 상태 경로의 `STOP`·`PAUSE`를 확인한다.
+1. A separate portfolio with dedicated Track A-2 keys, or the shared capital and symbol contract above set explicitly, plus a fixed IPv4 address.
+2. The ID of a reviewed and approved evaluation, the external manifest path and SHA-256, and exactly the same universe. The owner's unvalidated live exception uses an `a2-owner-...` ID and an explicit override, allows at most 4 units and does not count as an evaluation approval.
+3. `track_a_2/config.json` changed to `status=active`, `mode=live` and `execution_enabled=true` together, with every required value of the chosen account contract filled in.
+4. Track A-2 activated separately in `config/tracks.json`.
+5. No `STOP` or `PAUSE` file in the repository or in the Track A-2 state path.
 
-각 매수는 이 조건과 최신 계좌·호가·위험을 HTTP 송신 직전에 다시 검사한다. 저장소 기본값은 이 조건을 충족하지 않는다.
+Each buy checks these conditions again, together with the latest account, book and risk, right before the HTTP request is sent. The repository defaults do not meet these conditions.
 
-```powershell
-# 인증·네트워크·상태 생성 없이 잠금만 확인
+```bash
+# Check the locks only, with no credentials, no network and no state created
 python -m track_a_2.live --check
 
-# 읽기 전용 상태
+# Read-only status
 python -m track_a_2.status
 
-# 이미 A-2 장부가 소유한 위험만 관리하는 복구 점검
+# Recovery check that manages only risk the Track A-2 ledger already owns
 python -m track_a_2.live --recovery-only --check
 
-# 모든 정상 활성화 조건을 사용자가 충족시킨 뒤에만 가능
+# Possible only after the owner has met every normal activation condition
 python -m track_a_2.live --config track_a_2/config.json
 ```
 
-`--recovery-only` 실제 실행은 승인 산출물이나 신규 진입 활성값 대신 선택한 계좌 계약, 고정 IP와 기존 A-2 장부 노출을 요구한다. 이 모드의 코드 경계는 매수를 거부하고 기존 재고의 보호·축소·청산만 허용한다. 명시적으로 시작한 복구 소유자는 A/B용 레포 루트 `STOP`이 남아 있어도 기존 A-2 위험을 관리하지만, A-2 전용 상태 디렉터리의 `STOP`은 그대로 종료 신호로 따른다.
+A real `--recovery-only` run needs the chosen account contract, a fixed IP and existing exposure in the Track A-2 ledger instead of an approval artifact or the new-entry switches. In this mode the code refuses buys and only protects, reduces or exits existing inventory. A recovery owner that was started explicitly keeps managing existing Track A-2 risk even while the repository-root `STOP` for Tracks A and B is present, and it still treats a `STOP` in the Track A-2 state directory as a signal to exit.
 
-## Slack 알림
+## Slack notifications
 
-A-2 알림기는 매매 엔진과 분리된 읽기 전용 프로세스다. A-2 SQLite 장부와 `status.json`만 읽고 코인원 API나 주문 기능은 가져오지 않는다. 공용 Slack Block Kit 카드 표현과 기존 웹훅을 재사용하되, 카드 하단 계기판은 A-2 원화 장부만 사용하며 C 또는 A/B 장부로 대체하지 않는다.
+The Track A-2 notifier is a read-only process separate from the trading engine. It reads only the Track A-2 SQLite ledger and `status.json` and imports no Coinone API or order code. It reuses the shared Slack Block Kit card rendering and the existing webhook, and the dashboard at the bottom of each card uses only the Track A-2 KRW ledger.
 
-```powershell
-python -m track_a_2.ops.notify `
-  --data-dir ..\trading-room-state\track-a-2 `
-  --env <기존-Slack-웹훅이-있는-.env>
+```bash
+python -m track_a_2.ops.notify --data-dir ../trading-room-state/track-a-2 --env <.env-with-the-existing-Slack-webhook>
 ```
 
-첫 연결, 실제 매수·매도 체결, 거래소 보호주문 확인, 종목 변경, HALT·주문 이상, 복구와 60분 상태 카드를 보낸다. 부분체결은 짧은 결합 창에서 한 카드로 합치고, 내부 주문·캠페인 ID와 원문 오류·경로·비밀값은 렌더링하지 않는다. 전송 전 큐와 커서를 별도 SQLite에 원자적으로 보존하며 실패 시 제한된 지수 백오프로 재시도한다. 웹훅의 특성상 Slack 수락 직후 로컬 커밋 전에 프로세스가 죽은 경우에는 중복 가능성을 없앨 수 없고, 이 상태는 `delivery uncertain`으로 보존한다.
+It sends cards for the first connection, real buy and sell fills, confirmed exchange protective orders, symbol changes, halts and order anomalies, recovery, and status every 60 minutes. Partial fills within a short window merge into one card. Internal order and campaign IDs, raw errors, paths and secrets are not rendered. The outgoing queue and cursor are stored atomically in a separate SQLite file, and failures retry with bounded exponential backoff. Because of how webhooks work, a crash after Slack accepted a card and before the local commit can still produce a duplicate, and that state is kept as `delivery uncertain`.
 
-알림 상태는 `<data-dir>/notifications/status.json`에서 읽을 수 있다. 같은 상태 경로의 알림 writer는 한 개만 실행할 수 있고, 운영 배포에서도 기존 단일 Slack 릴레이 정책을 유지해야 한다. 알림기 배포·재기동은 매매 엔진이나 C 엔진을 재기동할 이유가 되지 않는다.
+Notifier status is in `<data-dir>/notifications/status.json`. Only one notifier writer can run per state path, and deployments keep the existing single Slack relay. Deploying or restarting the notifier is no reason to restart the trading engine or the Track C engine.
 
-## 디렉터리 경계
+## Directory layout
 
-| 경로 | 역할 |
+| Path | Role |
 |---|---|
-| `market/` | 코인원 KRW 종목·호가·체결·캔들, 바구니 자격과 단위 반올림 |
-| `strategy/` | 자본·양방향 호가깊이·거래소 한도를 적용한 현물 수량 산정 |
-| `execution/` | 전용 인증·주문 허용목록, 승인 사전점검, 장부와 부분체결·재시작 대사 |
-| `runtime.py` | 공개·개인 스트림, 전략/OMS 조정, 위험 우선 실행과 안전 종료 |
-| `observe.py`, `external.py` | 인증 없는 Coinone·외부 KRW 공개 seed·원시 메시지 녹화 |
-| `replay/` | 검증된 테이프 로더, 거래소 모의 경계, 실제 Runtime 재생과 평가 산출물 |
-| `ops/` | A-2 장부 전용 읽기 모델, 내구성 Slack 큐와 카드 생성 |
+| `market/` | Coinone KRW symbols, books, trades and candles; basket eligibility and unit rounding |
+| `strategy/` | Spot sizing with capital, two-sided book depth and exchange limits |
+| `execution/` | Dedicated credentials and order allowlist, approval preflight, ledger, partial-fill and restart reconciliation |
+| `runtime.py` | Public and private streams, strategy and order-manager coordination, risk-first execution and safe shutdown |
+| `observe.py`, `external.py` | Unauthenticated recording of Coinone and external KRW seeds and raw messages |
+| `replay/` | Verified tape loader, simulated exchange boundary, real runtime replay and evaluation artifacts |
+| `ops/` | Read model for the Track A-2 ledger only, durable Slack queue and card rendering |
 
-코드와 회귀 테스트만 레포에 둔다. 공개 녹화, 계약 스냅샷, SQLite 장부, 상태와 평가 출력은 `../trading-room-state/track-a-2/`에 둔다. 다른 트랙이나 레포 내부 상태 경로는 설정 검증에서 거부한다.
+Only code and regression tests live in the repository. Public recordings, contract snapshots, SQLite ledgers, state and evaluation output go to `../trading-room-state/track-a-2/`. Config validation rejects state paths that belong to another track or sit inside the repository.

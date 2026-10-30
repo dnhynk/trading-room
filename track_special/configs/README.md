@@ -10,7 +10,7 @@ The `.yaml` files in this directory use JSON syntax, which is a valid YAML subse
 
 Increasing budget/leverage/risk, loosening protection, ending cooldown early, or increasing profit reuse is a risk-increasing change. A proposal must record the before/after worst loss, configuration hashes, rationale, a review delay (48 hours is only a comparison default), and explicit approval. Risk reductions may be applied immediately in a later authorized live implementation.
 
-The [preposition objective](../docs/preposition_objective.md) records the user's explicit
+The [preposition objective](../docs/preposition_objective.md) (in Korean) records the user's explicit
 capital, leverage, and total-loss choices. Those choices supersede the earlier
 comparison risk budget; another confirmation of those same choices is unnecessary.
 The profile is a research input, not an instruction to submit an exchange order.
