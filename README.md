@@ -1,106 +1,108 @@
 # Trading Room
 
-> A Python system for observing, replaying, and executing multiple crypto trading strategies across exchanges, with every track paused or observe-only by default.
+Trading Room records crypto market data, replays it through the trading code, and places orders for several strategies on one operator's Bitget and Coinone accounts.
 
-Bitget·Coinone에서 성격이 다른 매매 전략 여러 개(트랙)를 한 레포에서 관측·재생·검증·실행하는 Python 프로젝트다. 전략 아이디어보다 **주문이 잘못 나가지 않게 하는 실행 경계와, 재생 결과를 실체결 근거로 오해하지 않게 하는 검증 경계**에 무게를 둔다.
+On the Coinone tracks, an order's intent is committed to SQLite under a client order ID before it is sent, and the decision behind it is checked again against fresh market and account data.
 
-## 해결하려는 문제
-
-자동매매 코드에서 손실은 전략 판단보다 실행과 검증의 빈틈에서 자주 생긴다. 이 레포는 다음 문제를 코드로 다룬다.
-
-- 응답을 잃은 주문을 다시 보내 중복 체결이 생기는 문제
-- 계산하는 동안 시장이 바뀌었는데 오래된 결정으로 주문하는 문제
-- 설정·키·네트워크가 준비되지 않은 상태에서 실거래가 시작되는 문제
-- 소스나 입력 데이터가 바뀌었는데 이전 모델·평가 결과를 그대로 재사용하는 문제
-- 공개 호가로 만든 재생 결과를 실제 체결 성과처럼 해석하는 문제
-
-## 구조
-
-```text
-config/tracks.json ── 트랙별 운영 상태 (paused / observe / execution·live 비활성)
-│
-├─ track_a/, track_b/ ─┐  Bitget 선물: A 순환매, B 캠페인
-├─ common/ ────────────┘  A/B 공유 실행 엔진·위험 관리·거래소 연결·알림
-├─ track_a_2/             Coinone 현물 롱온리 실행기 + 공개 시세 녹화·재생
-│    └─ 녹화 세션 ──▶ track_c_multivenue/   Coinone·Upbit·Bithumb 오프라인 비교 연구
-├─ track_c/               Coinone BTC 유동성 회복 가치 추정·관측·재생·검증
-├─ track_special/         Bitget ARXUSDT 무기한 선물 long-only 연구 (실거래 경로 없음)
-└─ tests/                 트랙별 회귀 테스트 (합성 입력·모의 거래소)
+```console
+$ python -m track_a_2.live --check
+{"track": "A-2", "configuration": "valid", "mode": "live", "live_ready": false,
+ "blocks": ["track_registry_not_active", "track_registry_execution_disabled",
+  "config_not_active", "config_execution_disabled", "portfolio_isolation_unconfirmed",
+  "evaluation_approval_missing", "evaluation_manifest_missing", "universe_empty",
+  "egress_ip_unconfigured"]}
 ```
 
-| 트랙 | 역할 |
+The published configuration, checked with no credentials and no network access. Each entry is a separate lock that has to be released before this track can trade. Output wrapped to fit.
+
+- **Context:** personal project, solo, August to September 2026. I specified and reviewed it; Claude Code and Codex implemented it.
+- **Verified:** local run on 2026-10-31, Python 3.12.14 on Windows 11, no CI. The unit tests pass apart from one clock-dependent test that failed in 7 of 30 runs, and strict mypy reports no issues in the special-track package.
+- **Status:** archived public snapshot of a private development repository; its history starts at the first publication on 2026-09-06. Profitability is not verified, and every track is paused or observe-only.
+
+## What it does
+
+Each strategy is a track: a package with its own configuration, rules and tests. Tracks A and B share one Bitget account and engine. The other tracks keep separate keys, ledgers and state directories.
+
+- Records public order books, trades and connection events from Coinone, Upbit, Bithumb and Bitget. A Coinone session that also records Upbit and Bithumb stamps every message with one shared receive sequence, so research code reads events in arrival order.
+- Replays recorded Track A-2 sessions through the same market, strategy, runtime and order-manager code that trades live, under stated latency, queue and depth assumptions.
+- Places and tracks orders on Coinone KRW spot and Bitget USDT futures. The Coinone tracks reconcile the account against their own journal: cumulative fills are applied once, a cancel counts only after the order detail confirms it, and an order with the track's ID prefix that the journal does not know halts the track.
+- Labels replay and study output as research-only. An approved replay has no effect until the operator enters its path and SHA-256 in the config by hand.
+- Lets Track B ask an LLM (`codex exec` in a read-only sandbox, off in the example config) for a coin's market phase. The label counts only when a strict majority of the configured runs agree, and the eligibility gate stays in rule code.
+
+| Track | Market | Strategy | Published state |
+|---|---|---|---|
+| [A](track_a/README.md) | Bitget USDT futures | Basket rotation: add as an adverse move slows, trim as a favorable move stalls | paused, dry run |
+| [B](track_b/README.md) | Bitget USDT futures | One campaign per confirmed coin episode, funded from a shared pool | paused, dry run |
+| [A-2](track_a_2/README.md) | Coinone KRW spot | Long-only version of the Track A rotation | paused, execution disabled, no symbols |
+| [C](track_c/README.md) | Coinone BTC/KRW spot | Values brief BTC dips against Upbit and Bithumb prices; minimum-size orders sample real fills | observe |
+| [C multivenue](track_c_multivenue/README.md) | Recorded Coinone, Upbit and Bithumb sessions | Offline comparison of Track A-2 and Track C entry rules | research only, no order client |
+| [Special](track_special/README.md) | Bitget ARXUSDT perpetual | Long-only accumulation research | observe, no live adapter |
+
+## How it works
+
+- Intent before send. `track_a_2/execution/oms.py` and `track_c/execution/oms.py` commit an `ORDER_INTENT` event to SQLite (WAL, `synchronous=FULL`) before the request goes out. The exchange clients accept only the track's own client order IDs (`ta2-…`, `tc-…`). After a lost response the order stays `UNKNOWN`, keeps its capital slot and is resolved by a lookup with the same ID; the track halts if the lookup fails past a deadline. `test_lost_response_is_recovered_by_identifier_without_duplicate_submission` in `tests/c/test_execution.py` restarts the order manager and checks that one submission was made.
+- Recheck before send. `entry_invalid_reason` in `track_c/live.py` checks decision age, book age, account freshness, ownership and the chosen price, size and stop after the model runs. The transport repeats the check after rate-limit, connection-pool and TLS waits (`before_send` in `track_c/execution/coinone.py`, `rate_limit.py`, `http_pool.py`). An expired decision is logged with `transmitted=false` and releases its cash reservation (`tests/c/test_live.py`). Track A-2 passes a similar guard, `submission_guard` in `track_a_2/runtime.py`.
+- Locks before credentials. `block_reasons` in `track_a_2/execution/preflight.py` checks the track registry, the track config, portfolio isolation, an approved evaluation, a non-empty symbol list, a fixed egress IPv4 address and the STOP/PAUSE files. `track_a_2/live.py` runs it before reading credentials, then looks up the public egress IP and runs it again. `tests/a2/test_settings.py` covers the checks. Track C's runtime stops before its first account request when the egress IP differs from `expected_egress_ip` (`track_c/runtime.py`).
+- Results tied to source hashes. `sources()` in `track_c/learning/config.py` hashes every Python file under `track_c/` and `common/` plus `pyproject.toml`. Model loading and replay evaluation (`track_c/replay/evidence.py`, `track_c/replay/engine.py`) reject a model or evaluation whose recorded source, config or input hashes differ from the current ones. Track A-2 evaluation manifests carry a source digest of the same kind.
+- Blocked by default. `config/tracks.json` marks every track paused or observe-only. In the special track, `LiveTransport` in `track_special/arx_campaign/execution/engine.py` has no signer and no HTTP write path, and `validate-live` lists the remaining blockers and exits with code 2.
+
+Start reading here: `track_a_2/execution/oms.py` (877 lines), `track_a_2/execution/preflight.py` and `track_c/live.py`. The shared Track A/B engine is very large: `common/cycle.py` is about 100 KB and `common/signal.py` about 90 KB.
+
+## Results
+
+There are no trading results in this repository. The checks below ran locally on 2026-10-31 with Python 3.12.14 on Windows 11.
+
+| Check | Result |
 |---|---|
-| [A — 순환매](track_a/README.md) | Bitget 바구니 선정과 감속·정체 기반 순환매 |
-| [A-2 — 코인원 순환매](track_a_2/README.md) | Coinone 현물 롱온리 순환매 실거래 실행기(기본 정지) |
-| [B — 캠페인](track_b/README.md) | Bitget 종목 탐색과 독립 캠페인, 자본 풀 관리 |
-| [C — 유동성 회복](track_c/README.md) | Coinone 시장 상태·주문 조건별 회수 가치 추정과 실체결 관측 |
-| [C 다종목 연구](track_c_multivenue/README.md) | A-2 녹화 세션을 C의 조건으로 비교하는 오프라인 연구(주문 기능 없음) |
-| [Special — ARX 선물 캠페인](track_special/README.md) | Bitget ARXUSDT 선형 무기한 long-only observe/paper/replay 연구(실거래 차단) |
+| `python -m unittest discover -s tests -t .` | Passes, apart from one clock-dependent test that failed in 7 of 30 runs (see Run it) |
+| Same suite with non-loopback network blocked | Same result; no outbound connection attempts |
+| `python -m mypy` (strict, `track_special/arx_campaign`, mypy 2.3.1) | No issues in 33 source files |
+| `python -m track_a_2.live --check` | `live_ready: false`, 9 blocks |
+| `python -m track_special validate-live` | 4 blockers, exit code 2, 0 private requests |
 
-## 설계 포인트
+## Status and limitations
 
-- **실거래는 여러 잠금을 모두 풀어야 시작된다.** `python -m track_a_2.live`는 트랙 상태·실행 플래그 등 설정 게이트를 자격 증명을 읽기 전에 검사하고, 송신 IP를 확인한 뒤 다시 검사한다. Special 트랙의 `LiveTransport`는 서명·HTTP 쓰기 경로가 없는 의도적 차단 구현이며, `validate-live`는 남은 차단 사유를 나열하고 종료 코드 2를 반환한다.
-- **주문 의도를 먼저 기록하고, 식별자로 멱등성을 지킨다.** A-2는 `ta2-` 접두 클라이언트 주문 ID를 만들어 `ORDER_INTENT`를 SQLite(`synchronous=FULL`)에 저장한 뒤에 거래소로 전송한다. 응답을 잃은 주문은 같은 식별자로 조회하고 다시 주문하지 않는다.
-- **전송 직전에 결정을 다시 검증한다.** C는 후보 계산 후와 주문 전송 직전에 결정 나이·호가 시각·계좌·소유권을 확인한다. 시한을 넘긴 결정은 `transmitted=false`로 폐기해 거래소 거부와 구분한다.
-- **송신 IP를 확인한다.** C와 A-2는 실행 전에 외부에서 본 송신 IP가 설정의 `expected_egress_ip`와 같은지 확인하고, 다르면 시작하지 않는다.
-- **모델·평가를 소스 해시에 묶는다.** C의 재생·평가 산출물은 `track_c/`·`common/` 소스와 입력 파일의 SHA-256을 식별자로 기록하고, 소스나 입력이 달라지면 기존 결과를 거부한다. 다종목 연구도 원본 세션 파일의 SHA-256을 검증한 뒤 읽는다.
-- **미확정 주문까지 위험에 포함한다.** Special 트랙의 위험 엔진은 기존 포지션과 전송 중·미체결 예약을 합산해 손실·명목금액·청산 완충 한도를 검사한다.
-- **재생과 실체결을 구분한다.** 재생의 지연·체결 조건은 고정 시나리오 가정으로 명시하고, 관측 중단·부분체결·잔량은 검열 표본으로 남긴다.
+- Archived. Development continues in a private repository.
+- Profitability is not verified. The repository holds no live P&L, fill rates or latency calibration. Replays use fixed latency and queue assumptions, and public data cannot show the queue ahead of a private order, hidden liquidity or market impact.
+- Every track is paused or observe-only in the published configuration. A Coinone track needs credentials, a fixed egress IP, a source-matched model or approved evaluation and explicit config changes before it can trade. The special track has no live adapter.
+- The tests run on synthetic inputs and fake exchanges. They check the safety logic and say nothing about returns.
+- The Track A/B process checks (`common/preflight.py`, `track_b/hunt.py`) call PowerShell, so that tooling assumes Windows.
+- 39 of the 229 Python files contain Korean comments or strings, mostly in the older Track A/B code. Three documents in `track_special/docs/` are in Korean.
 
-## 기술 스택
+## Run it
 
-- Python 3.12 이상, `asyncio`
-- 외부 런타임 의존성: `websockets`, `python-dotenv` (HTTP는 표준 라이브러리 `urllib`)
-- 상태·장부 저장: SQLite
-- 테스트: `unittest` / 정적 검사: `mypy --strict` (`track_special/arx_campaign` 범위)
-- 선택: `matplotlib` (차트 도구)
-- 거래소: Bitget(USDT 선물), Coinone(KRW 현물), 비교 수집용 Upbit·Bithumb 공개 시세
+Python 3.12 or newer. Nothing below needs API keys, and the unit tests make no outbound network calls.
 
-## 현재 상태
-
-공개 설정 기준으로 실거래 중인 트랙은 없다.
-
-| 트랙 | 공개 설정 상태 |
-|---|---|
-| A, B | `paused`, dry |
-| A-2 | `paused`, `execution_enabled=false`, 종목 없음. 실행기는 구현돼 있으나 독립 알파는 동결 |
-| C | `observe`. 예측·수익성 개선은 입증되지 않음 |
-| C 다종목 연구 | 오프라인 연구 전용, `orders_enabled=false` |
-| Special ARX | `observe`, `live_enabled=false`. 모의 매집·재생만 가능, 실거래 어댑터 없음 |
-
-단위 테스트는 합성 입력과 모의 거래소를 사용한다. 실제 체결확률·지연의 현실 보정, 하루 거래횟수의 충분성, 수익성 개선은 이 레포의 테스트로 입증되지 않으며 별도 자료와 미사용 평가 구간으로 확인해야 한다. 자동 재학습·증액·실거래 전환 기능은 없다.
-
-## 실행 방법
-
-Python 3.12 이상을 사용한다.
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+```bash
+git clone https://github.com/dnhynk/trading-room.git && cd trading-room
+python -m venv .venv && . .venv/bin/activate     # Windows: .venv\Scripts\activate
 python -m pip install -e .
+python -m track_a_2.live --check                  # prints the nine blocks shown above
 python -m unittest discover -s tests -t .
 ```
 
-자격 증명 없이 실행할 수 있는 확인·연구 명령:
+`python -m track_special validate-live` prints four blockers and exits with code 2. `python -m track_special replay --scenario restart_duplicate_order` runs one of twelve synthetic failure scenarios; its output is labelled `synthetic_failure_scenario_not_profitability_evidence`.
 
-```powershell
-python -m track_a_2.live --check        # 설정·잠금 상태 점검 (네트워크·자격 증명 미사용)
-python -m track_a_2.status
-python -m track_a_2.observe --coin BTC --coin ETH --seconds 3600
-python -m track_a_2.replay --help
-python -m track_special --help
-python -m track_special validate-live   # 실거래 차단 사유 목록, 종료 코드 2
-python -m track_c.replay.engine --help
-python -m track_c.replay.evidence --help
-python -m track_c.ops.live_evidence --help
-python -m track_c_multivenue --help
-```
+The test run ends in `OK` about four times in five. The exception is `test_full_raw_feature_execution_and_boundary_path_without_mocks` in `tests/c/test_multivenue.py`. It builds its fixture from the wall clock, and its 5-minute risk window stays unfilled when the clock lands late in a 10-second bucket. A rerun usually passes.
 
-차트 도구는 `python -m pip install -e ".[charts]"`로 선택 설치한다.
+Runtime state (logs, recordings, ledgers, models) goes to a sibling directory, `../trading-room-state/`, or to `TRADING_ROOM_HOME`. Tracks A-2, C multivenue and Special reject state paths inside the repository.
 
-## 개발자 참고
+## Docs
 
-- 트랙별 전략 계약·설정·명령은 각 트랙 README에 있다. C의 연구 원문은 [track_c/research.md](track_c/research.md), Special 트랙의 설계 문서는 [track_special/docs/](track_special/docs/)에 있다.
-- 작업 규약은 [AGENTS.md](AGENTS.md)에 있다.
-- `config/tracks.json`과 각 트랙의 설정은 배포 예시이며 실제 계좌 상태를 나타내지 않는다. 키·서버 주소·장부·녹화·학습 모델·운영 평가 등록과 비공개 Git 이력은 포함하지 않는다. 라이브 실행에는 별도의 자격 증명, 계정·네트워크 확인, 소스와 일치하는 고정 모델 및 명시적인 운영 설정이 필요하다.
-- 로그·녹화·모델·실험 출력은 기본적으로 레포의 형제 디렉터리 `trading-room-state/`에 둔다. A/B와 로컬 도구의 경로는 `TRADING_ROOM_HOME`으로 바꾸며, C는 설정의 `data_directory`와 `c4_model_path`를 사용한다.
+- [Track A-2](track_a_2/README.md): order, accounting, recovery and activation contract for Coinone spot
+- [Track C](track_c/README.md): pre-send recheck, replay assumptions and evidence rules
+- [Special track architecture contracts](track_special/docs/architecture_contracts.md)
+- [Special track validation report](track_special/docs/validation_report.md) (in Korean)
+- [AGENTS.md](AGENTS.md): guardrails for coding agents working in this repository
+
+## Project context
+
+Personal project, solo, August to September 2026. The aim was to run several strategies on my own exchange accounts and to close five execution and validation gaps: resending an order after a lost response, acting on a stale decision, starting live before keys and network are ready, reusing a model after its code changed, and reading a replay as real fills.
+
+Specified, reviewed and verified by me; implemented with Claude Code and Codex. Most development commits lack a Co-Authored-By trailer, so the log understates how much of the code the agents wrote.
+
+Public snapshot of a private development repository, first published on 2026-09-06. Keys, server addresses, ledgers, market recordings, trained models and the private history are not included. The configs are examples and do not describe a real account.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
