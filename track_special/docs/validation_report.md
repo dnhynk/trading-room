@@ -6,8 +6,8 @@
 ## 실제 공개 데이터 증거
 
 API 키 없이 Bitget UTA v3의 unsigned 공개 `GET`만 호출해 한 번의 수집·저장·
-재읽기를 완료했다. 최종 결과는 레포 밖
-`D:\repos\trading-room-state\track-special-arx\marketdata-final-audit`에 보존했다.
+재읽기를 완료했다. 최종 결과는 레포 밖 상태 디렉터리
+`trading-room-state/track-special-arx/marketdata-final-audit`에 보존했다.
 
 - 최초/마지막 수신: `2026-09-07T02:51:25.571540+09:00` /
   `2026-09-07T02:51:27.988017+09:00`
@@ -18,7 +18,7 @@ API 키 없이 Bitget UTA v3의 unsigned 공개 `GET`만 호출해 한 번의 �
 - ARX 현물과 `ARXUSDT` USDT perpetual identity 모두 검증
 - private request, 주문, 계정/레버리지 설정, 이체: 0건
 - receipt:
-  `D:\repos\trading-room-state\track-special-arx\marketdata-final-audit\snapshot_receipts.jsonl`
+  `trading-room-state/track-special-arx/marketdata-final-audit/snapshot_receipts.jsonl`
 
 당시 공개 응답은 선물이 online, 가격 tick `0.00001`, 수량 step/minimum `1`,
 최소 명목 `5 USDT`, 최대 레버리지 `20`, funding interval `4`, maker/taker
@@ -47,7 +47,7 @@ covered quantity, stop price, freshness/deadline이 모두 확인되어야 activ
 공식 UTA shape에 맞춘 일반 주문과 TPSL 보호주문 serializer는 순수 함수이며
 서명·전송 기능이 없다.
 
-독립 Orca reviewer가 모호/거절 UTA 응답을 ACK로 오인할 수 있는 경로와
+독립 리뷰 에이전트가 모호/거절 UTA 응답을 ACK로 오인할 수 있는 경로와
 `assetMode=multi_assets`가 단일 담보 검사에서 누락된 경로를 발견했다. 최종
 구현은 성공 code, exact `clientOid`, non-null `orderId`를 모두 요구하고 문서상
 모호 code는 `RESULT_UNKNOWN`으로 대사 전 재전송을 막는다. 계정 snapshot은
