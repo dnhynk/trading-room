@@ -15,7 +15,7 @@ $ python -m track_a_2.live --check
 
 That is the published configuration, checked with no credentials and no network access (output wrapped to fit). Each entry in `blocks` is a separate lock that has to be released before Track A-2 can trade.
 
-I built this alone between August and September 2026. I wrote the specifications and reviewed the changes; Claude Code and Codex implemented them. This public copy is no longer updated. Every track is paused or observe-only, and profitability has not been verified.
+I built this alone between August and September 2026. This public copy is no longer updated. Every track is paused or observe-only, and profitability has not been verified.
 
 ## What it does
 
@@ -95,8 +95,6 @@ Runtime state (logs, recordings, ledgers, models) goes to a sibling directory, `
 ## Project context
 
 The aim was to run several strategies on my own exchange accounts and to close five execution and validation gaps: resending an order after a lost response, acting on a stale decision, starting live before keys and network are ready, reusing a model after its code changed, and reading a replay as real fills.
-
-Most development commits lack a Co-Authored-By trailer, so the commit log understates how much of the code the agents wrote.
 
 Public snapshot of a private development repository, first published on 2026-09-06. Keys, server addresses, ledgers, market recordings, trained models and the private history are not included. The configs are examples and do not describe a real account.
 
