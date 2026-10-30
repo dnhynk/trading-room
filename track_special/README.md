@@ -1,6 +1,6 @@
 # Special track: ARX futures campaign
 
-This is a separate research track for long-only positions in the ARX USDT-linear perpetual future (`ARXUSDT`) on Bitget. The design goal is to build a long position in tranches, up to 10 times a margin budget (E0) that is set from the account's available USDT. The maximum loss is bounded by that margin budget. Buying below the average price is allowed, but it raises neither the margin budget nor the 10x cap. The current implementation reads the account through the Classic v2 API, paper-runs adaptive accumulation on public market data and reports paper fills to Slack. The capital definition and the implementation scope are in the [pre-positioning objective](docs/preposition_objective.md) (in Korean).
+This is a separate research track for long-only positions in the ARX USDT-linear perpetual future (`ARXUSDT`) on Bitget. The design goal is to build a long position in tranches, up to 10 times a margin budget (E0) that is set from the account's available USDT. The maximum loss is bounded by that margin budget. Buying below the average price is allowed, but it raises neither the margin budget nor the 10x cap. The current implementation reads the account through the Classic v2 API, paper-runs adaptive accumulation on public market data and reports paper fills to Slack. The capital definition and the implementation scope are in the [pre-positioning objective](docs/preposition_objective.md).
 
 The earlier `aggressive_bounded_research` profile and the UTA strategy that builds a position only while in profit after a small probe stay as comparison baselines. `full_seed_10x_preposition_research`, a single order for the whole budget, is also kept for comparison; the current accumulator does not use it. The default run configuration stays in observe mode.
 
@@ -36,7 +36,7 @@ python -m track_special --state-directory <state-root>/track-special-arx/adaptiv
 python -m track_special --state-directory <state-root>/track-special-arx/adaptive-accumulation stop-accumulation
 ```
 
-`validate-live` lists the null settings, the missing user approval, the unverified authenticated account and positions, the unverified server-side protection and the missing live adapter, then exits with code 2. It is a diagnostic: it makes no private API calls and changes no settings. The current contracts and migration baseline are [architecture_contracts.md](docs/architecture_contracts.md) and [migration_plan.md](docs/migration_plan.md). Operating steps are in the [runbook](docs/runbook.md) (in Korean), and the last validation is in the [validation report](docs/validation_report.md) (in Korean).
+`validate-live` lists the null settings, the missing user approval, the unverified authenticated account and positions, the unverified server-side protection and the missing live adapter, then exits with code 2. It is a diagnostic: it makes no private API calls and changes no settings. The current contracts and migration baseline are [architecture_contracts.md](docs/architecture_contracts.md) and [migration_plan.md](docs/migration_plan.md). Operating steps are in the [runbook](docs/runbook.md), and the last validation is in the [validation report](docs/validation_report.md).
 
 ## Adaptive accumulation
 

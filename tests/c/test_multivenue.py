@@ -206,7 +206,9 @@ class WarmPublicClient(PublicClient):
 
 def make_warm_integration_session(root, name="warm-integration"):
     """Actual adapters and feature engines, with a deterministic dip/recovery."""
-    base = time.time_ns() // 1_000_000 + 2_000
+    # Start 5 s into a 10-second risk bucket so the 5-minute local risk window
+    # is full when the ETH dip starts.
+    base = time.time_ns() // 1_000_000 // 10_000 * 10_000 + 5_000
     config = deepcopy(load_a2())
     config["signal"].update({
         "vol_hl": 1, "v_hl": 1, "a_lag": 1, "hold_s": 1,

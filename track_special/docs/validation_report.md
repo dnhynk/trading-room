@@ -1,74 +1,43 @@
-# ARX 검증 보고서
+# ARX validation report
 
-검증 기준 시각은 2026-09-07 KST다. 코드 경로 검증과 전략 수익성 검증은
-별개이며, 이 보고서의 통과 결과는 현재 매수 신호나 기대수익을 뜻하지 않는다.
+Validation reference time: 2026-09-07 KST. Validating the code paths is separate from validating the strategy's profitability, and a pass in this report does not mean a current buy signal or an expected return.
 
-## 실제 공개 데이터 증거
+## Evidence from real public data
 
-API 키 없이 Bitget UTA v3의 unsigned 공개 `GET`만 호출해 한 번의 수집·저장·
-재읽기를 완료했다. 최종 결과는 레포 밖 상태 디렉터리
-`trading-room-state/track-special-arx/marketdata-final-audit`에 보존했다.
+With no API keys and only unsigned public Bitget UTA v3 `GET` calls, one collect, store and read-back cycle was completed. The final result is kept outside the repository in the state directory `trading-room-state/track-special-arx/marketdata-final-audit`.
 
-- 최초/마지막 수신: `2026-09-07T02:51:25.571540+09:00` /
-  `2026-09-07T02:51:27.988017+09:00`
-- stream 27개, 저장 1,517건, 독립 재읽기 1,517건
-- coverage 1,505건: 12개 candle stream에서 현재 진행 중인 마지막 1건씩 제외
-- 기본 연구축은 현물 market `4H/1H/5m`, 선물 market/mark/index `4H/1H/5m`
-- endpoint 오류 0건; liquidation history는 빈 응답이어서 gap 1건으로 기록
-- ARX 현물과 `ARXUSDT` USDT perpetual identity 모두 검증
-- private request, 주문, 계정/레버리지 설정, 이체: 0건
-- receipt:
-  `trading-room-state/track-special-arx/marketdata-final-audit/snapshot_receipts.jsonl`
+- First and last receive: `2026-09-07T02:51:25.571540+09:00` / `2026-09-07T02:51:27.988017+09:00`
+- 27 streams, 1,517 records stored, 1,517 records read back independently
+- Coverage of 1,505 records: the last, still-open candle is left out of each of the 12 candle streams
+- The default research axes are spot market `4H/1H/5m` and futures market/mark/index `4H/1H/5m`
+- 0 endpoint errors; liquidation history returned an empty response and was recorded as 1 gap
+- Both the ARX spot and the `ARXUSDT` USDT perpetual identities were verified
+- Private requests, orders, account or leverage settings, transfers: 0
+- Receipt: `trading-room-state/track-special-arx/marketdata-final-audit/snapshot_receipts.jsonl`
 
-당시 공개 응답은 선물이 online, 가격 tick `0.00001`, 수량 step/minimum `1`,
-최소 명목 `5 USDT`, 최대 레버리지 `20`, funding interval `4`, maker/taker
-`.0002`/`.0006`, tier 1 범위 `0–5000` 및 MMR `.025`임을 보였다. 이는 해당
-시점 관찰값일 뿐 live 설정 보증이 아니다. instrument 응답에는 `settleCoin`이
-없었고, USDT 선형 계약 및 base-coin 수량은 문서화된 `USDT-FUTURES` category와
-주문 계약을 함께 사용해 명시적으로 판정했다.
+The public responses at the time showed the future as online, with price tick `0.00001`, quantity step and minimum `1`, minimum notional `5 USDT`, maximum leverage `20`, funding interval `4`, maker/taker `.0002`/`.0006`, a tier 1 range of `0–5000` and MMR `.025`. These are observations from that moment, not a guarantee of live settings. The instrument response had no `settleCoin`, so the USDT-linear contract and the base-coin quantity were determined explicitly from the documented `USDT-FUTURES` category together with the order contract.
 
-## 코드·실행 검증
+## Code and execution checks
 
 - `python -m unittest discover -s tests/special -t .`: 65 tests, OK
 - `python -m unittest discover -s tests -t .`: 643 tests, OK
 - strict mypy: 29 source files, no issues
-- `python -m compileall -q track_special`: 통과
-- `git diff --check`: 통과
+- `python -m compileall -q track_special`: passed
+- `git diff --check`: passed
 - `doctor`: observe, credentials read false, exchange writes 0, live false
-- `paper`: exchange writes 0, 명시적인 합성 intent/risk approval 요구
-- `replay --scenario gap_collapse`: 합성 gap/청산/보호 실패를 손실로 보고
-- `status`: 시작 대사 미완료를 `startup_reconciled=false`로 정직하게 보고
-- `validate-live`: private request/write 0건으로 비정상 종료하고 모든 blocker 열거
+- `paper`: exchange writes 0; requires an explicit synthetic intent and risk approval
+- `replay --scenario gap_collapse`: reports a synthetic gap, liquidation and protection failure as losses
+- `status`: reports the unfinished startup reconciliation as `startup_reconciled=false`
+- `validate-live`: exits with an error after 0 private requests and 0 writes, and lists every blocker
 
-합성 테스트는 의도·예약·ACK/체결 분리, 32자 deterministic `clientOid`, timeout
-후 대사 전 재전송 차단, partial/cancel race, 단조 상태 전이, 보호 공백과 제어
-상태를 검증한다. 보호는 server query, order ID, active 상태, trigger 기준,
-covered quantity, stop price, freshness/deadline이 모두 확인되어야 active가 된다.
-공식 UTA shape에 맞춘 일반 주문과 TPSL 보호주문 serializer는 순수 함수이며
-서명·전송 기능이 없다.
+The synthetic tests check the separation of intent, reservation and ACK/fill, a deterministic 32-character `clientOid`, blocking a resend after a timeout until reconciliation, partial-fill and cancel races, monotonic state transitions, protection gaps and control states. Protection becomes active only when the server query, order ID, active status, trigger basis, covered quantity, stop price and freshness/deadline are all confirmed. The serializers for regular orders and TPSL protection orders follow the official UTA shapes; they are pure functions and cannot sign or send.
 
-독립 리뷰 에이전트가 모호/거절 UTA 응답을 ACK로 오인할 수 있는 경로와
-`assetMode=multi_assets`가 단일 담보 검사에서 누락된 경로를 발견했다. 최종
-구현은 성공 code, exact `clientOid`, non-null `orderId`를 모두 요구하고 문서상
-모호 code는 `RESULT_UNKNOWN`으로 대사 전 재전송을 막는다. 계정 snapshot은
-`assetMode=single_asset`를 명시적으로 요구하며 두 회귀 재현을 자동 테스트한다.
+An independent review agent found two paths: one where an ambiguous or rejected UTA response could be mistaken for an ACK, and one where `assetMode=multi_assets` slipped past the single-collateral check. The final implementation requires a success code, the exact `clientOid` and a non-null `orderId`. Codes the documentation leaves ambiguous become `RESULT_UNKNOWN`, which blocks a resend until reconciliation. The account snapshot explicitly requires `assetMode=single_asset`, and automated tests reproduce both regressions.
 
-replay는 timestamp, mark/last, 명시 funding settlement, 수수료, 스프레드, 지연,
-depth 기반 부분/미체결, 미보호 노출과 동일 봉의 불리한 순서를 반영한다. 장기
-하락, 펌프 부재, probe만 체결된 뒤 급등, fake breakout, gap 붕괴, mark/last
-괴리, funding 급등·주기 변경, 거래 중단, server stop 거부, 청산 뒤 잔존 주문,
-ADL, 재시작 중복 주문의 합성 시나리오를 별도로 포함한다.
+Replay accounts for timestamps, mark and last prices, explicit funding settlements, fees, spreads, latency, depth-based partial fills and non-fills, unprotected exposure and adverse ordering within the same candle. It also includes separate synthetic scenarios for a long decline, no pump, a spike after only the probe filled, a fake breakout, a gap collapse, mark/last divergence, a funding spike or interval change, a trading halt, a rejected server stop, orders left after liquidation, ADL and a duplicate order on restart.
 
-## 미검증 및 live 차단 사유
+## Not verified, and why live is blocked
 
-공개/합성 replay에는 충분한 ARX 과거 mark·order book·funding·tier 변화·실제
-체결 기록이 없다. 따라서 cash, spot, no-pyramid, pyramid 비교 인터페이스가
-있어도 수익성, 강제청산 회피, 실행 가능성을 입증하지 않는다.
+The public and synthetic replays lack enough ARX history of mark prices, order books, funding, tier changes and real fills. So although there are interfaces for comparing cash, spot, no-pyramid and pyramid variants, they do not show profitability, avoidance of forced liquidation or executability.
 
-인증된 사용자 계정의 UTA/Classic 종류, isolated/basic 조합, one-way mode,
-자동 증거금 보충 차단, 전용 계정 분리, 외부 주문·포지션, 실제 position tier와
-liquidation price, TPSL 접수·조회·부분체결 coverage·reduce-only 경쟁 동작은
-확인하지 않았다. live transport와 private POST signer는 구현하지 않았다.
-`live.example.yaml`의 자본, 배율, 위험, funding/보유기간, 청산 완충, 비상 정리,
-종료일 및 승인 메타데이터도 모두 미승인/null이다. 그러므로 live는 의도적으로
-차단되어 있으며, 이번 개발 결과만으로 승격할 수 없다.
+For the authenticated account, none of the following was checked: whether it is UTA or Classic, the isolated/basic combination, one-way mode, blocking of automatic margin top-ups, separation into a dedicated account, external orders and positions, the real position tier and liquidation price, and how TPSL acceptance, lookup, partial-fill coverage and reduce-only races behave. The live transport and the private POST signer are not implemented. The capital, leverage, risk, funding and holding-period, liquidation-buffer, emergency-exit, end-date and approval metadata in `live.example.yaml` are all unapproved or null. Live is therefore blocked on purpose, and this development work alone cannot promote it.
