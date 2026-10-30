@@ -1,10 +1,10 @@
-# ARX special track 작업 규약
+# Special track guardrails
 
-- 이 디렉터리는 기존 A/B/C와 독립된 ARX USDT 선형 무기한 선물 연구 트랙이다. 기존 현물 포지션, 주문, 장부, 자본 풀, 정지 파일을 읽어 선물 상태로 변환하지 않는다.
-- 기본 모드는 `observe`, `live_enabled=false`다. 개발·테스트·공개 데이터 수집 중 인증 API 쓰기, 주문, 계정 모드·마진·레버리지 변경, 이체·입출금을 실행하지 않는다.
-- UTA v3와 Classic v2의 요청·응답 필드를 한 객체나 요청에 섞지 않는다. private capability를 실제 계정에서 대조하지 못하면 live 승격을 차단한다.
-- 금액·가격·수량·비율은 `Decimal`로 계산한다. float 입력을 암묵적으로 금액으로 바꾸지 않는다.
-- 실행 의도, 위험 승인, 주문 예약, 체결, 보호 주문, 수수료, 펀딩, 대사는 서로 다른 영속 이벤트로 기록한다. 주문 ACK를 체결 또는 보호 완료로 취급하지 않는다.
-- 신규·증액보다 위험 축소가 우선한다. 손실 중 증액, 보호선 하향, 마틴게일, 자동 증거금 보충, 교차마진 우회, 숏 반전을 구현하지 않는다.
-- 녹화·장부·실험 출력은 `TRADING_ROOM_HOME` 또는 레포 형제 `trading-room-state/track-special-arx/`에 저장한다. 실제 수집 결과를 소스 트리에 커밋하지 않는다.
-- 테스트는 합성/fixture와 실제 공개 데이터 증거를 구분한다. 실제 공개 조회 성공을 수익성·계정 기능·live 준비의 증거로 과장하지 않는다.
+- This directory is a separate research track for ARX USDT-linear perpetual futures. Do not read spot positions, orders, ledgers, capital pools or stop files from Tracks A, B or C and turn them into futures state.
+- The default mode is `observe` with `live_enabled=false`. During development, tests and public data collection, make no authenticated writes, no orders, no changes to account, margin or position settings and no transfers, deposits or withdrawals.
+- Do not mix UTA v3 and Classic v2 request or response fields in one object or request. If private capabilities cannot be checked against the real account, block promotion to live.
+- Compute amounts, prices, quantities and ratios with `Decimal`. Do not turn float inputs into money values implicitly.
+- Record intent, risk approval, order reservation, fill, protective order, fee, funding and reconciliation as separate persistent events. An order acknowledgement is not a fill or confirmed protection.
+- Reducing risk comes before opening or adding. Do not implement adding while in loss, lowering protection, martingale sizing, automatic margin top-ups, cross-margin workarounds or flipping to short. The paper accumulator's buys below the average price are an explicit owner exception for that strategy only (see `configs/README.md`).
+- Store recordings, ledgers and experiment output in `TRADING_ROOM_HOME` or the sibling `trading-room-state/track-special-arx/`. Do not commit real collection results to the source tree.
+- Keep synthetic and fixture tests apart from real public-data evidence. A successful public query is not evidence of profitability, account capability or live readiness.
